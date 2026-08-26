@@ -1,0 +1,29 @@
+[
+  {
+    "bookmaker": "Bet365",
+    "evento": "Serie A – Roma vs Empoli",
+    "sport": "calcio",
+    "esito": "Over 2.5",
+    "quota_decimale": 2.10,
+    "ev": 0.1634,
+    "timestamp": "2024-09-17T15:00:00Z"
+  },
+  {
+    "bookmaker": "Snai",
+    "evento": "Serie A – Inter vs Milan",
+    "sport": "calcio",
+    "esito": "1",
+    "quota_decimale": 1.90,
+    "ev": 0.3680,
+    "timestamp": "2024-09-16T20:45:00Z"
+  },
+  {
+    "bookmaker": "Bet365",
+    "evento": "Serie A – Atalanta vs Milan",
+    "sport": "calcio",
+    "esito": "1",
+    "quota_decimale": 2.00,
+    "ev": 0.1400,
+    "timestamp": "2024-09-16T20:45:00Z"
+  }
+]

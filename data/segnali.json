@@ -1,0 +1,134 @@
+[
+  {
+    "id": 1,
+    "data": "2026-08-20",
+    "sport": "calcio",
+    "evento": "Serie A – Roma vs Empoli",
+    "esito": "Over 2.5",
+    "quota": 2.10,
+    "ev": 0.1634,
+    "esito_finale": "won",
+    "roi": "+1.00u"
+  },
+  {
+    "id": 2,
+    "data": "2026-08-18",
+    "sport": "calcio",
+    "evento": "Serie A – Inter vs Milan",
+    "esito": "1",
+    "quota": 1.90,
+    "ev": 0.3680,
+    "esito_finale": "won",
+    "roi": "+1.00u"
+  },
+  {
+    "id": 3,
+    "data": "2026-08-15",
+    "sport": "calcio",
+    "evento": "Serie A – Inter vs Milan",
+    "esito": "X",
+    "quota": 3.60,
+    "ev": -0.3880,
+    "esito_finale": "lost",
+    "roi": "-1.00u"
+  },
+  {
+    "id": 4,
+    "data": "2026-07-30",
+    "sport": "calcio",
+    "evento": "Serie A – Atalanta vs Milan",
+    "esito": "1",
+    "quota": 2.00,
+    "ev": 0.1400,
+    "esito_finale": "won",
+    "roi": "+1.00u"
+  },
+  {
+    "id": 5,
+    "data": "2026-07-25",
+    "sport": "calcio",
+    "evento": "Serie A – Sassuolo vs Napoli",
+    "esito": "2",
+    "quota": 1.55,
+    "ev": -0.0080,
+    "esito_finale": "lost",
+    "roi": "-1.00u"
+  },
+  {
+    "id": 6,
+    "data": "2026-07-20",
+    "sport": "calcio",
+    "evento": "Serie A – Juventus vs Milan",
+    "esito": "X",
+    "quota": 3.40,
+    "ev": -0.1160,
+    "esito_finale": "lost",
+    "roi": "-1.00u"
+  },
+  {
+    "id": 7,
+    "data": "2026-07-10",
+    "sport": "calcio",
+    "evento": "Serie A – Juventus vs Milan",
+    "esito": "1",
+    "quota": 2.00,
+    "ev": -0.0400,
+    "esito_finale": "pending",
+    "roi": "0.00u"
+  },
+  {
+    "id": 8,
+    "data": "2026-06-15",
+    "sport": "basket",
+    "evento": "NBA – Lakers vs Warriors",
+    "esito": "Over 220.5",
+    "quota": 1.85,
+    "ev": 0.0925,
+    "esito_finale": "won",
+    "roi": "+1.00u"
+  },
+  {
+    "id": 9,
+    "data": "2026-05-30",
+    "sport": "tennis",
+    "evento": "US Open – Sinner vs Alcaraz",
+    "esito": "1",
+    "quota": 2.25,
+    "ev": 0.1250,
+    "esito_finale": "lost",
+    "roi": "-1.00u"
+  },
+  {
+    "id": 10,
+    "data": "2026-04-10",
+    "sport": "basket",
+    "evento": "Eurolega – Virtus vs Real Madrid",
+    "esito": "1",
+    "quota": 2.10,
+    "ev": 0.1550,
+    "esito_finale": "pending",
+    "roi": "0.00u"
+  },
+  {
+    "id": 11,
+    "data": "2026-03-05",
+    "sport": "tennis",
+    "evento": "Wimbledon – Djokovic vs Nadal",
+    "esito": "Under 3.5 set",
+    "quota": 1.70,
+    "ev": 0.0600,
+    "esito_finale": "won",
+    "roi": "+1.00u"
+  },
+  {
+    "id": 12,
+    "data": "2025-09-10",
+    "sport": "calcio",
+    "evento": "Serie A – Napoli vs Lazio",
+    "esito": "1",
+    "quota": 1.80,
+    "ev": 0.0800,
+    "esito_finale": "lost",
+    "roi": "-1.00u"
+  }
+]
