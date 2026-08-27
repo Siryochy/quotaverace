@@ -12,7 +12,6 @@ import json
 import logging
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 from odds_ingest import load_odds

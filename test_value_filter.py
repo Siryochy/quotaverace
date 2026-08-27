@@ -9,7 +9,6 @@ Verifica:
 - gestione DataFrame vuoti.
 """
 
-import pandas as pd
 import pytest
 
 from value_filter import compute_ev, filter_value_bets
