@@ -12,7 +12,7 @@ from tracker import init_db, log_signal, get_signals, get_performance_summary, a
 from odds_ingest import load_odds
 from value_filter import compute_ev, kelly_fraction, kelly_euro, filter_value_bets
 from surebet_scanner import scan_surebets
-from calendar import fetch_and_analyze_today, get_calendar_formatted, get_value_picks_for_schedina, format_schedina
+from fixture_engine import fetch_and_analyze_today, get_calendar_formatted, get_value_picks_for_schedina, format_schedina
 
 try:
     from odds_api import get_live_odds
