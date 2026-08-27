@@ -3,11 +3,21 @@ QuotaVerace – Fetch quote reali da The Odds API
 Registrati gratis: https://the-odds-api.com
 """
 import os
+import logging
 import requests
-from typing import List, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 API_KEY = os.getenv("ODDS_API_KEY", "")
 BASE_URL = "https://api.the-odds-api.com/v4"
+
+SPORTS_MAP = {
+    "Serie A": "soccer_italy_serie_a",
+    "Premier League": "soccer_epl",
+    "La Liga": "soccer_spain_la_liga",
+    "Bundesliga": "soccer_germany_bundesliga",
+    "Ligue 1": "soccer_france_ligue_one",
+}
 
 def fetch_odds(sport="soccer_italy_serie_a", regions="eu", markets="h2h,totals"):
     if not API_KEY:
@@ -23,10 +33,10 @@ def fetch_odds(sport="soccer_italy_serie_a", regions="eu", markets="h2h,totals")
     response.raise_for_status()
     return response.json()
 
-def normalize_odds(raw_data):
+def normalize_odds(raw_data, league_name="Serie A"):
     normalized = []
     for match in raw_data:
-        event_name = f"Serie A – {match['home_team']} vs {match['away_team']}"
+        event_name = f"{league_name} – {match['home_team']} vs {match['away_team']}"
         for bookmaker in match.get("bookmakers", []):
             bm_name = bookmaker["title"]
             for market in bookmaker.get("markets", []):
@@ -50,5 +60,16 @@ def normalize_odds(raw_data):
     return normalized
 
 def get_live_odds():
-    raw = fetch_odds()
-    return normalize_odds(raw)
+    if not API_KEY:
+        logger.warning("ODDS_API_KEY non impostata, uso quote statiche")
+        return []
+    all_odds = []
+    for league, sport_key in SPORTS_MAP.items():
+        try:
+            raw = fetch_odds(sport=sport_key)
+            normalized = normalize_odds(raw, league_name=league)
+            all_odds.extend(normalized)
+            logger.info(f"{league}: {len(normalized)} quote caricate")
+        except Exception as e:
+            logger.warning(f"Errore fetch {league}: {e}")
+    return all_odds

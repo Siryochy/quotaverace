@@ -331,14 +331,6 @@ async def cmd_storico_personale(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
-
-async def cmd_campionati(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = "🏆 *Campionati disponibili*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    for name, teams in ALL_LEAGUES.items():
-        msg += f"• *{name}*: {len(teams)} squadre\n"
-    msg += "\nEsempio: `/segnale Manchester City Arsenal` (Premier League)"
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     squadre = "\n".join(f"• {s}" for s in sorted(SERIE_A_2023_24.keys()))
     text = (
@@ -375,7 +367,6 @@ def main() -> None:
     application.add_handler(CommandHandler("segnale", cmd_segnale))
     application.add_handler(CommandHandler("value", cmd_value))
     application.add_handler(CommandHandler("storico_personale", cmd_storico_personale))
-    application.add_handler(CommandHandler("campionati", cmd_campionati))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("start", cmd_help))
 

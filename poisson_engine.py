@@ -191,3 +191,35 @@ def run_historical_tests() -> None:
 
 if __name__ == "__main__":
     run_historical_tests()
+
+# === Multi-league support ===
+try:
+    from leagues_data import ALL_LEAGUES, LEAGUE_AVGS
+except ImportError:
+    ALL_LEAGUES = {"Serie A": SERIE_A_2025_26}
+    LEAGUE_AVGS = {"Serie A": (AVG_HOME_GOALS, AVG_AWAY_GOALS)}
+
+def _find_team_league(team_name):
+    for league, teams in ALL_LEAGUES.items():
+        if team_name in teams:
+            return league
+    return None
+
+def expected_goals(home_team: str, away_team: str):
+    home_league = _find_team_league(home_team)
+    away_league = _find_team_league(away_team)
+    if home_league is None:
+        raise ValueError(f"Squadra non trovata: {home_team}")
+    if away_league is None:
+        raise ValueError(f"Squadra non trovata: {away_team}")
+    
+    if home_league != away_league:
+        avg_hg, avg_ag = 1.50, 1.30
+    else:
+        avg_hg, avg_ag = LEAGUE_AVGS[home_league]
+    
+    home_data = ALL_LEAGUES[home_league][home_team]
+    away_data = ALL_LEAGUES[away_league][away_team]
+    lam_h = avg_hg * home_data["attack_home"] * away_data["defense_away"]
+    lam_a = avg_ag * away_data["attack_away"] * home_data["defense_home"]
+    return lam_h, lam_a
