@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from datetime import time
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -11,6 +12,7 @@ from tracker import init_db, log_signal, get_signals, get_performance_summary, a
 from odds_ingest import load_odds
 from value_filter import compute_ev, kelly_fraction, kelly_euro, filter_value_bets
 from surebet_scanner import scan_surebets
+from schedina import build_daily_card, format_schedina
 
 try:
     from odds_api import get_live_odds
@@ -265,7 +267,7 @@ async def cmd_campionati(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     add_subscriber(chat_id)
-    await update.message.reply_text("🔔 *Iscrizione attivata!*\nRiceverai una notifica quando esce un value bet con EV > 8%.\n\nUsa `/unsubscribe` per disiscriverti.", parse_mode="Markdown")
+    await update.message.reply_text("🔔 *Iscrizione attivata!*\nRiceverai notifiche value bet e la Schedina del Giorno alle 8:00.\n\nUsa `/unsubscribe` per disiscriverti.", parse_mode="Markdown")
 
 async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
@@ -277,8 +279,18 @@ async def cmd_checknow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await notify_job(context)
     await update.message.reply_text("✅ Controllo completato.", parse_mode="Markdown")
 
+async def cmd_schedina(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    bankroll = get_bankroll(chat_id)
+    await update.message.reply_text("📋 Analisi partite del giorno in corso...", parse_mode="Markdown")
+    picks, err = build_daily_card()
+    if err:
+        await update.message.reply_text(f"❌ {err}", parse_mode="Markdown")
+        return
+    text = format_schedina(picks, bankroll)
+    await update.message.reply_text(text, parse_mode="Markdown")
+
 async def notify_job(context: ContextTypes.DEFAULT_TYPE):
-    """Job automatico: controlla quote reali e notifica iscritti"""
     if not os.getenv("ODDS_API_KEY"):
         logger.info("ODDS_API_KEY non impostata, skip notifiche")
         return
@@ -313,9 +325,30 @@ async def notify_job(context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
                 except Exception as e:
                     logger.warning(f"Notifica fallita per {chat_id}: {e}")
-        logger.info(f"Notifiche inviate a {len(subscribers)} utenti per {len(value_signals[:3])} segnali")
+        logger.info(f"Notifiche inviate a {len(subscribers)} utenti")
     except Exception as e:
         logger.error(f"Errore job notifiche: {e}")
+
+async def morning_job(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Job mattutino: generazione schedina del giorno")
+    picks, err = build_daily_card()
+    if err:
+        logger.info(f"Schedina non generata: {err}")
+        return
+    if not picks:
+        logger.info("Nessuna schedina disponibile questa mattina")
+        return
+    subscribers = get_subscribers()
+    if not subscribers:
+        logger.info("Nessun iscritto per la schedina")
+        return
+    text = format_schedina(picks, 100.0)
+    for chat_id in subscribers:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"Invio schedina fallito per {chat_id}: {e}")
+    logger.info(f"Schedina del giorno inviata a {len(subscribers)} utenti")
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     squadre = "\n".join(f"• {s}" for s in sorted(_all_teams()))
@@ -323,23 +356,18 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📋 *Comandi QuotaVerace*\n\n"
         "`/test_segnale` – segnale demo Inter-Napoli\n"
         "`/segnale <casa> <trasferta>` – analisi Poisson + quote reali\n"
-        "   Esempio: `/segnale Roma Milan`\n"
-        "`/value` – value bet con EV > 5% e stake Kelly\n"
+        "`/value` – value bet con EV > 5%\n"
         "`/surebet` – scanner arbitraggi\n"
-        "`/storico_personale` – i tuoi segnali e performance\n"
-        "`/setbankroll <€>` – imposta bankroll per Kelly Criterion\n"
-        "`/campionati` – elenco campionati e squadre\n"
-        "`/subscribe` – attiva notifiche automatiche value bet\n"
-        "`/unsubscribe` – disattiva notifiche\n"
-        "`/checknow` – forza controllo quote reali ora\n\n"
-        "🏟 *Squadre disponibili (5 campionati):*\n"
+        "`/storico_personale` – cronologia segnali\n"
+        "`/setbankroll <€>` – imposta bankroll Kelly\n"
+        "`/campionati` – elenco 5 campionati\n"
+        "`/schedina` – genera schedina del giorno ora\n"
+        "`/subscribe` – attiva notifiche + schedina mattutina\n"
+        "`/unsubscribe` – disattiva tutto\n"
+        "`/checknow` – forza controllo quote\n\n"
+        "🏟 *Squadre disponibili:*\n"
         f"{squadre}\n\n"
-        "📖 Ogni segnale include:\n"
-        "• Expected goals (modello Poisson aggiornato)\n"
-        "• Probabilità 1X2, Over/Under, BTTS\n"
-        "• Quota reale da bookmaker (se disponibile)\n"
-        "• EV% calcolato\n"
-        "• *Kelly Criterion* per stake ottimale in €"
+        "📖 Ogni segnale include Poisson, EV% e Kelly Criterion in €"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -357,17 +385,18 @@ def main() -> None:
     application.add_handler(CommandHandler("storico_personale", cmd_storico_personale))
     application.add_handler(CommandHandler("setbankroll", cmd_setbankroll))
     application.add_handler(CommandHandler("campionati", cmd_campionati))
+    application.add_handler(CommandHandler("schedina", cmd_schedina))
     application.add_handler(CommandHandler("subscribe", cmd_subscribe))
     application.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     application.add_handler(CommandHandler("checknow", cmd_checknow))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("start", cmd_help))
 
-    # Job notifiche automatiche ogni 6 ore (21600 secondi)
     job_queue = application.job_queue
     if job_queue:
         job_queue.run_repeating(notify_job, interval=21600, first=300)
-        logger.info("Job notifiche schedulato ogni 6 ore")
+        job_queue.run_daily(morning_job, time=time(hour=6, minute=0), days=(0,1,2,3,4,5,6))
+        logger.info("Job schedulati: notifiche ogni 6h + schedina alle 8:00 ITA")
     else:
         logger.warning("JobQueue non disponibile")
 
