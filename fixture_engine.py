@@ -1,12 +1,12 @@
 import os
 import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 
 from odds_api import fetch_odds, SPORTS_MAP
 from leagues_data import ALL_LEAGUES
 from poisson_engine import expected_goals, prob_1x2, prob_over_under
-from value_filter import compute_ev, kelly_fraction, kelly_euro
+from value_filter import compute_ev, kelly_fraction, kelly_euro, is_sane
 from tracker import save_match, get_today_matches, save_analysis, get_analysis_for_match, clear_old_matches
 
 logger = logging.getLogger(__name__)
@@ -81,6 +81,7 @@ def fetch_and_analyze_today():
     tomorrow = (datetime.utcnow() + timedelta(hours=28)).strftime("%Y-%m-%dT%H:%M:%SZ")
     total_matches = 0
     value_count = 0
+    rejected_count = 0
     for league, sport_key in SPORTS_MAP.items():
         try:
             raw = fetch_odds(sport=sport_key, commence_time_from=today, commence_time_to=tomorrow)
@@ -94,17 +95,21 @@ def fetch_and_analyze_today():
                     continue
                 save_match(mid, league, home_db, away_db, match.get("commence_time", ""))
                 total_matches += 1
-                _analyze_match(mid, match, home_db, away_db, league)
+                res = _analyze_match(mid, match, home_db, away_db, league)
+                if res == "strong_value" or res == "value":
+                    value_count += 1
+                elif res == "rejected":
+                    rejected_count += 1
         except Exception as e:
             logger.warning(f"Errore calendario {league}: {e}")
-    logger.info(f"Calendario aggiornato: {total_matches} partite, {value_count} value")
+    logger.info(f"Calendario: {total_matches} partite | {value_count} value | {rejected_count} filtrate")
     return total_matches, value_count
 
 def _analyze_match(match_id, match, home_db, away_db, league):
     try:
         lam_h, lam_a = expected_goals(home_db, away_db)
     except Exception:
-        return
+        return "error"
     p1, px, p2 = prob_1x2(lam_h, lam_a)
     p_over, _ = prob_over_under(lam_h, lam_a)
     best = None
@@ -127,9 +132,23 @@ def _analyze_match(match_id, match, home_db, away_db, league):
                         ev = compute_ev(p_over, price)
                         if best is None or ev > best["ev"]:
                             best = {"ev": ev, "esito": f"Over 2.5", "quota": price, "bookmaker": bm["title"], "prob": p_over}
-    if best:
-        status = "strong_value" if best["ev"] > 0.08 else "value" if best["ev"] > 0.03 else "no_value"
-        save_analysis(match_id, lam_h, lam_a, p1, px, p2, p_over, best["ev"], best["esito"], best["quota"], best["bookmaker"], status)
+    if not best:
+        return "no_odds"
+    
+    sane, reason = is_sane(best["prob"], best["quota"], best["ev"])
+    if not sane:
+        status = "rejected"
+        # Log solo a livello debug per non sporcare la dashboard
+        logger.debug(f"FILTRATO: {home_db} vs {away_db} — {reason}")
+    elif best["ev"] > 0.08:
+        status = "strong_value"
+    elif best["ev"] > 0.03:
+        status = "value"
+    else:
+        status = "no_value"
+    
+    save_analysis(match_id, lam_h, lam_a, p1, px, p2, p_over, best["ev"], best["esito"], best["quota"], best["bookmaker"], status)
+    return status
 
 def get_calendar_formatted() -> str:
     rows = get_today_matches()
@@ -151,6 +170,8 @@ def get_calendar_formatted() -> str:
                 line = f"🔥 {time_str} {home} vs {away} → {best_esito} @ {best_quota:.2f} (EV {ev_txt})"
             elif status == "value":
                 line = f"🟡 {time_str} {home} vs {away} → {best_esito} @ {best_quota:.2f} (EV {ev_txt})"
+            elif status == "rejected":
+                line = f"❌ {time_str} {home} vs {away} → FILTRATO"
             else:
                 line = f"⚪ {time_str} {home} vs {away}"
         else:
@@ -195,18 +216,21 @@ def format_schedina(picks: List[Dict], bankroll: float = 100.0) -> str:
     msg += "⚠️ Gioca SEMPRE le singole. La multipla distrugge il valore.\n\n"
     total_stake = 0.0
     for i, p in enumerate(picks, 1):
-        kelly = kelly_fraction(p["ev"] + (1/p["quota"]), p["quota"])
-        stake = kelly_euro(bankroll, p["ev"] + (1/p["quota"]), p["quota"])
+        prob = p["ev"] + (1/p["quota"])
+        pro = get_pro_stake(bankroll, prob, p["quota"])
+        stake = pro["stake"]
         total_stake += stake
         msg += (
             f"*{i}. {p['evento']}*\n"
             f"   🎯 {p['esito']} @ {p['quota']:.2f} ({p['bookmaker']})\n"
-            f"   📈 EV: +{p['ev']*100:.1f}% | Stake: €{stake:.2f}\n\n"
+            f"   📈 EV: +{p['ev']*100:.1f}% | Stake: €{stake:.2f} ({pro['stake_pct_of_bankroll']:.1f}% bankroll)\n"
+            f"   🛡 Filtri: Kelly 1/4 | Cap 3% | EV 3-15% | Odds 1.50-5.00\n\n"
         )
-    msg += f"💵 *Investimento totale:* €{total_stake:.2f}\n"
+    msg += f"💵 *Investimento totale:* €{total_stake:.2f} ({(total_stake/bankroll*100):.1f}% bankroll)\n"
+    msg += f"💰 *Bankroll di riferimento:* €{bankroll:.2f}\n\n"
     if len(picks) >= 2:
         mq = 1.0
         for p in picks[:3]: mq *= p["quota"]
-        msg += f"\n🎲 *MULTIPLA DIVERTIMENTO* @ {mq:.2f} (max €2)"
-    msg += "\n\n📌 *Regola d'oro:* Le singole con Kelly battono la multipla nel lungo periodo."
+        msg += f"🎲 *MULTIPLA DIVERTIMENTO* @ {mq:.2f} (max €2 — NON professionale)\n"
+    msg += "\n📌 *Regola d'oro:* Le singole con Kelly 1/4 battono la multipla nel lungo periodo."
     return msg
