@@ -1,6 +1,5 @@
 import json
 import logging
-import math
 import os
 
 from telegram import Update
