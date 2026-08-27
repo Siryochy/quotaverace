@@ -1,7 +1,3 @@
-"""
-QuotaVerace – Fetch quote reali da The Odds API
-Registrati gratis: https://the-odds-api.com
-"""
 import os
 import logging
 import requests
