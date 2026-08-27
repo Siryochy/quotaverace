@@ -1,4 +1,4 @@
-"""Tracker SQLite per segnali"""
+"""Tracker SQLite per segnali e iscritti notifiche"""
 import sqlite3
 import os
 from datetime import datetime
@@ -19,7 +19,7 @@ class Signal:
         self.esito_finale = esito_finale
         self.profit = profit
 
-def init_db():
+def _get_conn():
     conn = sqlite3.connect(str(DB_PATH))
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS signals (
@@ -34,11 +34,17 @@ def init_db():
         esito_finale TEXT,
         profit REAL
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS subscribers (
+        chat_id INTEGER PRIMARY KEY
+    )''')
     conn.commit()
-    conn.close()
+    return conn
+
+def init_db():
+    _get_conn().close()
 
 def log_signal(chat_id, evento, esito, quota, probabilita, ev):
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = _get_conn()
     c = conn.cursor()
     c.execute('''INSERT INTO signals (chat_id, evento, esito, quota, probabilita, ev, timestamp, esito_finale, profit)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
@@ -47,7 +53,7 @@ def log_signal(chat_id, evento, esito, quota, probabilita, ev):
     conn.close()
 
 def get_signals(chat_id=None, limit=50):
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = _get_conn()
     c = conn.cursor()
     if chat_id:
         c.execute("SELECT * FROM signals WHERE chat_id = ? ORDER BY id DESC LIMIT ?", (chat_id, limit))
@@ -58,7 +64,7 @@ def get_signals(chat_id=None, limit=50):
     return [Signal(*row) for row in rows]
 
 def get_performance_summary(days=30):
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = _get_conn()
     c = conn.cursor()
     c.execute("SELECT COUNT(*), SUM(CASE WHEN esito_finale='won' THEN 1 ELSE 0 END), SUM(CASE WHEN esito_finale='lost' THEN 1 ELSE 0 END), SUM(profit) FROM signals WHERE esito_finale IS NOT NULL")
     row = c.fetchone()
@@ -66,3 +72,25 @@ def get_performance_summary(days=30):
     total, won, lost, profit = row if row else (0, 0, 0, 0.0)
     roi = (profit / total * 100) if total > 0 else 0.0
     return {"closed": total or 0, "won": won or 0, "lost": lost or 0, "net_profit": profit or 0.0, "roi": roi}
+
+def add_subscriber(chat_id):
+    conn = _get_conn()
+    c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO subscribers (chat_id) VALUES (?)', (chat_id,))
+    conn.commit()
+    conn.close()
+
+def remove_subscriber(chat_id):
+    conn = _get_conn()
+    c = conn.cursor()
+    c.execute('DELETE FROM subscribers WHERE chat_id = ?', (chat_id,))
+    conn.commit()
+    conn.close()
+
+def get_subscribers():
+    conn = _get_conn()
+    c = conn.cursor()
+    c.execute('SELECT chat_id FROM subscribers')
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in rows]

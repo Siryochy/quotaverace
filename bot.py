@@ -7,7 +7,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 from poisson_engine import expected_goals, prob_1x2, prob_over_under, prob_btts
 from leagues_data import ALL_LEAGUES
-from tracker import init_db, log_signal, get_signals, get_performance_summary
+from tracker import init_db, log_signal, get_signals, get_performance_summary, add_subscriber, remove_subscriber, get_subscribers
 from odds_ingest import load_odds
 from value_filter import compute_ev, kelly_fraction, kelly_euro, filter_value_bets
 from surebet_scanner import scan_surebets
@@ -262,6 +262,61 @@ async def cmd_campionati(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     msg += "\nEsempio: `/segnale Manchester City Arsenal` (Premier League)"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
+async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    add_subscriber(chat_id)
+    await update.message.reply_text("🔔 *Iscrizione attivata!*\nRiceverai una notifica quando esce un value bet con EV > 8%.\n\nUsa `/unsubscribe` per disiscriverti.", parse_mode="Markdown")
+
+async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    remove_subscriber(chat_id)
+    await update.message.reply_text("🔕 *Disiscrizione completata.*\nNon riceverai più notifiche automatiche.", parse_mode="Markdown")
+
+async def cmd_checknow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("🔍 Controllo quote reali in corso...", parse_mode="Markdown")
+    await notify_job(context)
+    await update.message.reply_text("✅ Controllo completato.", parse_mode="Markdown")
+
+async def notify_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job automatico: controlla quote reali e notifica iscritti"""
+    if not os.getenv("ODDS_API_KEY"):
+        logger.info("ODDS_API_KEY non impostata, skip notifiche")
+        return
+    if not LIVE_ODDS_AVAILABLE:
+        logger.warning("Modulo odds_api non disponibile")
+        return
+    try:
+        odds = get_live_odds()
+        if not odds:
+            logger.info("Nessuna quota reale disponibile")
+            return
+        value_signals = filter_value_bets(odds, ev_threshold=0.08)
+        if not value_signals:
+            logger.info("Nessun value bet con EV > 8% trovato")
+            return
+        subscribers = get_subscribers()
+        if not subscribers:
+            logger.info("Nessun iscritto alle notifiche")
+            return
+        for sig in value_signals[:3]:
+            ev_pct = sig["ev"] * 100
+            msg = (
+                f"🔔 *NOTIFICA VALUE BET*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🏟 {sig['evento']}\n"
+                f"🎯 {sig['esito']} @ {sig['quota_decimale']:.2f} ({sig['bookmaker']})\n"
+                f"📈 EV: +{ev_pct:.2f}%\n\n"
+                f"💡 Usa `/segnale` per l'analisi dettagliata"
+            )
+            for chat_id in subscribers:
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                except Exception as e:
+                    logger.warning(f"Notifica fallita per {chat_id}: {e}")
+        logger.info(f"Notifiche inviate a {len(subscribers)} utenti per {len(value_signals[:3])} segnali")
+    except Exception as e:
+        logger.error(f"Errore job notifiche: {e}")
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     squadre = "\n".join(f"• {s}" for s in sorted(_all_teams()))
     text = (
@@ -273,7 +328,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/surebet` – scanner arbitraggi\n"
         "`/storico_personale` – i tuoi segnali e performance\n"
         "`/setbankroll <€>` – imposta bankroll per Kelly Criterion\n"
-        "`/campionati` – elenco campionati e squadre\n\n"
+        "`/campionati` – elenco campionati e squadre\n"
+        "`/subscribe` – attiva notifiche automatiche value bet\n"
+        "`/unsubscribe` – disattiva notifiche\n"
+        "`/checknow` – forza controllo quote reali ora\n\n"
         "🏟 *Squadre disponibili (5 campionati):*\n"
         f"{squadre}\n\n"
         "📖 Ogni segnale include:\n"
@@ -299,8 +357,19 @@ def main() -> None:
     application.add_handler(CommandHandler("storico_personale", cmd_storico_personale))
     application.add_handler(CommandHandler("setbankroll", cmd_setbankroll))
     application.add_handler(CommandHandler("campionati", cmd_campionati))
+    application.add_handler(CommandHandler("subscribe", cmd_subscribe))
+    application.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
+    application.add_handler(CommandHandler("checknow", cmd_checknow))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("start", cmd_help))
+
+    # Job notifiche automatiche ogni 6 ore (21600 secondi)
+    job_queue = application.job_queue
+    if job_queue:
+        job_queue.run_repeating(notify_job, interval=21600, first=300)
+        logger.info("Job notifiche schedulato ogni 6 ore")
+    else:
+        logger.warning("JobQueue non disponibile")
 
     logger.info("QuotaVerace Bot avviato.")
     application.run_polling()
