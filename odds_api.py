@@ -15,7 +15,7 @@ SPORTS_MAP = {
     "Ligue 1": "soccer_france_ligue_one",
 }
 
-def fetch_odds(sport="soccer_italy_serie_a", regions="eu", markets="h2h,totals"):
+def fetch_odds(sport="soccer_italy_serie_a", regions="eu", markets="h2h,totals", commence_time_from=None, commence_time_to=None):
     if not API_KEY:
         raise ValueError("Imposta ODDS_API_KEY")
     url = f"{BASE_URL}/sports/{sport}/odds"
@@ -25,6 +25,10 @@ def fetch_odds(sport="soccer_italy_serie_a", regions="eu", markets="h2h,totals")
         "markets": markets,
         "oddsFormat": "decimal",
     }
+    if commence_time_from:
+        params["commenceTimeFrom"] = commence_time_from
+    if commence_time_to:
+        params["commenceTimeTo"] = commence_time_to
     response = requests.get(url, params=params, timeout=30)
     response.raise_for_status()
     return response.json()
@@ -33,6 +37,7 @@ def normalize_odds(raw_data, league_name="Serie A"):
     normalized = []
     for match in raw_data:
         event_name = f"{league_name} – {match['home_team']} vs {match['away_team']}"
+        commence = match.get("commence_time", "")
         for bookmaker in match.get("bookmakers", []):
             bm_name = bookmaker["title"]
             for market in bookmaker.get("markets", []):
@@ -52,6 +57,10 @@ def normalize_odds(raw_data, league_name="Serie A"):
                         "quota_decimale": quota,
                         "bookmaker": bm_name,
                         "probabilita": 0.0,
+                        "match_id": match.get("id", ""),
+                        "commence_time": commence,
+                        "home_team": match["home_team"],
+                        "away_team": match["away_team"],
                     })
     return normalized
 

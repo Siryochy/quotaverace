@@ -8,11 +8,11 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 from poisson_engine import expected_goals, prob_1x2, prob_over_under, prob_btts
 from leagues_data import ALL_LEAGUES
-from tracker import init_db, log_signal, get_signals, get_performance_summary, add_subscriber, remove_subscriber, get_subscribers
+from tracker import init_db, log_signal, get_signals, get_performance_summary, add_subscriber, remove_subscriber, get_subscribers, is_notified, mark_notified
 from odds_ingest import load_odds
 from value_filter import compute_ev, kelly_fraction, kelly_euro, filter_value_bets
 from surebet_scanner import scan_surebets
-from schedina import build_daily_card, format_schedina
+from calendar import fetch_and_analyze_today, get_calendar_formatted, get_value_picks_for_schedina, format_schedina
 
 try:
     from odds_api import get_live_odds
@@ -64,319 +64,220 @@ def format_segnale_pronto(home, away, lam_h, lam_a, quota_over=2.10, bookmaker="
     p1, px, p2 = prob_1x2(lam_h, lam_a)
     p_over, p_under = prob_over_under(lam_h, lam_a)
     p_btts = prob_btts(lam_h, lam_a)
-
     candidates = [
-        ("1", p1, f"Vittoria {home}", 2.0),
-        ("X", px, "Pareggio", 3.2),
-        ("2", p2, f"Vittoria {away}", 2.0),
-        ("Over 2.5", p_over, "Over 2.5 Gol", quota_over),
-        ("Under 2.5", p_under, "Under 2.5 Gol", 1.85),
-        ("BTTS", p_btts, "Gol Gol (BTTS)", 1.90),
+        ("1", p1, f"Vittoria {home}", 2.0), ("X", px, "Pareggio", 3.2),
+        ("2", p2, f"Vittoria {away}", 2.0), ("Over 2.5", p_over, "Over 2.5 Gol", quota_over),
+        ("Under 2.5", p_under, "Under 2.5 Gol", 1.85), ("BTTS", p_btts, "Gol Gol (BTTS)", 1.90),
     ]
-
     best = max(candidates, key=lambda x: compute_ev(x[1], x[3]))
-    best_code, best_prob, best_label, best_quota = best
-
+    _, best_prob, best_label, best_quota = best
     ev = compute_ev(best_prob, best_quota)
     ev_percent = ev * 100.0
     kelly = kelly_fraction(best_prob, best_quota)
     stake_euro = kelly_euro(bankroll, best_prob, best_quota)
-
-    if ev > 0.10:
-        valore_label = "🟢 *FORTE VALORE*"
-        raccomandazione = "✅ Raccomandato per la scommessa"
-    elif ev > 0.03:
-        valore_label = "🟡 *Valore positivo*"
-        raccomandazione = "⚠️ Valore marginale, valutare con cautela"
-    elif ev > 0:
-        valore_label = "🟠 *Valore debole*"
-        raccomandazione = "ℹ️ EV positivo ma rischio elevato — stake minimo"
-    else:
-        valore_label = "🔴 *Valore negativo*"
-        raccomandazione = "❌ NON raccomandato"
-
+    if ev > 0.10: valore_label, raccomandazione = "🟢 *FORTE VALORE*", "✅ Raccomandato"
+    elif ev > 0.03: valore_label, raccomandazione = "🟡 *Valore positivo*", "⚠️ Marginale"
+    elif ev > 0: valore_label, raccomandazione = "🟠 *Valore debole*", "ℹ️ Rischio elevato"
+    else: valore_label, raccomandazione = "🔴 *Valore negativo*", "❌ NON raccomandato"
     msg = (
-        f"📊 *SEGNALE PRONTO – {home} vs {away}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"⚽ *Expected Goals:*\n"
-        f"   {home}: {lam_h:.2f}\n"
-        f"   {away}: {lam_a:.2f}\n\n"
-        f"📈 *Probabilità modello:*\n"
-        f"   1: {p1*100:.1f}% | X: {px*100:.1f}% | 2: {p2*100:.1f}%\n"
-        f"   Over 2.5: {p_over*100:.1f}% | Under 2.5: {p_under*100:.1f}%\n"
-        f"   BTTS: {p_btts*100:.1f}%\n\n"
-        f"🎯 *SEGNALE RACCOMANDATO*\n"
-        f"   Esito: {best_label}\n"
-        f"   Bookmaker: {bookmaker}\n"
-        f"   Quota: {best_quota:.2f}\n"
-        f"   Probabilità: {best_prob*100:.1f}%\n"
-        f"   EV: {ev_percent:+.2f}%\n\n"
-        f"💰 *Kelly Criterion*\n"
-        f"   Bankroll: €{bankroll:.2f}\n"
-        f"   Frazione Kelly: {kelly*100:.1f}%\n"
-        f"   *Stake suggerito: €{stake_euro:.2f}*\n\n"
-        f"{valore_label}\n"
-        f"{raccomandazione}\n\n"
-        f"📅 *Data:* oggi"
+        f"📊 *SEGNALE PRONTO – {home} vs {away}*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⚽ *Expected Goals:*\n   {home}: {lam_h:.2f}\n   {away}: {lam_a:.2f}\n\n"
+        f"📈 *Probabilità:*\n   1: {p1*100:.1f}% | X: {px*100:.1f}% | 2: {p2*100:.1f}%\n"
+        f"   Over 2.5: {p_over*100:.1f}% | Under 2.5: {p_under*100:.1f}%\n   BTTS: {p_btts*100:.1f}%\n\n"
+        f"🎯 *SEGNALE:* {best_label}\n   Bookmaker: {bookmaker} | Quota: {best_quota:.2f}\n"
+        f"   EV: {ev_percent:+.2f}%\n\n💰 *Kelly:*\n   Bankroll: €{bankroll:.2f}\n"
+        f"   Frazione: {kelly*100:.1f}% | *Stake: €{stake_euro:.2f}*\n\n"
+        f"{valore_label}\n{raccomandazione}\n\n📅 *Data:* oggi"
     )
-    return msg + DISCLAIMER
-
-def format_value_bets(odds_data, bankroll=100.0):
-    value_signals = filter_value_bets(odds_data, ev_threshold=0.05)
-    if not value_signals:
-        return "📊 *Value Bet del giorno*\n\nNessun segnale con EV > 5% trovato oggi.\nProva con `/segnale <casa> <trasferta>` per analizzare una partita specifica." + DISCLAIMER
-
-    msg = "📊 *VALUE BET – Segnali con EV > 5%*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    for sig in value_signals[:5]:
-        ev_pct = sig["ev"] * 100
-        kelly = sig.get("kelly", 0)
-        stake = kelly_euro(bankroll, sig.get("probabilita", 0), sig["quota_decimale"])
-        msg += f"🏟 {sig['evento']}\n🎯 {sig['esito']} @ {sig['quota_decimale']:.2f} ({sig['bookmaker']})\n📈 EV: +{ev_pct:.2f}% | Kelly: {kelly*100:.1f}% | Stake: €{stake:.2f}\n\n"
-    msg += f"💰 Bankroll impostata: €{bankroll:.2f}"
-    return msg + DISCLAIMER
-
-def format_surebets(odds_data):
-    sures = scan_surebets(odds_data)
-    if not sures:
-        return "🔍 *Surebet Scanner*\n\nNessun arbitraggio trovato nei dati attuali.\nLe surebet sono rare e richiedono quote da bookmaker diversi in tempo reale." + DISCLAIMER
-    msg = "🔍 *SUREBET TROVATE*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    for s in sures:
-        msg += f"🏟 {s['evento']}\n📊 Tipo: {s['tipo']} | Margine: {s['margin']:.4f}\n💰 Profitto garantito: {s['profit_pct']:.2f}%\n🪙 Distribuzione stake: {json.dumps(s['stakes'], ensure_ascii=False)}\n\n"
     return msg + DISCLAIMER
 
 async def cmd_test_segnale(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    bankroll = get_bankroll(chat_id)
-    text = format_segnale_pronto("Inter", "Napoli", 1.85, 1.12, 2.10, "Bet365", bankroll)
+    text = format_segnale_pronto("Inter", "Napoli", 1.85, 1.12, 2.10, "Bet365", get_bankroll(chat_id))
     await update.message.reply_text(text, parse_mode="Markdown")
-    try:
-        log_signal(chat_id=chat_id, evento="Inter vs Napoli", esito="Over 2.5 Gol", quota=2.10, probabilita=0.55, ev=0.155)
-    except Exception as e:
-        logger.warning(f"Log segnale fallito: {e}")
 
 async def cmd_segnale(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args
     if len(args) < 2:
-        await update.message.reply_text("❌ *Errore:* specifica casa e trasferta.\nEsempio: `/segnale Roma Milan`", parse_mode="Markdown")
+        await update.message.reply_text("❌ Errore: specifica casa e trasferta.\nEsempio: `/segnale Roma Milan`", parse_mode="Markdown")
         return
-
     raw = " ".join(args)
     words = raw.split()
     home, away = raw, raw
     for i in range(1, len(words)):
-        h = " ".join(words[:i])
-        a = " ".join(words[i:])
+        h = " ".join(words[:i]); a = " ".join(words[i:])
         if h in _all_teams() and a in _all_teams():
-            home, away = h, a
-            break
-
+            home, away = h, a; break
     if home not in _all_teams() or away not in _all_teams():
-        await update.message.reply_text(f"❌ Squadra non trovata.\nHai scritto: *{home}* vs *{away}*\nUsa `/campionati` per vedere le squadre disponibili.", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ Squadra non trovata.\nUsa `/campionati` per la lista.", parse_mode="Markdown")
         return
-
     try:
         lam_h, lam_a = expected_goals(home, away)
         odds_data = get_odds_data()
         event_name = None
         for league in ALL_LEAGUES:
-            if home in ALL_LEAGUES[league]:
-                event_name = f"{league} – {home} vs {away}"
-                break
-
+            if home in ALL_LEAGUES[league]: event_name = f"{league} – {home} vs {away}"; break
         best_over = None
         if event_name:
             try:
-                best_over = max((o for o in odds_data if event_name.lower() in o.get("evento", "").lower() and "over" in o.get("esito", "").lower()), key=lambda x: x.get("quota_decimale", 0), default=None)
-            except:
-                pass
-
-        if best_over:
-            quota, bookmaker = best_over["quota_decimale"], best_over["bookmaker"]
-        else:
-            quota, bookmaker = 2.10, "Modello (quota stimata)"
-
-        chat_id = update.effective_chat.id
-        bankroll = get_bankroll(chat_id)
-        text = format_segnale_pronto(home, away, lam_h, lam_a, quota, bookmaker, bankroll)
+                best_over = max((o for o in odds_data if event_name.lower() in o.get("evento","").lower() and "over" in o.get("esito","").lower()), key=lambda x: x.get("quota_decimale",0), default=None)
+            except: pass
+        quota, bookmaker = (best_over["quota_decimale"], best_over["bookmaker"]) if best_over else (2.10, "Modello")
+        text = format_segnale_pronto(home, away, lam_h, lam_a, quota, bookmaker, get_bankroll(update.effective_chat.id))
         await update.message.reply_text(text, parse_mode="Markdown")
-
-        p1, px, p2 = prob_1x2(lam_h, lam_a)
-        p_over, p_under = prob_over_under(lam_h, lam_a)
-        p_btts = prob_btts(lam_h, lam_a)
-        candidates = [("1", p1, f"Vittoria {home}", 2.0), ("X", px, "Pareggio", 3.2), ("2", p2, f"Vittoria {away}", 2.0), ("Over 2.5", p_over, "Over 2.5 Gol", quota), ("Under 2.5", p_under, "Under 2.5 Gol", 1.85), ("BTTS", p_btts, "Gol Gol (BTTS)", 1.90)]
-        best = max(candidates, key=lambda x: compute_ev(x[1], x[3]))
-        best_code, best_prob, best_label, best_quota = best
-        try:
-            log_signal(chat_id=chat_id, evento=f"{home} vs {away}", esito=best_label, quota=best_quota, probabilita=best_prob, ev=compute_ev(best_prob, best_quota))
-        except Exception as e:
-            logger.warning(f"Log segnale fallito: {e}")
     except Exception as e:
-        logger.error(f"Errore calcolo segnale: {e}")
-        await update.message.reply_text("❌ Errore nel calcolo del segnale. Riprova più tardi.", parse_mode="Markdown")
+        logger.error(f"Errore segnale: {e}")
+        await update.message.reply_text("❌ Errore nel calcolo. Riprova.", parse_mode="Markdown")
 
 async def cmd_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    odds_data = get_odds_data()
-    chat_id = update.effective_chat.id
-    bankroll = get_bankroll(chat_id)
-    text = format_value_bets(odds_data, bankroll)
+    text = format_value_bets(get_odds_data(), get_bankroll(update.effective_chat.id))
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def cmd_surebet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    odds_data = get_odds_data()
-    text = format_surebets(odds_data)
+    text = format_surebets(get_odds_data())
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def cmd_storico_personale(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     signals = get_signals(chat_id=chat_id, limit=20)
     if not signals:
-        await update.message.reply_text("📭 Non hai ancora ricevuto segnali.\nUsa `/segnale <casa> <trasferta>` per iniziare.", parse_mode="Markdown")
-        return
-
+        await update.message.reply_text("📭 Nessun segnale ricevuto.", parse_mode="Markdown"); return
     msg = "📊 *I tuoi ultimi segnali*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
     for s in signals[:10]:
         status = "✅" if s.esito_finale == "won" else "❌" if s.esito_finale == "lost" else "⏳"
         profit = f" ({s.profit:+.2f}u)" if s.profit != 0 else ""
         msg += f"{status} {s.evento}\n   {s.esito} @ {s.quota:.2f} | EV {s.ev*100:+.1f}%{profit}\n\n"
-
     summary = get_performance_summary(days=30)
     if summary["closed"] > 0:
-        msg += f"📈 *Riepilogo 30 giorni*\n   Segnali: {summary['closed']} | Vinti: {summary['won']} | Persi: {summary['lost']}\n   Profitto: {summary['net_profit']:+.2f}u | ROI: {summary['roi']:.1f}%"
+        msg += f"📈 30gg: {summary['closed']} segnali | ROI: {summary['roi']:.1f}%"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def cmd_setbankroll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     args = context.args
     if not args:
-        await update.message.reply_text(f"💰 Bankroll attuale: €{get_bankroll(chat_id):.2f}\nUsa `/setbankroll 500` per impostare un nuovo bankroll.", parse_mode="Markdown")
-        return
+        await update.message.reply_text(f"💰 Bankroll: €{get_bankroll(chat_id):.2f}\nUsa `/setbankroll 500`", parse_mode="Markdown"); return
     try:
-        amount = float(args[0].replace(",", "."))
+        amount = float(args[0].replace(",","."))
         set_bankroll(chat_id, amount)
-        await update.message.reply_text(f"✅ Bankroll impostato a €{amount:.2f}", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Bankroll: €{amount:.2f}", parse_mode="Markdown")
     except ValueError:
-        await update.message.reply_text("❌ Inserisci un numero valido. Esempio: `/setbankroll 250`", parse_mode="Markdown")
+        await update.message.reply_text("❌ Numero non valido.", parse_mode="Markdown")
 
 async def cmd_campionati(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = "🏆 *Campionati disponibili*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    for name, teams in ALL_LEAGUES.items():
-        msg += f"• *{name}*: {len(teams)} squadre\n"
-    msg += "\nEsempio: `/segnale Manchester City Arsenal` (Premier League)"
+    for name, teams in ALL_LEAGUES.items(): msg += f"• *{name}*: {len(teams)} squadre\n"
+    msg += "\nEsempio: `/segnale Manchester City Arsenal`"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    add_subscriber(chat_id)
-    await update.message.reply_text("🔔 *Iscrizione attivata!*\nRiceverai notifiche value bet e la Schedina del Giorno alle 8:00.\n\nUsa `/unsubscribe` per disiscriverti.", parse_mode="Markdown")
+async def cmd_calendario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = get_calendar_formatted()
+    await update.message.reply_text(text, parse_mode="Markdown")
 
-async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    remove_subscriber(chat_id)
-    await update.message.reply_text("🔕 *Disiscrizione completata.*\nNon riceverai più notifiche automatiche.", parse_mode="Markdown")
-
-async def cmd_checknow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("🔍 Controllo quote reali in corso...", parse_mode="Markdown")
-    await notify_job(context)
-    await update.message.reply_text("✅ Controllo completato.", parse_mode="Markdown")
+async def cmd_analisi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("🔄 Aggiornamento calendario e analisi in corso...", parse_mode="Markdown")
+    total, _ = fetch_and_analyze_today()
+    text = get_calendar_formatted()
+    await update.message.reply_text(f"✅ Analizzate {total} partite.\n\n{text}", parse_mode="Markdown")
 
 async def cmd_schedina(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    bankroll = get_bankroll(chat_id)
-    await update.message.reply_text("📋 Analisi partite del giorno in corso...", parse_mode="Markdown")
-    picks, err = build_daily_card()
-    if err:
-        await update.message.reply_text(f"❌ {err}", parse_mode="Markdown")
-        return
-    text = format_schedina(picks, bankroll)
+    picks = get_value_picks_for_schedina()
+    text = format_schedina(picks, get_bankroll(chat_id))
     await update.message.reply_text(text, parse_mode="Markdown")
 
-async def notify_job(context: ContextTypes.DEFAULT_TYPE):
-    if not os.getenv("ODDS_API_KEY"):
-        logger.info("ODDS_API_KEY non impostata, skip notifiche")
-        return
-    if not LIVE_ODDS_AVAILABLE:
-        logger.warning("Modulo odds_api non disponibile")
-        return
-    try:
-        odds = get_live_odds()
-        if not odds:
-            logger.info("Nessuna quota reale disponibile")
-            return
-        value_signals = filter_value_bets(odds, ev_threshold=0.08)
-        if not value_signals:
-            logger.info("Nessun value bet con EV > 8% trovato")
-            return
-        subscribers = get_subscribers()
-        if not subscribers:
-            logger.info("Nessun iscritto alle notifiche")
-            return
-        for sig in value_signals[:3]:
-            ev_pct = sig["ev"] * 100
-            msg = (
-                f"🔔 *NOTIFICA VALUE BET*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"🏟 {sig['evento']}\n"
-                f"🎯 {sig['esito']} @ {sig['quota_decimale']:.2f} ({sig['bookmaker']})\n"
-                f"📈 EV: +{ev_pct:.2f}%\n\n"
-                f"💡 Usa `/segnale` per l'analisi dettagliata"
-            )
-            for chat_id in subscribers:
-                try:
-                    await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                except Exception as e:
-                    logger.warning(f"Notifica fallita per {chat_id}: {e}")
-        logger.info(f"Notifiche inviate a {len(subscribers)} utenti")
-    except Exception as e:
-        logger.error(f"Errore job notifiche: {e}")
+async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    add_subscriber(update.effective_chat.id)
+    await update.message.reply_text("🔔 *Iscrizione attivata!*\nRiceverai:\n• Schedina mattutina alle 8:00\n• Notifiche value bet\n• Aggiornamenti pomeriggio e sera\n\n`/unsubscribe` per disiscriverti.", parse_mode="Markdown")
 
-async def morning_job(context: ContextTypes.DEFAULT_TYPE):
-    logger.info("Job mattutino: generazione schedina del giorno")
-    picks, err = build_daily_card()
-    if err:
-        logger.info(f"Schedina non generata: {err}")
-        return
-    if not picks:
-        logger.info("Nessuna schedina disponibile questa mattina")
-        return
-    subscribers = get_subscribers()
-    if not subscribers:
-        logger.info("Nessun iscritto per la schedina")
-        return
-    text = format_schedina(picks, 100.0)
-    for chat_id in subscribers:
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
-        except Exception as e:
-            logger.warning(f"Invio schedina fallito per {chat_id}: {e}")
-    logger.info(f"Schedina del giorno inviata a {len(subscribers)} utenti")
+async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    remove_subscriber(update.effective_chat.id)
+    await update.message.reply_text("🔕 Disiscrizione completata.", parse_mode="Markdown")
+
+async def cmd_checknow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("🔍 Controllo quote reali...", parse_mode="Markdown")
+    await notify_job(context)
+    await update.message.reply_text("✅ Completato.", parse_mode="Markdown")
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    squadre = "\n".join(f"• {s}" for s in sorted(_all_teams()))
     text = (
         "📋 *Comandi QuotaVerace*\n\n"
-        "`/test_segnale` – segnale demo Inter-Napoli\n"
-        "`/segnale <casa> <trasferta>` – analisi Poisson + quote reali\n"
-        "`/value` – value bet con EV > 5%\n"
+        "`/calendario` – partite del giorno con analisi\n"
+        "`/analisi` – aggiorna calendario e analisi ora\n"
+        "`/schedina` – schedina con le migliori singole\n"
+        "`/segnale <casa> <trasferta>` – analisi specifica\n"
+        "`/value` – value bet EV > 5%\n"
         "`/surebet` – scanner arbitraggi\n"
-        "`/storico_personale` – cronologia segnali\n"
-        "`/setbankroll <€>` – imposta bankroll Kelly\n"
-        "`/campionati` – elenco 5 campionati\n"
-        "`/schedina` – genera schedina del giorno ora\n"
-        "`/subscribe` – attiva notifiche + schedina mattutina\n"
-        "`/unsubscribe` – disattiva tutto\n"
-        "`/checknow` – forza controllo quote\n\n"
-        "🏟 *Squadre disponibili:*\n"
-        f"{squadre}\n\n"
-        "📖 Ogni segnale include Poisson, EV% e Kelly Criterion in €"
+        "`/setbankroll <€>` – imposta bankroll\n"
+        "`/subscribe` – attiva notifiche automatiche\n"
+        "`/campionati` – elenco squadre\n\n"
+        "📖 Ogni segnale: Poisson, EV%, Kelly Criterion in €"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
+def format_value_bets(odds_data, bankroll=100.0):
+    value_signals = filter_value_bets(odds_data, ev_threshold=0.05)
+    if not value_signals:
+        return "📊 *Value Bet*\n\nNessun segnale EV > 5%." + DISCLAIMER
+    msg = "📊 *VALUE BET – EV > 5%*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    for sig in value_signals[:5]:
+        ev_pct = sig["ev"] * 100
+        kelly = sig.get("kelly", 0)
+        stake = kelly_euro(bankroll, sig.get("probabilita", 0), sig["quota_decimale"])
+        msg += f"🏟 {sig['evento']}\n🎯 {sig['esito']} @ {sig['quota_decimale']:.2f} ({sig['bookmaker']})\n📈 EV: +{ev_pct:.2f}% | Stake: €{stake:.2f}\n\n"
+    msg += f"💰 Bankroll: €{bankroll:.2f}"
+    return msg + DISCLAIMER
+
+def format_surebets(odds_data):
+    sures = scan_surebets(odds_data)
+    if not sures: return "🔍 *Surebet*\n\nNessun arbitraggio trovato." + DISCLAIMER
+    msg = "🔍 *SUREBET*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    for s in sures: msg += f"🏟 {s['evento']}\n💰 Profitto: {s['profit_pct']:.2f}%\n\n"
+    return msg + DISCLAIMER
+
+async def notify_job(context: ContextTypes.DEFAULT_TYPE):
+    if not os.getenv("ODDS_API_KEY") or not LIVE_ODDS_AVAILABLE: return
+    try:
+        odds = get_live_odds()
+        if not odds: return
+        value_signals = filter_value_bets(odds, ev_threshold=0.08)
+        if not value_signals: return
+        subscribers = get_subscribers()
+        if not subscribers: return
+        today = __import__('datetime').datetime.now().strftime("%Y-%m-%d")
+        for sig in value_signals[:3]:
+            if is_notified(sig.get("match_id","unknown"), today): continue
+            ev_pct = sig["ev"] * 100
+            msg = f"🔔 *NOTIFICA VALUE BET*\n━━━━━━━━━━━━━━━━━━━━━━\n\n🏟 {sig['evento']}\n🎯 {sig['esito']} @ {sig['quota_decimale']:.2f} ({sig['bookmaker']})\n📈 EV: +{ev_pct:.2f}%\n\n💡 `/segnale` per dettagli"
+            for chat_id in subscribers:
+                try: await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                except: pass
+            mark_notified(sig.get("match_id","unknown"), today)
+    except Exception as e: logger.error(f"Errore notify: {e}")
+
+async def morning_job(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Job mattutino: calendario + schedina")
+    fetch_and_analyze_today()
+    picks = get_value_picks_for_schedina()
+    if not picks: return
+    text = format_schedina(picks, 100.0)
+    for chat_id in get_subscribers():
+        try: await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+        except: pass
+
+async def afternoon_job(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Job pomeridiano: ricontrollo")
+    fetch_and_analyze_today()
+    await notify_job(context)
+
+async def evening_job(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Job serale: ricontrollo")
+    fetch_and_analyze_today()
+    await notify_job(context)
+
 def main() -> None:
-    if not TOKEN:
-        raise ValueError("Token non configurato. Imposta QUOTAVERACE_BOT_TOKEN.")
-
+    if not TOKEN: raise ValueError("Token non configurato.")
     init_db()
-
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("test_segnale", cmd_test_segnale))
     application.add_handler(CommandHandler("segnale", cmd_segnale))
@@ -385,22 +286,22 @@ def main() -> None:
     application.add_handler(CommandHandler("storico_personale", cmd_storico_personale))
     application.add_handler(CommandHandler("setbankroll", cmd_setbankroll))
     application.add_handler(CommandHandler("campionati", cmd_campionati))
+    application.add_handler(CommandHandler("calendario", cmd_calendario))
+    application.add_handler(CommandHandler("analisi", cmd_analisi))
     application.add_handler(CommandHandler("schedina", cmd_schedina))
     application.add_handler(CommandHandler("subscribe", cmd_subscribe))
     application.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     application.add_handler(CommandHandler("checknow", cmd_checknow))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("start", cmd_help))
-
     job_queue = application.job_queue
     if job_queue:
-        job_queue.run_repeating(notify_job, interval=21600, first=300)
-        job_queue.run_daily(morning_job, time=time(hour=6, minute=0), days=(0,1,2,3,4,5,6))
-        logger.info("Job schedulati: notifiche ogni 6h + schedina alle 8:00 ITA")
-    else:
-        logger.warning("JobQueue non disponibile")
-
-    logger.info("QuotaVerace Bot avviato.")
+        job_queue.run_daily(morning_job, time=time(hour=6, minute=0))
+        job_queue.run_daily(afternoon_job, time=time(hour=14, minute=0))
+        job_queue.run_daily(evening_job, time=time(hour=20, minute=0))
+        logger.info("Job schedulati: 08:00 / 16:00 / 22:00 ITA")
+    else: logger.warning("JobQueue non disponibile")
+    logger.info("QuotaVerace avviato.")
     application.run_polling()
 
 if __name__ == "__main__":
