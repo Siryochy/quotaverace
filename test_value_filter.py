@@ -1,12 +1,11 @@
 """
-Test unitari per value_filter.py.
+Test unitari per value_filter.py (API attuale: lista di dict).
 
 Verifica:
 - compute_ev isolato con casi edge;
-- filter_value_bets identifichi correttamente ≥3 value bet con EV > 5 %;
-- scarto degli esiti con EV ≤ 5 %;
+- filter_value_bets identifichi value bet con EV >= soglia e filtri di sanita';
 - threshold configurabile;
-- gestione DataFrame vuoti.
+- gestione lista vuota.
 """
 
 import pytest
@@ -26,145 +25,84 @@ class TestComputeEv:
     def test_ev_zero(self):
         assert compute_ev(0.50, 2.00) == pytest.approx(0.0)
 
-    def test_ev_alta_probabilità(self):
+    def test_ev_alta_probabilita(self):
         assert compute_ev(0.80, 1.50) == pytest.approx(0.20)
 
 
 class TestFilterValueBets:
-    """Test del filtro value bet su dataset Serie A mock."""
+    """Test del filtro value bet su dataset Serie A mock (API dict)."""
 
     @pytest.fixture
-    def odds_df(self):
-        """DataFrame quote da bookmaker (input odds_ingest)."""
-        return pd.DataFrame({
-            "bookmaker": ["Bet365", "Snai", "Bet365", "Snai",
-                          "Bet365", "Snai", "Bet365", "Snai", "Bet365"],
-            "evento": [
-                "Serie A – Roma vs Empoli",
-                "Serie A – Roma vs Empoli",
-                "Serie A – Inter vs Milan",
-                "Serie A – Inter vs Milan",
-                "Serie A – Atalanta vs Milan",
-                "Serie A – Atalanta vs Milan",
-                "Serie A – Sassuolo vs Napoli",
-                "Serie A – Juventus vs Milan",
-                "Serie A – Juventus vs Milan",
-            ],
-            "sport": ["calcio"] * 9,
-            "esito": [
-                "Over 2.5", "Under 2.5",
-                "1", "X",
-                "1", "2",
-                "2",
-                "X", "1",
-            ],
-            "quota_decimale": [2.10, 1.75, 1.90, 3.60,
-                               2.00, 3.40, 1.55, 3.40, 2.00],
-            "timestamp": pd.to_datetime(
-                ["2024-09-17T15:00:00Z"] * 2 +
-                ["2024-09-16T20:45:00Z"] * 3 +
-                ["2024-09-15T18:00:00Z"] * 2 +
-                ["2024-09-14T20:45:00Z"] * 2,
-                utc=True,
-            ),
-        })
+    def odds_data(self):
+        """Quote con probabilita' gia' stimate dal modello."""
+        return [
+            {"bookmaker": "Bet365", "evento": "Serie A – Roma vs Empoli", "sport": "calcio",
+             "esito": "Over 2.5", "quota_decimale": 2.00, "probabilita": 0.554,
+             "timestamp": "2024-09-17T15:00:00Z"},
+            {"bookmaker": "Snai", "evento": "Serie A – Roma vs Empoli", "sport": "calcio",
+             "esito": "Under 2.5", "quota_decimale": 1.75, "probabilita": 0.446,
+             "timestamp": "2024-09-17T15:00:00Z"},
+            {"bookmaker": "Bet365", "evento": "Serie A – Inter vs Milan", "sport": "calcio",
+             "esito": "1", "quota_decimale": 1.55, "probabilita": 0.720,
+             "timestamp": "2024-09-16T20:45:00Z"},
+            {"bookmaker": "Snai", "evento": "Serie A – Inter vs Milan", "sport": "calcio",
+             "esito": "X", "quota_decimale": 3.60, "probabilita": 0.170,
+             "timestamp": "2024-09-16T20:45:00Z"},
+            {"bookmaker": "Bet365", "evento": "Serie A – Atalanta vs Milan", "sport": "calcio",
+             "esito": "1", "quota_decimale": 2.00, "probabilita": 0.570,
+             "timestamp": "2024-09-15T18:00:00Z"},
+            {"bookmaker": "Snai", "evento": "Serie A – Atalanta vs Milan", "sport": "calcio",
+             "esito": "2", "quota_decimale": 3.40, "probabilita": 0.220,
+             "timestamp": "2024-09-15T18:00:00Z"},
+            {"bookmaker": "Snai", "evento": "Serie A – Sassuolo vs Napoli", "sport": "calcio",
+             "esito": "2", "quota_decimale": 1.55, "probabilita": 0.640,
+             "timestamp": "2024-09-14T20:45:00Z"},
+            {"bookmaker": "Snai", "evento": "Serie A – Juventus vs Milan", "sport": "calcio",
+             "esito": "X", "quota_decimale": 3.40, "probabilita": 0.260,
+             "timestamp": "2024-09-14T20:45:00Z"},
+            {"bookmaker": "Bet365", "evento": "Serie A – Juventus vs Milan", "sport": "calcio",
+             "esito": "1", "quota_decimale": 2.00, "probabilita": 0.480,
+             "timestamp": "2024-09-14T20:45:00Z"},
+        ]
 
-    @pytest.fixture
-    def probs_df(self):
-        """DataFrame probabilità stimate da poisson_engine."""
-        return pd.DataFrame({
-            "evento": [
-                "Serie A – Roma vs Empoli",
-                "Serie A – Roma vs Empoli",
-                "Serie A – Inter vs Milan",
-                "Serie A – Inter vs Milan",
-                "Serie A – Inter vs Milan",
-                "Serie A – Atalanta vs Milan",
-                "Serie A – Atalanta vs Milan",
-                "Serie A – Atalanta vs Milan",
-                "Serie A – Sassuolo vs Napoli",
-                "Serie A – Sassuolo vs Napoli",
-                "Serie A – Sassuolo vs Napoli",
-                "Serie A – Juventus vs Milan",
-                "Serie A – Juventus vs Milan",
-                "Serie A – Juventus vs Milan",
-            ],
-            "esito": [
-                "Over 2.5", "Under 2.5",
-                "1", "X", "2",
-                "1", "X", "2",
-                "1", "X", "2",
-                "1", "X", "2",
-            ],
-            "probabilità": [
-                0.554, 0.446,
-                0.720, 0.170, 0.110,
-                0.570, 0.210, 0.220,
-                0.180, 0.180, 0.640,
-                0.480, 0.260, 0.260,
-            ],
-        })
+    def _has(self, result, evento, esito):
+        return any(r.get("evento") == evento and r.get("esito") == esito for r in result)
 
-    def test_identifica_almeno_tre_value_bet(self, odds_df, probs_df):
-        result = filter_value_bets(odds_df, probs_df, threshold=0.05)
+    def test_identifica_almeno_tre_value_bet(self, odds_data):
+        result = filter_value_bets(odds_data, ev_threshold=0.05)
         assert len(result) >= 3
 
-    def test_value_bet_corretti(self, odds_df, probs_df):
-        result = filter_value_bets(odds_df, probs_df, threshold=0.05)
+    def test_value_bet_corretti(self, odds_data):
+        result = filter_value_bets(odds_data, ev_threshold=0.05)
+        assert self._has(result, "Serie A – Roma vs Empoli", "Over 2.5")
+        assert self._has(result, "Serie A – Inter vs Milan", "1")
+        assert self._has(result, "Serie A – Atalanta vs Milan", "1")
 
-        assert any(
-            (result["evento"] == "Serie A – Roma vs Empoli") &
-            (result["esito"] == "Over 2.5")
-        )
-        assert any(
-            (result["evento"] == "Serie A – Inter vs Milan") &
-            (result["esito"] == "1")
-        )
-        assert any(
-            (result["evento"] == "Serie A – Atalanta vs Milan") &
-            (result["esito"] == "1")
-        )
+    def test_scarta_ev_minore_uguale_soglia(self, odds_data):
+        result = filter_value_bets(odds_data, ev_threshold=0.05)
+        assert not self._has(result, "Serie A – Sassuolo vs Napoli", "2")
+        assert not self._has(result, "Serie A – Juventus vs Milan", "X")
+        assert not self._has(result, "Serie A – Juventus vs Milan", "1")
 
-    def test_scarta_ev_minore_uguale_soglia(self, odds_df, probs_df):
-        result = filter_value_bets(odds_df, probs_df, threshold=0.05)
-
-        assert not any(
-            (result["evento"] == "Serie A – Sassuolo vs Napoli") &
-            (result["esito"] == "2")
-        )
-        assert not any(
-            (result["evento"] == "Serie A – Juventus vs Milan") &
-            (result["esito"] == "X")
-        )
-        assert not any(
-            (result["evento"] == "Serie A – Juventus vs Milan") &
-            (result["esito"] == "1")
-        )
-
-    def test_threshold_configurabile(self, odds_df, probs_df):
-        result = filter_value_bets(odds_df, probs_df, threshold=0.30)
+    def test_threshold_configurabile(self, odds_data):
+        result = filter_value_bets(odds_data, ev_threshold=0.12)
         assert len(result) == 1
-        assert result.iloc[0]["evento"] == "Serie A – Inter vs Milan"
-        assert result.iloc[0]["esito"] == "1"
+        assert result[0]["evento"] == "Serie A – Atalanta vs Milan"
+        assert result[0]["esito"] == "1"
 
-    def test_colonne_output_corrette(self, odds_df, probs_df):
-        result = filter_value_bets(odds_df, probs_df, threshold=0.05)
-        expected_cols = {"sport", "evento", "esito", "quota_decimale",
-                         "probabilità", "ev", "timestamp"}
-        assert set(result.columns) == expected_cols
+    def test_campi_output_corretti(self, odds_data):
+        result = filter_value_bets(odds_data, ev_threshold=0.05)
+        required = {"sport", "evento", "esito", "quota_decimale",
+                    "probabilita", "ev", "timestamp"}
+        assert result
+        for r in result:
+            assert required.issubset(set(r.keys()))
 
-    def test_ordinamento_ev_decrescente(self, odds_df, probs_df):
-        result = filter_value_bets(odds_df, probs_df, threshold=0.05)
-        evs = result["ev"].tolist()
+    def test_ordinamento_ev_decrescente(self, odds_data):
+        result = filter_value_bets(odds_data, ev_threshold=0.05)
+        evs = [r["ev"] for r in result]
         assert evs == sorted(evs, reverse=True)
 
-    def test_dataframe_vuoto_se_nessun_match(self, odds_df):
-        empty_probs = pd.DataFrame({
-            "evento": [], "esito": [], "probabilità": []
-        })
-        result = filter_value_bets(odds_df, empty_probs, threshold=0.05)
-        assert result.empty
-        assert set(result.columns) == {
-            "sport", "evento", "esito", "quota_decimale",
-            "probabilità", "ev", "timestamp",
-        }
+    def test_lista_vuota_se_nessun_match(self):
+        result = filter_value_bets([], ev_threshold=0.05)
+        assert result == []

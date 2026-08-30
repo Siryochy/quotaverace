@@ -126,7 +126,7 @@ async def cmd_segnale(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if h in _all_teams() and a in _all_teams():
             home, away = h, a; break
     if home not in _all_teams() or away not in _all_teams():
-        await update.message.reply_text(f"❌ Squadra non trovata.\nUsa `/campionati` per la lista.", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ Squadra non trovata: {home}.\nUsa `/campionati` per la lista.", parse_mode="Markdown")
         return
     try:
         lam_h, lam_a = expected_goals(home, away)

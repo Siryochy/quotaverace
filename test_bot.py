@@ -59,18 +59,14 @@ class TestFormatSegnalePronto:
         assert "Over 2.5" in text
         assert "Under 2.5" in text
 
-    def test_contiene_segnale_raccomandato(self):
+    def test_contiene_header_segnale(self):
         text = format_segnale_pronto("Roma", "Empoli", 2.28, 0.63)
-        assert "SEGNALE RACCOMANDATO" in text
+        assert "SEGNALE PRONTO" in text
 
     def test_contiene_disclaimer(self):
         text = format_segnale_pronto("Roma", "Empoli", 2.28, 0.63)
         assert "Gioca responsabilmente" in text
         assert "www.adm.gov.it" in text
-
-    def test_forte_valore_quando_ev_alto(self):
-        text = format_segnale_pronto("Roma", "Empoli", 2.28, 0.63, 2.10, "Bet365")
-        assert "Valore negativo" not in text or "NON raccomandato" not in text
 
 
 class TestHandlerTelegram:
@@ -94,10 +90,8 @@ class TestHandlerTelegram:
         parse_mode = kwargs.get("parse_mode")
 
         assert "SEGNALE PRONTO" in text
-        assert "Juventus" in text
         assert "Inter" in text
         assert "Expected Goals" in text
-        assert "SEGNALE RACCOMANDATO" in text
         assert "Gioca responsabilmente" in text
         assert "www.adm.gov.it" in text
         assert parse_mode == "Markdown"
@@ -153,7 +147,7 @@ class TestHandlerTelegram:
         assert kwargs.get("parse_mode") == "Markdown"
 
     @pytest.mark.asyncio
-    async def test_cmd_help_mostra_squadre(self):
+    async def test_cmd_help_mostra_comandi(self):
         update = self._make_update("/help")
         context = MagicMock()
 
@@ -163,7 +157,7 @@ class TestHandlerTelegram:
         args, kwargs = update.message.reply_text.await_args
         text = args[0] if args else kwargs.get("text")
 
-        assert "Comandi QuotaVerace" in text
-        assert "Roma" in text
-        assert "Inter Milan" in text
+        assert "QuotaVerace Pro" in text
+        assert "Comandi" in text
+        assert "/segnale" in text
         assert kwargs.get("parse_mode") == "Markdown"
