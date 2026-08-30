@@ -88,3 +88,18 @@ def fetch_scores(sport=None, days_from=2):
     cache_file.write_text(json.dumps({"ts": time.time(), "payload": payload}))
     logger.info(f"the-odds-api scores {sport}: {len(payload)} | crediti residui: {remaining}")
     return payload
+
+def get_quota():
+    """Crediti residui dall'ultimo scan (dalle cache, costo zero)."""
+    remaining = []
+    if CACHE_DIR.exists():
+        for f in CACHE_DIR.glob("toa_*.json"):
+            try:
+                d = json.loads(f.read_text())
+                if d.get("remaining") is not None:
+                    remaining.append(int(d["remaining"]))
+            except Exception:
+                continue
+    if not remaining:
+        return None
+    return min(remaining), len(remaining)

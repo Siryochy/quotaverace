@@ -241,6 +241,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/surebet` – scanner arbitraggi\n"
         "`/setbankroll <€>` – imposta bankroll\n"
         "`/subscribe` – attiva notifiche Pro\n"
+        "`/risultati` – statistiche reali dei segnali\n"
+        "`/quota` – crediti API rimanenti\n"
         "`/campionati` – elenco squadre\n\n"
         "🛡 *Filtri Pro attivi:*\n"
         "• EV: +3% to +15%\n"
@@ -351,6 +353,26 @@ def _update_results():
     compute_ratings()
     return updated, get_results_stats()
 
+
+async def cmd_quota(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from odds_api import get_quota
+    q = get_quota()
+    if q is None:
+        text = ("🔋 *QUOTA the-odds-api*\n\n"
+                "Nessuna scansione in cache.\n"
+                "Fai `/analisi` per aggiornare i crediti.")
+    else:
+        remaining, n = q
+        pct = remaining / 500 * 100
+        text = (
+            "🔋 *QUOTA the-odds-api*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"⚡ Crediti residui: **{remaining} / 500** ({pct:.0f}%)\n"
+            f"📊 Campionati in cache: {n}/8\n\n"
+            "📅 Reset: 1° del mese\n"
+            "💡 Aggiornato con l'ultimo `/analisi` (costo zero)."
+        )
+    await update.message.reply_text(text + DISCLAIMER, parse_mode="Markdown")
+
 async def cmd_risultati(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         from odds_api import SPORTS_MAP, fetch_scores
@@ -460,6 +482,7 @@ def main() -> None:
     application.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     application.add_handler(CommandHandler("checknow", cmd_checknow))
     application.add_handler(CommandHandler("risultati", cmd_risultati))
+    application.add_handler(CommandHandler("quota", cmd_quota))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("start", cmd_help))
     job_queue = application.job_queue
