@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from datetime import time
+from datetime import time, datetime
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -12,7 +12,8 @@ from tracker import init_db, log_signal, get_signals, get_performance_summary, a
 from odds_ingest import load_odds
 from value_filter import compute_ev, kelly_fraction, kelly_euro, filter_value_bets, is_sane, get_pro_stake
 from surebet_scanner import scan_surebets
-from fixture_engine import fetch_and_analyze_today, get_calendar_formatted, get_value_picks_for_schedina, format_schedina
+from fixture_engine import (fetch_and_analyze_today, get_calendar_formatted,
+                            get_value_picks_for_schedina, format_schedina, build_multipla_block)
 
 try:
     from odds_api import get_live_odds
@@ -208,6 +209,16 @@ async def cmd_schedina(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = format_schedina(picks, get_bankroll(chat_id))
     await update.message.reply_text(text, parse_mode="Markdown")
 
+async def cmd_multipla(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    picks = get_value_picks_for_schedina()
+    block = build_multipla_block(picks, get_bankroll(chat_id))
+    if not block:
+        await update.message.reply_text("🎲 *MULTIPLA PROLUNGATA*\n\nServono almeno 2 esiti con valore positivo.\nRiprova dopo `/analisi`.", parse_mode="Markdown")
+        return
+    prefix = "🎲 *MULTIPLA PROLUNGATA*\n🗓 " + datetime.now().strftime('%d/%m/%Y') + "\n"
+    await update.message.reply_text(prefix + block, parse_mode="Markdown")
+
 async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     add_subscriber(update.effective_chat.id)
     await update.message.reply_text(
@@ -236,6 +247,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/calendario` – partite del giorno con analisi\n"
         "`/analisi` – aggiorna calendario e analisi\n"
         "`/schedina` – schedina con filtri Pro\n"
+        "`/multipla` – multipla prolungata con risk management\n"
         "`/segnale <casa> <trasferta>` – analisi specifica\n"
         "`/value` – value bet filtrate\n"
         "`/surebet` – scanner arbitraggi\n"
@@ -478,6 +490,7 @@ def main() -> None:
     application.add_handler(CommandHandler("calendario", cmd_calendario))
     application.add_handler(CommandHandler("analisi", cmd_analisi))
     application.add_handler(CommandHandler("schedina", cmd_schedina))
+    application.add_handler(CommandHandler("multipla", cmd_multipla))
     application.add_handler(CommandHandler("subscribe", cmd_subscribe))
     application.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     application.add_handler(CommandHandler("checknow", cmd_checknow))

@@ -17,6 +17,41 @@ def compute_ev(prob: float, odds: float) -> float:
     return (prob * odds) - 1.0
 
 
+def combined_quota(odds: List[float]) -> float:
+    """Quota combinata di una multipla (prodotto delle quote)."""
+    prod = 1.0
+    for o in odds:
+        prod *= o
+    return prod
+
+
+def combined_probability(probs: List[float]) -> float:
+    """Probabilità congiunta di una multipla (prodotto, ipotesi indipendenza)."""
+    prod = 1.0
+    for p in probs:
+        prod *= p
+    return prod
+
+
+# Frazioni e cap dedicati alle multiple: più aggressivi sul numero di esiti
+# ma molto più prudenti sullo stake (varianza alta, una sola scommessa perde tutto)
+MULTIPLA_KELLY_FRACTION = 0.125   # 1/8 Kelly
+MULTIPLA_MAX_STAKE_PCT = 0.01     # cap 1% del bankroll
+MULTIPLA_MAX_EV = 0.05            # EV soglia entro cui una multipla ha senso
+
+
+def multipla_stake(bankroll: float, prob: float, odds: float) -> float:
+    """Stake in euro per una multipla: 1/8 Kelly con cap 1% del bankroll.
+
+    Piu' prudente delle singole (cap 3%) perche' una multipla concentra tutto
+    il rischio in un'unica scommessa dipendente da piu' eventi.
+    """
+    kelly = kelly_fraction(prob, odds, MULTIPLA_KELLY_FRACTION)
+    stake = bankroll * kelly
+    cap = bankroll * MULTIPLA_MAX_STAKE_PCT
+    return min(stake, cap)
+
+
 def kelly_fraction(prob: float, odds: float, fraction: float = KELLY_FRACTION) -> float:
     """Kelly Criterion frazionario (default 1/4 Kelly)"""
     if odds <= 1.0:

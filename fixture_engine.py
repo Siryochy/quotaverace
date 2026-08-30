@@ -6,7 +6,8 @@ from typing import List, Dict, Optional
 from odds_api import fetch_odds, SPORTS_MAP
 from leagues_data import ALL_LEAGUES
 from poisson_engine import expected_goals, prob_1x2, prob_over_under
-from value_filter import compute_ev, kelly_fraction, kelly_euro, is_sane
+from value_filter import (compute_ev, kelly_fraction, kelly_euro, is_sane,
+                           combined_quota, combined_probability, multipla_stake)
 from tracker import save_match, get_today_matches, save_analysis, get_analysis_for_match, clear_old_matches
 
 logger = logging.getLogger(__name__)
@@ -192,7 +193,7 @@ def get_value_picks_for_schedina() -> List[Dict]:
         c.execute('''SELECT m.league, m.home_team, m.away_team, a.best_esito, a.best_quota, a.best_bookmaker, a.best_ev, a.lam_h, a.lam_a
                      FROM matches m JOIN match_analysis a ON m.id = a.match_id
                      WHERE m.commence_time LIKE ? AND a.status IN ('value','strong_value')
-                     ORDER BY a.best_ev DESC LIMIT 5''', (f"{today}%",))
+                     ORDER BY a.best_ev DESC LIMIT 7''', (f"{today}%",))
         rows = c.fetchall()
         picks = []
         for r in rows:
@@ -230,9 +231,60 @@ def format_schedina(picks: List[Dict], bankroll: float = 100.0) -> str:
         )
     msg += f"💵 *Investimento totale:* €{total_stake:.2f} ({(total_stake/bankroll*100):.1f}% bankroll)\n"
     msg += f"💰 *Bankroll di riferimento:* €{bankroll:.2f}\n\n"
-    if len(picks) >= 2:
-        mq = 1.0
-        for p in picks[:3]: mq *= p["quota"]
-        msg += f"🎲 *MULTIPLA DIVERTIMENTO* @ {mq:.2f} (max €2 — NON professionale)\n"
-    msg += "\n📌 *Regola d'oro:* Le singole con Kelly 1/4 battono la multipla nel lungo periodo."
+    # --- Multipla prolungata (massimo 7 esiti) ---
+    msg += "\n" + build_multipla_block(picks, bankroll)
     return msg
+
+
+def build_multipla(picks: List[Dict], max_legs: int = 7) -> Optional[Dict]:
+    """Costruisce una multipla dai migliori esiti con quota e prob combinate.
+
+    La prob combinata usa il denominatore corretto (prob = ev + 1/quota),
+    stimata dall'EV di ciascun esito. Ritorna None se ci sono meno di 2 esiti.
+    """
+    if len(picks) < 2:
+        return None
+    legs = picks[:max_legs]
+    odds = [p["quota"] for p in legs]
+    probs = [p["ev"] + (1.0 / p["quota"]) for p in legs]
+    total_quota = combined_quota(odds)
+    total_prob = combined_probability(probs)
+    ev = compute_ev(total_prob, total_quota)
+    return {
+        "legs": legs,
+        "quota": total_quota,
+        "prob": total_prob,
+        "ev": ev,
+        "esiti": " + ".join(p["esito"] for p in legs),
+    }
+
+
+def build_multipla_block(picks: List[Dict], bankroll: float = 100.0) -> str:
+    """Formatta la sezione multipla prolungata con risk management automatico."""
+    mp = build_multipla(picks)
+    if not mp:
+        return ""
+    stake = multipla_stake(bankroll, mp["prob"], mp["quota"])
+    ev_txt = f"+{mp['ev']*100:.1f}%" if mp['ev'] > 0 else f"{mp['ev']*100:.1f}%"
+    if mp["ev"] >= 0.05:
+        verdict = "🟢 MULTIPLA ACCETTABILE (EV buono)"
+    elif mp["ev"] >= 0:
+        verdict = "🟡 MULTIPLA MARGINALE (EV ~0)"
+    else:
+        verdict = "🔴 MULTIPLA NEGATIVA — sconsigliata"
+    block = (
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🔗 *MULTIPLA PROLUNGATA* (massimo 7 esiti)\n"
+        "⚠️ La multipla aumenta il rischio: vince solo se passano TUTTI gli esiti.\n\n"
+    )
+    for i, p in enumerate(mp["legs"], 1):
+        block += f"{i}. {p['esito']} @ {p['quota']:.2f}\n"
+    block += (
+        "\n"
+        f"💯 Quota combinata: @{mp['quota']:.2f}\n"
+        f"📈 Probabilità congiunta: {mp['prob']*100:.1f}% | EV: {ev_txt}\n"
+        f"💰 Stake suggerito (1/8 Kelly, cap 1%): *€{stake:.2f}*\n\n"
+        f"🛡 {verdict}\n"
+        f"✅ Giocare solo se la combinazione resta sotto l'1% del bankroll."
+    )
+    return block
