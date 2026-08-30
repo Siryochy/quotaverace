@@ -3,6 +3,7 @@ Test unitari per surebet_scanner.py.
 """
 
 import pytest
+import pandas as pd
 
 from surebet_scanner import (
     calculate_inverse_sum,

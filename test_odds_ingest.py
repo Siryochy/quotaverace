@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 
 import pytest
+import pandas as pd
 
 from odds_ingest import load_odds
 
