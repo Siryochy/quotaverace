@@ -45,7 +45,7 @@ def set_bankroll(chat_id: int, amount: float) -> None:
     chat_bankrolls[chat_id] = max(10.0, amount)
 
 def get_odds_data():
-    if os.getenv("API_FOOTBALL_KEY") and LIVE_ODDS_AVAILABLE:
+    if os.getenv("ODDS_API_KEY") and LIVE_ODDS_AVAILABLE:
         try:
             odds = get_live_odds()
             logger.info(f"Quote reali caricate: {len(odds)} quote")
@@ -318,8 +318,52 @@ def format_surebets(odds_data):
     for s in sures: msg += f"🏟 {s['evento']}\n💰 Profitto: {s['profit_pct']:.2f}%\n\n"
     return msg + DISCLAIMER
 
+
+async def cmd_risultati(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        from odds_api import SPORTS_MAP, fetch_scores
+        from tracker import save_result, get_results_stats, get_leagues_with_signals
+        leagues = get_leagues_with_signals(days=3)
+        updated = 0
+        for lg in leagues:
+            sport = SPORTS_MAP.get(lg)
+            if not sport:
+                continue
+            for m in fetch_scores(sport, days_from=2):
+                if not m.get("id"):
+                    continue
+                sc = m.get("scores") or []
+                if len(sc) < 2:
+                    continue
+                try:
+                    sh = int(sc[0]["score"]); sa = int(sc[1]["score"])
+                except Exception:
+                    continue
+                save_result(m["id"], lg, m.get("home_team", ""), m.get("away_team", ""),
+                            sh, sa, m.get("last_update", ""))
+                updated += 1
+        stats = get_results_stats()
+        if stats["total"] == 0:
+            text = "📊 *RISULTATI TRACKING*\n\nNessuna scommessa chiusa ancora.\nI risultati si aggiornano da soli quando le partite finiscono."
+        else:
+            text = (
+                "📊 *RISULTATI TRACKING*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🎯 Scommesse chiuse: {stats['total']}\n"
+                f"✅ Vinte: {stats['won']} | ❌ Perse: {stats['lost']}\n"
+                f"📈 Hit rate: {stats['hit_rate']:.1f}%\n"
+                f"💰 P/L (unità da 1): {stats['net']:+.2f}\n"
+                f"📊 ROI: {stats['roi']:+.2f}%\n"
+                f"⚖ EV medio segnali: {stats['avg_ev']*100:+.2f}%"
+            )
+        if updated:
+            text += f"\n\n🔄 Aggiornate {updated} partite dai risultati."
+        await update.message.reply_text(text + DISCLAIMER, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Errore risultati: {e}")
+        await update.message.reply_text("❌ Errore nel recupero risultati.", parse_mode="Markdown")
+
 async def notify_job(context: ContextTypes.DEFAULT_TYPE):
-    if not os.getenv("API_FOOTBALL_KEY") or not LIVE_ODDS_AVAILABLE: return
+    if not os.getenv("ODDS_API_KEY") or not LIVE_ODDS_AVAILABLE: return
     try:
         odds = get_live_odds()
         if not odds: return
@@ -386,6 +430,7 @@ def main() -> None:
     application.add_handler(CommandHandler("subscribe", cmd_subscribe))
     application.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     application.add_handler(CommandHandler("checknow", cmd_checknow))
+    application.add_handler(CommandHandler("risultati", cmd_risultati))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("start", cmd_help))
     job_queue = application.job_queue

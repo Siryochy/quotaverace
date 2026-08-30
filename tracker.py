@@ -118,3 +118,59 @@ def clear_old_matches():
     conn = _get_conn(); c = conn.cursor()
     c.execute("DELETE FROM matches WHERE status='finished' OR commence_time < date('now','-2 days')")
     conn.commit(); conn.close()
+
+# --- Tracking risultati ---
+def _create_results_table(conn):
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS match_results (
+        match_id TEXT PRIMARY KEY, league TEXT, home_team TEXT, away_team TEXT,
+        score_home INTEGER, score_away INTEGER, result TEXT, settled_at TEXT)''')
+
+def save_result(match_id, league, home, away, sh, sa, settled_at):
+    conn = _get_conn(); _create_results_table(conn); c = conn.cursor()
+    res = "1" if sh > sa else ("2" if sh < sa else "X")
+    c.execute('''INSERT OR REPLACE INTO match_results VALUES (?,?,?,?,?,?,?,?)''',
+              (match_id, league, home, away, sh, sa, res, settled_at))
+    conn.commit(); conn.close()
+
+def get_leagues_with_signals(days=3):
+    conn = _get_conn(); c = conn.cursor()
+    c.execute('''SELECT DISTINCT m.league FROM matches m
+                 JOIN match_analysis a ON a.match_id = m.id
+                 WHERE a.status IN ('value','strong_value')
+                   AND m.commence_time >= date('now', ?)''', (f"-{days} days",))
+    rows = c.fetchall(); conn.close()
+    return [r[0] for r in rows]
+
+def get_results_stats():
+    conn = _get_conn(); _create_results_table(conn); c = conn.cursor()
+    c.execute('''SELECT r.home_team, r.away_team, r.score_home, r.score_away,
+                        a.best_esito, a.best_quota, a.best_ev, a.status
+                 FROM match_results r
+                 JOIN match_analysis a ON a.match_id = r.match_id''')
+    rows = c.fetchall(); conn.close()
+    bets = []
+    for home, away, sh, sa, esito, quota, ev, status in rows:
+        if status not in ("value", "strong_value") or not esito or not quota or quota <= 1.0:
+            continue
+        el = esito.lower().strip()
+        if "over" in el:
+            won = (sh + sa) >= 3
+        elif "under" in el:
+            won = (sh + sa) <= 2
+        elif el == (home or "").lower().strip():
+            won = sh > sa
+        elif el == (away or "").lower().strip():
+            won = sa > sh
+        else:
+            won = sh == sa
+        bets.append({"quota": quota, "won": won, "ev": ev or 0.0})
+    total = len(bets)
+    won_n = sum(1 for b in bets if b["won"])
+    net = sum((b["quota"] - 1) if b["won"] else -1 for b in bets)
+    return {
+        "total": total, "won": won_n, "lost": total - won_n,
+        "net": net, "roi": (net / total * 100) if total else 0.0,
+        "hit_rate": (won_n / total * 100) if total else 0.0,
+        "avg_ev": (sum(b["ev"] for b in bets) / total) if total else 0.0,
+    }

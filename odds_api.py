@@ -56,3 +56,35 @@ def fetch_odds(sport=None, commence_time_from=None, commence_time_to=None, **kwa
         logger.warning(f"Crediti esauriti ({remaining}), nessuna quota scaricata")
         return []
     return payload
+
+def fetch_scores(sport=None, days_from=2):
+    """Risultati finali (stessa chiave, ~1 credito/call, cache 24h)."""
+    if not sport:
+        return []
+    cache_file = CACHE_DIR / f"toa_scores_{sport}.json"
+    if cache_file.exists():
+        try:
+            data = json.loads(cache_file.read_text())
+            if time.time() - data.get("ts", 0) < ODDS_TTL:
+                return data.get("payload", [])
+        except Exception:
+            pass
+    key = _env("ODDS_API_KEY")
+    if not key:
+        return []
+    try:
+        r = requests.get(f"https://api.the-odds-api.com/v4/sports/{sport}/scores",
+                         params={"apiKey": key, "daysFrom": days_from}, timeout=30)
+        remaining = int(r.headers.get("x-requests-remaining", 999))
+        if r.status_code in (401, 429):
+            logger.warning(f"Scores bloccati ({r.status_code})")
+            return []
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as e:
+        logger.warning(f"Errore scores {sport}: {e}")
+        return []
+    CACHE_DIR.mkdir(exist_ok=True)
+    cache_file.write_text(json.dumps({"ts": time.time(), "payload": payload}))
+    logger.info(f"the-odds-api scores {sport}: {len(payload)} | crediti residui: {remaining}")
+    return payload
