@@ -93,6 +93,79 @@ def fetch_scores(sport=None, days_from=2):
     logger.info(f"the-odds-api scores {sport}: {len(payload)} | crediti residui: {remaining}")
     return payload
 
+def oddsapi_to_records(payload, sport="calcio"):
+    """Converte il payload v4 the-odds-api nel contratto normalizzato di odds_ingest.
+
+    Righe {bookmaker, evento, sport, esito, quota_decimale, timestamp}:
+    - h2h: outcome nome squadra -> "1"/"2", "Draw" -> "X";
+    - totals: "Over X.5"/"Under X.5" lasciati com' sono;
+    - evento = f"{home} vs {away}" (senza campionato: per il merging
+      con Betfair l'accoppiata squadre e' la chiave).
+    """
+    rows = []
+    for match in payload:
+        home = (match.get("home_team") or "").strip()
+        away = (match.get("away_team") or "").strip()
+        if not home or not away:
+            continue
+        commence = match.get("commence_time") or ""
+        for bm in match.get("bookmakers", []):
+            bookmaker = bm.get("title") or bm.get("key") or "unknown"
+            for mkt in bm.get("markets", []):
+                key = mkt.get("key")
+                for out in mkt.get("outcomes", []):
+                    name = (out.get("name") or "").strip()
+                    price = out.get("price")
+                    if not name or price is None or float(price) <= 1.0:
+                        continue
+                    if key == "h2h":
+                        if name == home:
+                            esito = "1"
+                        elif name == away:
+                            esito = "2"
+                        elif name.lower() in ("draw", "pareggio"):
+                            esito = "X"
+                        else:
+                            continue
+                    elif key == "totals":
+                        esito = name  # "Over 2.5" / "Under 2.5"
+                    else:
+                        continue
+                    rows.append({
+                        "bookmaker": bookmaker,
+                        "evento": f"{home} vs {away}",
+                        "sport": sport,
+                        "esito": esito,
+                        "quota_decimale": float(price),
+                        "timestamp": commence,
+                    })
+    return rows
+
+
+def get_live_odds():
+    """Quote reali oggi per tutte le leghe, come lista di righe normalizzate.
+
+    Usa la cache 24h per lega: dopo il job mattutino 6:00 (fetch_and_analyze
+    today) le chiamate successive costano zero crediti. Serve ODDS_API_KEY.
+    """
+    if not _env("ODDS_API_KEY"):
+        return []
+    from datetime import datetime, timedelta
+    frm = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    to = (datetime.utcnow() + timedelta(hours=28)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = []
+    for sport_key in SPORTS_MAP.values():
+        try:
+            payload = fetch_odds(sport=sport_key, commence_time_from=frm,
+                                 commence_time_to=to)
+        except Exception as e:
+            logger.warning(f"get_live_odds {sport_key}: {e}")
+            continue
+        if payload:
+            rows.extend(oddsapi_to_records(payload))
+    logger.info(f"get_live_odds: {len(rows)} quote normalizzate")
+    return rows
+
 def get_quota():
     """Crediti residui dall'ultimo scan (dalle cache, costo zero)."""
     remaining = []

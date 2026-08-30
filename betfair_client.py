@@ -306,3 +306,41 @@ def get_client(dry_run: bool | None = None) -> BetfairClient:
     if not _env("BETFAIR_APP_KEY"):
         return None
     return BetfairClient(dry_run=dry_run)
+
+
+def check_setup() -> dict:
+    """Diagnostica credenziali SENZA mai stampare i valori dei segreti.
+
+    Ritorna {"ok": bool, "vars": {nome: "ok"|"MANCANTE"|"non_trovato"}}.
+    """
+    required = ["BETFAIR_APP_KEY", "BETFAIR_USERNAME", "BETFAIR_PASSWORD",
+                "BETFAIR_CERT_PATH"]
+    optional = ["BETFAIR_CERT_KEY_PATH", "BETFAIR_DRY_RUN", "BETFAIR_LIVE"]
+    status: dict[str, str] = {}
+    for var in required + optional:
+        val = _env(var)
+        if var in required and not val:
+            status[var] = "MANCANTE"
+        elif var in ("BETFAIR_CERT_PATH", "BETFAIR_CERT_KEY_PATH") and val:
+            status[var] = "ok" if Path(val).exists() else "non_trovato"
+        elif val:
+            status[var] = "ok"
+        else:
+            status[var] = "default"
+    status["_dry_run_attivo"] = "si" if dry_run_enabled() else "NO (LIVE!)"
+    return {
+        "ok": all(status[v] == "ok" for v in required),
+        "vars": status,
+    }
+
+
+if __name__ == "__main__":
+    report = check_setup()
+    print("🔍 Diagnostica credenziali Betfair\n" + "─" * 40)
+    for var, st in report["vars"].items():
+        icon = "✅" if st in ("ok", "default", "si") else "❌"
+        print(f"{icon} {var}: {st}")
+    print("─" * 40)
+    print("✅ Configurazione completa" if report["ok"]
+          else "❌ Configura le variabili MANCANTE nel file .env (vedi DEPLOY.md §1bis)")
+    print(f"🔒 Modalità: {'DRY-RUN (nessun ordine reale)' if report['vars']['_dry_run_attivo'] == 'si' else '⚠️ LIVE — ordini reali abilitati'}")

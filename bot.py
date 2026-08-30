@@ -19,6 +19,7 @@ from fixture_engine import (fetch_and_analyze_today, get_calendar_formatted,
 from daily_scanner import scan_day, group_same_start
 from betfair_client import get_client as get_betfair_client
 from daily_scan_job import run_daily_scan
+from surebet_pipeline import run_surebet_alert, format_alert
 
 try:
     from odds_api import get_live_odds
@@ -652,6 +653,9 @@ async def betfair_scan_job(context: ContextTypes.DEFAULT_TYPE):
 
     Solo lettura, nessun ordine. Salta silenziosamente se le credenziali
     BETFAIR_* non sono configurate. Alimenta /api/scan (cache frontend).
+
+    Dopo il catalogo lancia la pipeline surebet su dati reali (catalogo
+    Betfair + quote the-odds-api in cache) e notifica gli iscritti.
     """
     if not os.getenv("BETFAIR_APP_KEY"):
         logger.info("betfair_scan_job: BETFAIR_APP_KEY assente, salto")
@@ -663,6 +667,23 @@ async def betfair_scan_job(context: ContextTypes.DEFAULT_TYPE):
                     f"ok ({res['events']} eventi)" if res else "saltata")
     except Exception as e:
         logger.error(f"Errore betfair_scan_job: {e}")
+        return
+    # pipeline surebet su dati reali (cache-only, zero rete aggiuntiva)
+    try:
+        alerts = await loop.run_in_executor(_scan_executor, run_surebet_alert)
+        if alerts:
+            text = format_alert(alerts)
+            subscribers = get_subscribers()
+            logger.info("surebet alert su dati reali: %d opportunita', %d iscritti",
+                        len(alerts), len(subscribers))
+            for chat_id in subscribers:
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=text,
+                                                   parse_mode="Markdown")
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.error(f"Errore pipeline surebet: {e}")
 
 async def history_sync_job(context: ContextTypes.DEFAULT_TYPE):
     """Sincronizzazione risultati storici (API-Football) + ricalcolo rating.

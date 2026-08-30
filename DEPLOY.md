@@ -47,6 +47,16 @@ Crea un **secondo servizio** nello stesso progetto Railway, con le stesse variab
 > Su Railway il filesystem è effimero: monta un **Volume** su `/app` (o usa un
 > database gestito) se vuoi che storico e risultati sopravvivano ai redeploy.
 
+> ⚠️ **Persistenza cache Betfair (bot vs API)**: il job 8:45 del bot scrive
+> `data/scan_<giorno>.json`, ma il servizio API è un **container separato**:
+> di default NON vede quel file e `GET /api/scan` risponde 503 `no_scan_cache`.
+> Due opzioni:
+> 1. **Volume condiviso**: in Railway allega lo stesso Volume su `/app` a
+>    ENTRAMBI i servizi (Settings → Volumes). Il bot scrive, l'API legge.
+> 2. **Job lato API**: aggiungi al servizio API un processo separato con
+>    start `python daily_scan_job.py` schedulato (Railway Cron) — l'API
+>    e il job condividono il suo Volume.
+
 ---
 
 ## 1bis. Integrazione Betfair (Exchange Italia)
