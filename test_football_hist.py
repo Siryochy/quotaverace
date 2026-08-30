@@ -15,7 +15,7 @@ def _tmp_db(monkeypatch, tmp_path):
     yield
 
 
-def _fixture(status="FT", home="Roma", away="Empoli", gh=2, ga=0, fxid="1"):
+def _fixture(status="FT", home="Roma", away="Empoli", gh=2, ga=0, fxid=1001):
     return {
         "fixture": {"id": fxid, "date": "2026-08-30T18:00:00Z",
                     "status": {"short": status}},
@@ -34,13 +34,10 @@ class _Resp:
         return self._payload
 
 
-def _stub_requests(monkeypatch, page_payloads):
-    """Installa uno stub di requests.get: page params['page'] -> payload."""
+def _stub_requests(monkeypatch, payload):
+    """Installa uno stub di requests.get che ritorna il payload dato."""
     def fake_get(url, params=None, headers=None, timeout=None):
-        page = (params or {}).get("page", 1)
-        p = page_payloads.get(page)
-        return _Resp({"results": len(p) if p else 0, "response": p or []})
-    import requests as real_requests
+        return _Resp({"results": len(payload), "response": payload})
     monkeypatch.setattr(fh.requests, "get", fake_get)
 
 
@@ -51,12 +48,26 @@ class TestMatchDbName:
     def test_squadra_assente(self):
         assert fh._match_db_name("Squadra Inventata", "Serie A") is None
 
+    def test_fallback_globale_squadra_promossa(self):
+        # Parma vive in Serie B nel DB, ma API la restituisce in Serie A
+        assert fh._match_db_name("Parma", "Serie A") == "Parma"
+
+    def test_alias_da_api_minuscolo(self):
+        assert fh._match_db_name("hellas verona", "Serie A") == "Verona"
+
 
 class TestParseFixture:
     def test_fixture_valida(self):
-        home, away, sh, sa, date = fh._parse_fixture(_fixture(), "Serie A")
+        mid, home, away, sh, sa, date = fh._parse_fixture(_fixture(), "Serie A")
         assert home == "Roma" and away == "Empoli"
         assert (sh, sa) == (2, 0)
+        assert mid is not None
+
+    def test_match_id_da_fixture_non_top_level(self):
+        fx = _fixture()
+        fx["id"] = None  # id top-level assente: deve prendere fixture.id
+        mid, *_ = fh._parse_fixture(fx, "Serie A")
+        assert mid == 1001
 
     def test_senza_goal_ritorna_none(self):
         fx = _fixture(); fx["goals"] = {"home": None, "away": None}
@@ -75,7 +86,7 @@ class TestSyncHistory:
 
     def test_salva_risultato(self, monkeypatch, tmp_path):
         monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
-        _stub_requests(monkeypatch, {1: [_fixture()]})  # Roma 2-0, FT
+        _stub_requests(monkeypatch, [_fixture()])  # Roma 2-0, FT
 
         res = fh.sync_history(seasons=1, leagues=["Serie A"])
         assert res["_total"] == 1
@@ -87,18 +98,17 @@ class TestSyncHistory:
 
     def test_ignora_partite_non_finite(self, monkeypatch):
         monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
-        _stub_requests(monkeypatch, {1: [_fixture(status="NS")]})
+        _stub_requests(monkeypatch, [_fixture(status="NS")])
         res = fh.sync_history(seasons=1, leagues=["Serie A"])
         assert res["_total"] == 0
         assert res.get("Serie A") == 0
 
-    def test_salva_piu_pagine(self, monkeypatch):
+    def test_salva_piu_partite_una_stagione(self, monkeypatch):
         monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
-        # pagina1 piena (20), pagina2 con 1, pagina3 vuota -> 21 salvate
-        page1 = [_fixture(fxid=str(i), gh=1, ga=0) for i in range(20)]
-        _stub_requests(monkeypatch, {1: page1, 2: [_fixture(fxid="A", gh=0, ga=1)], 3: []})
+        fixtures = [_fixture(fxid=str(i), gh=1, ga=0) for i in range(20)]
+        _stub_requests(monkeypatch, fixtures)
         res = fh.sync_history(seasons=1, leagues=["Serie A"])
-        assert res["_total"] == 21
+        assert res["_total"] == 20
 
 
 class TestRunSync:

@@ -55,13 +55,21 @@ def compute_ratings():
             (a["h_ga"] if side == "h" else a["a_ga"]).append((w, ga))
 
     def _rate(pairs, avg):
+        # il conteggio n e' il numero REALE di partite, non la somma dei pesi,
+        # cosi' il check MIN_MATCHES in get_rating riflette le partite giocate
+        # e non viene azzerato dal time-decay (halflife ~100gg).
         if not pairs:
             return None, 0.0
         wsum = sum(w for w, _ in pairs)
         if wsum <= 0:
             return None, 0.0
         obs = sum(w * g for w, g in pairs) / wsum
-        return (obs * wsum + avg * PRIOR_MATCHES) / (wsum + PRIOR_MATCHES), wsum
+        n = len(pairs)
+        # coeff = obs / avg: scala i gol osservati in un COEFFICIENTE attorno a
+        # 1 (molto prima del prior). expected_goals moltiplica: lam = avg*att*def,
+        # quindi un coeff 1.0 = forza media, >1 attacca di piu', <1 difende di piu'.
+        coeff = obs / avg if avg > 0 else 1.0
+        return (coeff * wsum + 1.0 * PRIOR_MATCHES) / (wsum + PRIOR_MATCHES), n
 
     c.execute("DELETE FROM team_ratings")
     for team, a in acc.items():
@@ -74,7 +82,7 @@ def compute_ratings():
             continue
         c.execute("""INSERT OR REPLACE INTO team_ratings VALUES (?,?,?,?,?,?,?,?,?)""",
                   (team, league, atk_h, def_h, atk_a, def_a,
-                   int(n_h), int(n_a), datetime.now().isoformat()))
+                   n_h, n_a, datetime.now().isoformat()))
     conn.commit(); conn.close()
     return len(acc)
 

@@ -9,6 +9,7 @@ Il free plan di API-Football concede 100 richieste/giorno su tutti gli endpoint.
 
 import logging
 import os
+import sqlite3
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -16,7 +17,6 @@ from typing import Dict, List, Optional, Tuple
 import requests
 
 from leagues_data import ALL_LEAGUES
-from tracker import save_result
 from rating_engine import compute_ratings
 
 logger = logging.getLogger(__name__)
@@ -77,31 +77,89 @@ def _api_get(path: str, params: Dict) -> Optional[dict]:
 
 
 def _match_db_name(api_name: str, league: str) -> Optional[str]:
-    """Allinea il nome squadra API-Football ai nomi nel database locale."""
-    league_teams = ALL_LEAGUES.get(league, {})
+    """Allinea il nome squadra API-Football ai nomi nel database locale.
+
+    Prima cerca nella lega indicata; se non trova (es. squadra promossa o
+    retrocessa che nel DB vive in un'altra lega), fa un fallback globale su
+    tutte le leghe con priorita' al match esatto.
+    """
     a = api_name.strip()
     al = a.lower()
-    for team in league_teams:
-        tl = team.lower()
-        # match esatto, o contenimento in un senso o nell'altro (preferisce equo)
-        if tl == al or tl in al or al in tl:
-            return team
+    if not al:
+        return None
+
+    def _search(teams):
+        # prima il match esatto, poi il contenimento bilaterale
+        for team in teams:
+            if team.lower() == al:
+                return team
+        for team in teams:
+            tl = team.lower()
+            if tl in al or al in tl:
+                return team
+        return None
+
+    found = _search(ALL_LEAGUES.get(league, {}))
+    if found:
+        return found
+    # fallback globale: esatto su tutte le leghe, poi contenimento
+    for lname, teams in ALL_LEAGUES.items():
+        for team in teams:
+            if team.lower() == al:
+                return team
+    for lname, teams in ALL_LEAGUES.items():
+        for team in teams:
+            tl = team.lower()
+            if tl in al or al in tl:
+                return team
     return None
 
 
-def fetch_fixtures(league_id: int, season: int, page: int = 1) -> List[dict]:
-    """Recupera le fixtures di una lega/season. Ritorna la lista fixture."""
-    body = _api_get("fixtures", {"league": league_id, "season": season, "page": page})
+def fetch_fixtures(league_id: int, season: int) -> List[dict]:
+    """Recupera le fixtures di una lega/season. Ritorna la lista fixture.
+
+    Nota: su /fixtures il parametro 'page' NON esiste (l'API risponde
+    'The Page field do not exist.'); l'endpoint restituisce tutte le partite
+    della stagione in una sola risposta.
+    """
+    body = _api_get("fixtures", {"league": league_id, "season": season})
     if not body or body.get("results", 0) == 0:
         return []
     return body.get("response", [])
 
 
+def _save_results_batch(rows: List[Tuple], conn=None) -> None:
+    """Inserisce in blocco nella tabella match_results (una transazione)."""
+    if not rows:
+        return
+    own_conn = conn is None
+    if own_conn:
+        from tracker import DB_PATH
+        conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS match_results (
+        match_id TEXT PRIMARY KEY, league TEXT, home_team TEXT, away_team TEXT,
+        score_home INTEGER, score_away INTEGER, result TEXT, settled_at TEXT)''')
+    # risultato 1/X/2 per risolvere il vincitore in /risultati
+    def _res(sh, sa):
+        return "1" if sh > sa else ("2" if sh < sa else "X")
+    c.executemany(
+        '''INSERT OR REPLACE INTO match_results VALUES (?,?,?,?,?,?,?,?)''',
+        [(mid, lg, h, a, sh, sa, _res(sh, sa), ts) for mid, lg, h, a, sh, sa, ts in rows])
+    conn.commit()
+    if own_conn:
+        conn.close()
+
+
 def _parse_fixture(fx: dict, league: str) -> Optional[Tuple]:
     """
-    Estrae (home, away, sh, sa, date) da una fixture finita.
+    Estrae (match_id, home, away, sh, sa, date) da una fixture finita.
     Ritorna None se non e' una vittoria regolare con punteggio valido.
     """
+    fixture = fx.get("fixture") or {}
+    match_id = fixture.get("id")
+    if match_id is None:
+        return None
     goals = fx.get("goals") or {}
     sh, sa = goals.get("home"), goals.get("away")
     if sh is None or sa is None:
@@ -116,14 +174,30 @@ def _parse_fixture(fx: dict, league: str) -> Optional[Tuple]:
     away = _match_db_name(away_api, league)
     if not home or not away or home == away:
         return None
-    date = (fx.get("fixture") or {}).get("date") or ""
-    return home, away, sh, sa, date
+    date = fixture.get("date") or ""
+    return match_id, home, away, sh, sa, date
+
+
+def _season_is_accessible(fx_body: Optional[dict]) -> bool:
+    """True se la stagione non e' bloccata dal free plan (nessun errore 'plan')."""
+    if not fx_body:
+        return False
+    errs = fx_body.get("errors")
+    if not errs:
+        return True
+    joined = " ".join(str(v).lower() for v in errs.values() if v)
+    return "free plans" not in joined
 
 
 def sync_history(seasons: int = DEFAULT_SEASONS, leagues: Optional[List[str]] = None) -> Dict:
     """
     Scarica i risultati storici e li salva in match_results (INSERT OR REPLACE),
-    poi ricalcola i rating. Ritorna un riepilogo per lega.
+    poi ricalcola i rating.
+
+    Il free plan di API-Football espone solo le stagioni dal 2022 al 2024; le
+    stagioni piu' recenti vengono saltate (l'API risponde con un errore 'plan')
+    e si scende finche' non si raccolgono 'seasons' stagioni accessibili.
+    Ritorna un riepilogo per lega.
     """
     if not _env("API_FOOTBALL_KEY"):
         return {"error": "API_FOOTBALL_KEY mancante"}
@@ -136,29 +210,32 @@ def sync_history(seasons: int = DEFAULT_SEASONS, leagues: Optional[List[str]] = 
         if not lid:
             continue
         done = 0
-        for season in range(current_year, current_year - seasons, -1):
-            # itera le pagine (free plan: 100 req/giorno -> max ~3-4 leghe x 2 season)
-            for page in (1, 2, 3):
-                fixtures = fetch_fixtures(lid, season, page)
-                if not fixtures:
-                    break
-                for fx in fixtures:
-                    status_short = (((fx.get("fixture") or {}).get("status") or {}).get("short")) or ""
-                    if status_short not in FINISHED_STATUSES:
-                        continue
-                    parsed = _parse_fixture(fx, league)
-                    if not parsed:
-                        continue
-                    home, away, sh, sa, date = parsed
-                    save_result(f"{league}-{season}-{fx.get('id')}",
-                                league, home, away, sh, sa, date)
-                    done += 1
-                # se la pagina era piena, prova quella dopo; altrimenti chiudi
-                if len(fixtures) < 20:
-                    break
+        collected = 0
+        year = current_year
+        rows = []
+        while collected < seasons and year >= 2018:
+            body = _api_get("fixtures", {"league": lid, "season": year})
+            if not _season_is_accessible(body):
+                logger.info(f"Stagione {year} non accessibile ({league}), salto")
+                year -= 1
+                continue
+            fixtures = (body or {}).get("response", []) or []
+            for fx in fixtures:
+                status_short = (((fx.get("fixture") or {}).get("status") or {}).get("short")) or ""
+                if status_short not in FINISHED_STATUSES:
+                    continue
+                parsed = _parse_fixture(fx, league)
+                if not parsed:
+                    continue
+                mid, home, away, sh, sa, date = parsed
+                rows.append((f"{league}-{mid}", league, home, away, sh, sa, date))
+                done += 1
+            collected += 1
+            year -= 1
+            time.sleep(1)  # gentilezza verso il limite di rate
+        _save_results_batch(rows)
         summary[league] = done
         total += done
-        time.sleep(1)  # gentilezza verso il limite di rate
     if total:
         try:
             compute_ratings()
