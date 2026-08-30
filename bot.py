@@ -400,8 +400,17 @@ async def cmd_risultati(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"📈 Hit rate: {stats['hit_rate']:.1f}%\n"
                 f"💰 P/L (unità da 1): {stats['net']:+.2f}\n"
                 f"📊 ROI: {stats['roi']:+.2f}%\n"
-                f"⚖ EV medio segnali: {stats['avg_ev']*100:+.2f}%"
+                f"⚖ EV medio segnali: {stats['avg_ev']*100:+.2f}%\n"
             )
+            clv = stats.get("avg_clv", 0.0)
+            clv_tracked = stats.get("clv_tracked", 0)
+            if clv_tracked:
+                clv_txt = f"+{clv*100:.2f}%" if clv >= 0 else f"{clv*100:.2f}%"
+                clv_line = (
+                    f"\n🎯 *Closing Line Value* (su {clv_tracked} segnali): {clv_txt}\n"
+                    f"   > 0 significa che battiamo la chiusura del mercato 👉 edge reale"
+                )
+                text += clv_line
         if updated:
             text += f"\n\n🔄 Aggiornate {updated} partite dai risultati."
         await update.message.reply_text(text + DISCLAIMER, parse_mode="Markdown")

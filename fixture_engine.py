@@ -8,7 +8,8 @@ from leagues_data import ALL_LEAGUES
 from poisson_engine import expected_goals, prob_1x2, prob_over_under
 from value_filter import (compute_ev, kelly_fraction, kelly_euro, is_sane,
                            combined_quota, combined_probability, multipla_stake)
-from tracker import save_match, get_today_matches, save_analysis, get_analysis_for_match, clear_old_matches
+from tracker import (save_match, get_today_matches, save_analysis, get_analysis_for_match,
+                      clear_old_matches, save_clv)
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,14 @@ def _analyze_match(match_id, match, home_db, away_db, league):
                                     "quota": price, "bookmaker": bm["title"], "prob": p_over}
     if not best:
         return "no_odds"
+
+    # CLV: la prima volta che vediamo il match il prezzo e' quello del segnale;
+    # le letture successive convergono verso la quota di chiusura del mercato.
+    signal_started = get_analysis_for_match(match_id) is None
+    try:
+        save_clv(match_id, str(best["esito"]), best["quota"], signal_started=signal_started)
+    except Exception as e:
+        logger.warning(f"Errore tracking CLV per {match_id}: {e}")
     
     sane, reason = is_sane(best["prob"], best["quota"], best["ev"])
     if not sane:

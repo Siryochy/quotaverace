@@ -31,6 +31,10 @@ def _get_conn():
         FOREIGN KEY (match_id) REFERENCES matches(id))''')
     c.execute('''CREATE TABLE IF NOT EXISTS notifications (
         match_id TEXT, date TEXT, PRIMARY KEY (match_id, date))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS clv_history (
+        match_id TEXT, esito TEXT,
+        signal_quota REAL, closing_quota REAL, updated_at TEXT,
+        PRIMARY KEY (match_id, esito))''')
     conn.commit()
     return conn
 
@@ -114,6 +118,26 @@ def mark_notified(match_id, date_str):
     c.execute("INSERT OR IGNORE INTO notifications VALUES (?,?)", (match_id, date_str))
     conn.commit(); conn.close()
 
+def save_clv(match_id, esito, quota, signal_started=False):
+    """Registra un campione CLV per una coppia match+esito.
+
+    - Prima analisi del match (signal_started=True): la quota corrente diventa la
+      quota del segnale, e viene usata anche come primo campione di chiusura.
+    - Analisi successive (signal_started=False): aggiorna la quota di chiusura,
+      che converge verso il prezzo di mercato finale (CLV).
+    """
+    conn = _get_conn(); c = conn.cursor()
+    now = datetime.now().isoformat()
+    c.execute("SELECT signal_quota, closing_quota FROM clv_history WHERE match_id=? AND esito=?", (match_id, esito))
+    row = c.fetchone()
+    if row is None or signal_started:
+        c.execute("INSERT OR REPLACE INTO clv_history VALUES (?,?,?,?,?)",
+                  (match_id, esito, quota, quota, now))
+    else:
+        c.execute("UPDATE clv_history SET closing_quota=?, updated_at=? WHERE match_id=? AND esito=?",
+                  (quota, now, match_id, esito))
+    conn.commit(); conn.close()
+
 def clear_old_matches():
     conn = _get_conn(); c = conn.cursor()
     c.execute("DELETE FROM matches WHERE status='finished' OR commence_time < date('now','-2 days')")
@@ -145,12 +169,24 @@ def get_leagues_with_signals(days=3):
 def get_results_stats():
     conn = _get_conn(); _create_results_table(conn); c = conn.cursor()
     c.execute('''SELECT r.home_team, r.away_team, r.score_home, r.score_away,
-                        a.best_esito, a.best_quota, a.best_ev, a.status
+                        a.best_esito, a.best_quota, a.best_ev, a.status, a.match_id
                  FROM match_results r
                  JOIN match_analysis a ON a.match_id = r.match_id''')
     rows = c.fetchall(); conn.close()
+    # Mappa CLV per (match_id, esito)
+    clv_map = {}
+    try:
+        conn2 = _get_conn(); c2 = conn2.cursor()
+        c2.execute("SELECT match_id, esito, signal_quota, closing_quota FROM clv_history")
+        for mid, esito, sig, clos in c2.fetchall():
+            if clos and clos > 0:
+                clv_map[(mid, (esito or "").lower().strip())] = (sig / clos) - 1.0
+        conn2.close()
+    except Exception:
+        pass
     bets = []
-    for home, away, sh, sa, esito, quota, ev, status in rows:
+    clvs = []
+    for home, away, sh, sa, esito, quota, ev, status, mid in rows:
         if status not in ("value", "strong_value") or not esito or not quota or quota <= 1.0:
             continue
         el = esito.lower().strip()
@@ -165,6 +201,9 @@ def get_results_stats():
         else:
             won = sh == sa
         bets.append({"quota": quota, "won": won, "ev": ev or 0.0})
+        clv = clv_map.get((mid, el))
+        if clv is not None:
+            clvs.append(clv)
     total = len(bets)
     won_n = sum(1 for b in bets if b["won"])
     net = sum((b["quota"] - 1) if b["won"] else -1 for b in bets)
@@ -173,4 +212,6 @@ def get_results_stats():
         "net": net, "roi": (net / total * 100) if total else 0.0,
         "hit_rate": (won_n / total * 100) if total else 0.0,
         "avg_ev": (sum(b["ev"] for b in bets) / total) if total else 0.0,
+        "clv_tracked": len(clvs),
+        "avg_clv": (sum(clvs) / len(clvs)) if clvs else 0.0,
     }
