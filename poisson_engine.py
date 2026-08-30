@@ -2,9 +2,13 @@ import math
 from typing import Dict, Tuple
 
 try:
-    from leagues_data import ALL_LEAGUES, LEAGUE_AVGS
+    from leagues_data import ALL_LEAGUES
 except ImportError:
     ALL_LEAGUES = {}
+
+try:
+    from leagues_data import LEAGUE_AVGS
+except ImportError:
     LEAGUE_AVGS = {}
 
 SERIE_A_2025_26 = ALL_LEAGUES.get("Serie A", {})
@@ -60,7 +64,7 @@ def expected_goals(home_team: str, away_team: str):
     if home_league != away_league:
         avg_hg, avg_ag = 1.50, 1.30
     else:
-        avg_hg, avg_ag = LEAGUE_AVGS[home_league]
+        avg_hg, avg_ag = LEAGUE_AVGS.get(home_league, (1.50, 1.30))
     
     home_data = ALL_LEAGUES[home_league][home_team]
     away_data = ALL_LEAGUES[away_league][away_team]
