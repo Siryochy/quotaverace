@@ -17,8 +17,7 @@ export default function Storico() {
   useEffect(() => {
     ;(async () => {
       try {
-        const base = API_BASE || '/api/backend'
-        const res = await fetch(`${base}/api/storico`)
+        const res = await fetch(`${API_BASE}/api/storico`)
         if (!res.ok) throw new Error('fallback demo')
         const j = await res.json()
         if (j.segnali?.length) { setSignals(j.segnali); setSummary(j.summary) }

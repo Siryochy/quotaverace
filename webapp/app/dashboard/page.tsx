@@ -22,8 +22,7 @@ export default function Dashboard() {
   useEffect(() => {
     ;(async () => {
       try {
-        const base = API_BASE || '/api/backend'
-        const res = await fetch(`${base}/api/dashboard`)
+        const res = await fetch(`${API_BASE}/api/dashboard`)
         if (!res.ok) throw new Error('fallback demo')
         setData(await res.json())
       } catch {

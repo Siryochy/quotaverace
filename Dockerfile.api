@@ -1,0 +1,15 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Installa dipendenze
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copia solo il codice necessario all'API
+COPY web_api.py tracker.py config.py odds_api.py ./
+
+# Railway inietta PORT; web_api.py lo legge automaticamente
+EXPOSE 8000
+
+CMD ["python", "web_api.py"]

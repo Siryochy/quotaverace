@@ -24,7 +24,8 @@ from tracker import _get_conn, _create_results_table, get_performance_summary, g
 
 logger = logging.getLogger("web_api")
 
-PORT = int(os.getenv("WEB_API_PORT", "8000"))
+# Railway injects PORT; fall back to WEB_API_PORT, then 8000 for local use.
+PORT = int(os.getenv("PORT") or os.getenv("WEB_API_PORT") or "8000")
 DB = Path(__file__).parent / "quotaverace.db"
 
 
