@@ -25,6 +25,59 @@ except Exception:
 
 from config import TOKEN, BANKROLL_DEFAULT
 
+# --- AI Commander (opsional: butuh GOOGLE_API_KEY di .env) ---
+try:
+    from ai_commander import AICommander
+    _AI_OK = True
+except Exception as _e:  # modul ada tapi dependensi/env hilang
+    _AI_OK = False
+    _AI_ERR = _e
+
+import asyncio
+import concurrent.futures
+_ai_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+_ai_commander = None  # dibuat lazy saat pertama dipakai
+
+
+def _get_ai_commander():
+    global _ai_commander
+    if _ai_commander is None:
+        _ai_commander = AICommander()
+    return _ai_commander
+
+
+async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/ai <pertanyaan bebas> — Comandante AI memilih tool mesin sendiri."""
+    if not _AI_OK:
+        await update.message.reply_text(
+            "🤖 AI Commander tidak aktif (butuh GOOGLE_API_KEY di .env).",
+            parse_mode="Markdown")
+        return
+    prompt = " ".join(context.args).strip()
+    if not prompt:
+        await update.message.reply_text(
+            "🤖 *AI Commander*\nTanya bebas, saya pilih tool mesinnya sendiri.\n"
+            "Contoh: `/ai analisa Inter vs Napoli` atau `/ai schedina hari ini`",
+            parse_mode="Markdown")
+        return
+    note = await update.message.reply_text("🤖 Comandante sedang menganalisa...")
+    loop = asyncio.get_running_loop()
+    try:
+        answer = await loop.run_in_executor(
+            _ai_executor, lambda: _get_ai_commander().run(prompt))
+    except Exception as e:
+        logger.exception("AI commander gagal")
+        answer = f"🤖 AI Commander gagal: {type(e).__name__}: {e}"
+    # Markdown Telegram è severo: se il testo contiene caratteri non validi
+    # (es. underscore in nomi squadra) mandiamo il testo grezzo.
+    try:
+        await note.edit_text(answer, parse_mode="Markdown")
+    except Exception:
+        try:
+            await note.edit_text(answer)
+        except Exception:
+            await update.message.reply_text(answer)
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -259,7 +312,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/backtest` – calibrazione EV atteso vs ROI realizzato\n"
         "`/sync` – sincronizza risultati storici (API-Football)\n"
         "`/quota` – crediti API rimanenti\n"
-        "`/campionati` – elenco squadre\n\n"
+        "`/campionati` – elenco squadre\n"
+        "`/ai <pertanyaan>` – Comandante AI (Gemini)\n\n"
         "🛡 *Filtri Pro attivi:*\n"
         "• EV: +3% to +15%\n"
         "• Odds: 1.50 to 5.00\n"
@@ -538,6 +592,11 @@ def main() -> None:
     application.add_handler(CommandHandler("quota", cmd_quota))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("start", cmd_help))
+    if _AI_OK:
+        application.add_handler(CommandHandler("ai", cmd_ai))
+        logger.info("AI Commander aktif: /ai <pertanyaan>")
+    else:
+        logger.warning("AI Commander non-aktif: %s", _AI_ERR)
     job_queue = application.job_queue
     if job_queue:
         job_queue.run_daily(morning_job, time=time(hour=6, minute=0))
