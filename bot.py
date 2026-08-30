@@ -324,12 +324,7 @@ async def evening_job(context: ContextTypes.DEFAULT_TYPE):
     await notify_job(context)
 
 def main() -> None:
-    if not TOKEN:
-        import os as _os
-        _names = [k for k in _os.environ if "TOKEN" in k.upper() or "BOT" in k.upper()]
-        print("DIAGNOSTIC env names:", _names, flush=True)
-        print("DIAGNOSTIC present:", "QUOTAVERACE_BOT_TOKEN" in _os.environ, "length:", len(_os.environ.get("QUOTAVERACE_BOT_TOKEN", "")), flush=True)
-        raise ValueError("Token non configurato.")
+    if not TOKEN: raise ValueError("Token non configurato.")
     init_db()
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("test_segnale", cmd_test_segnale))
