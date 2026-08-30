@@ -16,6 +16,8 @@ from backtest import run_backtest
 from football_hist import run_sync
 from fixture_engine import (fetch_and_analyze_today, get_calendar_formatted,
                             get_value_picks_for_schedina, format_schedina, build_multipla_block)
+from daily_scanner import scan_day, group_same_start
+from betfair_client import get_client as get_betfair_client
 
 try:
     from odds_api import get_live_odds
@@ -36,6 +38,7 @@ except Exception as _e:  # modul ada tapi dependensi/env hilang
 import asyncio
 import concurrent.futures
 _ai_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+_scan_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 _ai_commander = None  # dibuat lazy saat pertama dipakai
 
 
@@ -215,6 +218,52 @@ async def cmd_surebet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = format_surebets(get_odds_data())
     await update.message.reply_text(text, parse_mode="Markdown")
 
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/scan [YYYY-MM-DD] — scansione giornaliera prezzi back del Betfair Exchange.
+
+    Solo lettura: non piazza alcun ordine (livello 'descoperta').
+    """
+    args = context.args
+    target_date = args[0].strip() if args else None
+    if target_date:
+        try:
+            datetime.strptime(target_date, "%Y-%m-%d")
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Data non valida: usa formato YYYY-MM-DD.\nEsempio: `/scan 2026-09-01`",
+                parse_mode="Markdown")
+            return
+    client = get_betfair_client()
+    if client is None:
+        await update.message.reply_text(
+            "❌ *Betfair non configurato*\n\n"
+            "Aggiungi al file .env:\n"
+            "• `BETFAIR_APP_KEY`\n"
+            "• `BETFAIR_USERNAME`\n"
+            "• `BETFAIR_PASSWORD`\n"
+            "• `BETFAIR_CERT_PATH` (certificato SSL)\n\n"
+            "🔒 La scansione è solo lettura: nessun ordine.",
+            parse_mode="Markdown")
+        return
+    note = await update.message.reply_text("🔄 Scansione giornaliera Betfair in corso...")
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            _scan_executor, lambda: scan_day(client, target_date))
+    except Exception as e:
+        logger.exception("Errore scansione Betfair")
+        await note.edit_text(f"❌ Scansione fallita: {type(e).__name__}: {e}")
+        return
+    text = format_scan_result(result)
+    # Markdown Telegram è severo (underscore nei nomi squadra): fallback testuale
+    try:
+        await note.edit_text(text, parse_mode="Markdown")
+    except Exception:
+        try:
+            await note.edit_text(text)
+        except Exception:
+            await update.message.reply_text(text)
+
 async def cmd_storico_personale(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     signals = get_signals(chat_id=chat_id, limit=20)
@@ -306,6 +355,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/segnale <casa> <trasferta>` – analisi specifica\n"
         "`/value` – value bet filtrate\n"
         "`/surebet` – scanner arbitraggi\n"
+        "`/scan [data]` – scansione Betfair del giorno (solo lettura)\n"
         "`/setbankroll <€>` – imposta bankroll\n"
         "`/subscribe` – attiva notifiche Pro\n"
         "`/risultati` – statistiche reali dei segnali\n"
@@ -393,6 +443,50 @@ def format_surebets(odds_data):
     msg = "🔍 *SUREBET*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
     for s in sures: msg += f"🏟 {s['evento']}\n💰 Profitto: {s['profit_pct']:.2f}%\n\n"
     return msg + DISCLAIMER
+
+
+def format_scan_result(result: dict, max_events: int = 8,
+                       max_prices_per_event: int = 4, max_chars: int = 3800) -> str:
+    """Formatta l'output di scan_day per Telegram (compatto, entro il limite 4096)."""
+    opps = result.get("opportunities", [])
+    header = (
+        f"🔍 *SCANSIONE BETFAIR — {result.get('day', 'oggi')}*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🏟 Eventi: {result.get('events', 0)}\n"
+        f"🎯 Mercati: {result.get('markets', 0)}\n"
+        f"📋 Prezzi back: {len(opps)}\n\n"
+    )
+    if not opps:
+        return header + "Nessun prezzo disponibile." + DISCLAIMER
+
+    groups = group_same_start(opps)
+    unique_events = {o.get("event_name") or "?" for o in opps}
+    lines: list[str] = []
+    shown_events = 0
+    for start_key in sorted(groups.keys()):
+        if not start_key:
+            continue  # senza kickoff: fuori ordine, mostrati solo se resta spazio
+        group = groups[start_key]
+        for ev in sorted({o.get("event_name") or "?" for o in group}):
+            if shown_events >= max_events:
+                break
+            shown_events += 1
+            prices = sorted(
+                (o for o in group if o.get("event_name") == ev and o.get("price")),
+                key=lambda o: o.get("market_type") or "")
+            block = [f"🏟 *{ev}* — {start_key.replace('T', ' ')} UTC"]
+            for o in prices[:max_prices_per_event]:
+                block.append(
+                    f"   • {o.get('market_type', '?')} | "
+                    f"{o.get('selection_name', '?')} @ {o.get('price'):.2f}")
+            lines.append("\n".join(block))
+
+    text = header + ("\n\n".join(lines) if lines else "Nessun evento con prezzi.")
+    if shown_events < len(unique_events):
+        text += f"\n\n… e altri {len(unique_events) - shown_events} eventi."
+    if len(text) > max_chars:
+        text = text[:max_chars].rsplit("\n", 1)[0] + "\n…"
+    return text + DISCLAIMER
 
 
 
@@ -576,6 +670,7 @@ def main() -> None:
     application.add_handler(CommandHandler("segnale", cmd_segnale))
     application.add_handler(CommandHandler("value", cmd_value))
     application.add_handler(CommandHandler("surebet", cmd_surebet))
+    application.add_handler(CommandHandler("scan", cmd_scan))
     application.add_handler(CommandHandler("storico_personale", cmd_storico_personale))
     application.add_handler(CommandHandler("setbankroll", cmd_setbankroll))
     application.add_handler(CommandHandler("campionati", cmd_campionati))
