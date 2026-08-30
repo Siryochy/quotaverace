@@ -61,7 +61,15 @@ class TestStorico:
         assert s["segnali"][0]["evento"] == "Inter vs Napoli"
 
 
+class TestSchedina:
+    def test_schedina_vuoto(self):
+        s = web_api._schedina_json()
+        assert s["picks"] == []
+        assert s["multipla"] is None
+        assert s["bankroll"] == pytest.approx(100.0)
+
+
 class TestRoutes:
     def test_rotte_esistono(self):
-        for route in ("/api/health", "/api/dashboard", "/api/storico", "/api/value"):
+        for route in ("/api/health", "/api/dashboard", "/api/storico", "/api/value", "/api/schedina"):
             assert route in web_api.ROUTES

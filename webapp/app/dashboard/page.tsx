@@ -1,5 +1,6 @@
 'use client'
 import { useEffect, useState } from 'react'
+import Link from 'next/link'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || ''
 
@@ -35,7 +36,12 @@ export default function Dashboard() {
   const d = data || DEMO
   return (
     <main className="p-6 max-w-5xl mx-auto">
-      <h1 className="text-3xl font-bold mb-2">📊 Dashboard QuotaVerace</h1>
+      <div className="flex items-center justify-between mb-2">
+        <h1 className="text-3xl font-bold">📊 Dashboard QuotaVerace</h1>
+        <Link href="/schedina" className="text-sm bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg font-medium transition">
+          📋 Schedina
+        </Link>
+      </div>
       {usingDemo && <p className="text-amber-400 text-sm mb-8">⚠️ Backend non raggiungibile — dati dimostrativi.</p>}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
         <Card title="💰 Bankroll" value={`€${Number(d.bankroll).toFixed(2)}`} color="emerald" />

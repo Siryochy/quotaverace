@@ -7,6 +7,7 @@ Endpoint:
   GET /api/dashboard         -> KPIs (bankroll, ROI, segnali oggi) + ultime value bet
   GET /api/storico           -> storico segnali + riepilogo 30gg
   GET /api/value             -> migliori value bet filtrate
+  GET /api/schedina          -> schedina del giorno (picks + multipla)
 
 Uso su Railway: dopo aver deployato il bot, crea un secondo servizio con
   startCommand = "python web_api.py"
@@ -96,6 +97,47 @@ def _dashboard_json():
     }
 
 
+def _schedina_json():
+    """Schedina del giorno: picks con valore + multipla prolungata."""
+    try:
+        from fixture_engine import get_value_picks_for_schedina, build_multipla
+    except Exception as e:
+        logger.warning("fixture_engine non disponibile: %s", e)
+        return {"picks": [], "multipla": None, "bankroll": _bankroll()}
+
+    picks = get_value_picks_for_schedina()
+    out = []
+    for p in picks:
+        prob = p["ev"] + (1.0 / p["quota"]) if p["quota"] else 0.0
+        out.append({
+            "league": p["league"],
+            "home": p["home"],
+            "away": p["away"],
+            "evento": p["evento"],
+            "esito": p["esito"],
+            "quota": p["quota"],
+            "bookmaker": p["bookmaker"],
+            "ev": p["ev"],
+            "prob": prob,
+        })
+
+    mp = build_multipla(picks)
+    multipla = None
+    if mp:
+        multipla = {
+            "esiti": mp["esiti"],
+            "quota": mp["quota"],
+            "prob": mp["prob"],
+            "ev": mp["ev"],
+            "legs": [
+                {"esito": l["esito"], "quota": l["quota"], "evento": l["evento"]}
+                for l in mp["legs"]
+            ],
+        }
+
+    return {"picks": out, "multipla": multipla, "bankroll": _bankroll()}
+
+
 def _health_json():
     quota = None
     try:
@@ -112,6 +154,7 @@ ROUTES = {
     "/api/dashboard": _dashboard_json,
     "/api/storico": _storico_json,
     "/api/value": _odds_json,
+    "/api/schedina": _schedina_json,
 }
 
 

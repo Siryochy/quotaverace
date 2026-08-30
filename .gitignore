@@ -10,3 +10,5 @@ webapp/.next/
 _archivio/
 .env
 .env.*
+.vercel
+.env*

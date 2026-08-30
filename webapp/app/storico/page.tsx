@@ -1,5 +1,6 @@
 'use client'
 import { useEffect, useState } from 'react'
+import Link from 'next/link'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || ''
 
@@ -29,7 +30,12 @@ export default function Storico() {
 
   return (
     <main className="p-6 max-w-4xl mx-auto">
-      <h1 className="text-2xl font-bold mb-2">📜 Storico Segnali</h1>
+      <div className="flex items-center justify-between mb-2">
+        <h1 className="text-2xl font-bold">📜 Storico Segnali</h1>
+        <Link href="/schedina" className="text-sm bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg font-medium transition">
+          📋 Schedina
+        </Link>
+      </div>
       {usingDemo && <p className="text-amber-400 text-sm mb-6">⚠️ Backend non raggiungibile — dati dimostrativi.</p>}
       <div className="bg-gray-800 rounded-xl overflow-hidden">
         <table className="w-full text-left">
