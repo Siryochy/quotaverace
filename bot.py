@@ -498,6 +498,22 @@ async def results_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Errore results_job: {e}")
 
+async def history_sync_job(context: ContextTypes.DEFAULT_TYPE):
+    """Sincronizzazione risultati storici (API-Football) + ricalcolo rating.
+
+    Gira quotidianamente per mantenere aggiornati i dati che alimentano
+    rating dinamici e backtest. Se API_FOOTBALL_KEY non e' configurata non
+    fa nulla. Usa il default di 1 stagione per restare entro il rate-limit
+    del free plan (100 richieste/giorno)."""
+    if not os.getenv("API_FOOTBALL_KEY"):
+        logger.info("history_sync_job: API_FOOTBALL_KEY assente, salto")
+        return
+    try:
+        res = run_sync(seasons=1)
+        logger.info(f"history_sync_job: {res}")
+    except Exception as e:
+        logger.error(f"Errore history_sync_job: {e}")
+
 def main() -> None:
     if not TOKEN: raise ValueError("Token non configurato.")
     init_db()
@@ -528,7 +544,8 @@ def main() -> None:
         job_queue.run_daily(afternoon_job, time=time(hour=14, minute=0))
         job_queue.run_daily(evening_job, time=time(hour=20, minute=0))
         job_queue.run_daily(results_job, time=time(hour=21, minute=30))
-        logger.info("Job Pro schedulati: 08:00 / 16:00 / 22:00 / 23:30 ITA")
+        job_queue.run_daily(history_sync_job, time=time(hour=8, minute=30))
+        logger.info("Job Pro schedulati: 06:00 / 08:30 / 14:00 / 20:00 / 21:30 ITA")
     else: logger.warning("JobQueue non disponibile")
     logger.info("QuotaVerace Pro avviato.")
     application.run_polling()
