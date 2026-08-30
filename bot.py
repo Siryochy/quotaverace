@@ -424,7 +424,19 @@ async def afternoon_job(context: ContextTypes.DEFAULT_TYPE):
 async def evening_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Job serale: ricontrollo Pro")
     fetch_and_analyze_today()
+    try:
+        _update_results()
+    except Exception as e:
+        logger.error(f"Errore update risultati job: {e}")
     await notify_job(context)
+
+async def results_job(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Job risultati serali (23:30 ITA)")
+    try:
+        updated, stats = _update_results()
+        logger.info(f"Risultati aggiornati: {updated} partite")
+    except Exception as e:
+        logger.error(f"Errore results_job: {e}")
 
 def main() -> None:
     if not TOKEN: raise ValueError("Token non configurato.")
@@ -451,7 +463,8 @@ def main() -> None:
         job_queue.run_daily(morning_job, time=time(hour=6, minute=0))
         job_queue.run_daily(afternoon_job, time=time(hour=14, minute=0))
         job_queue.run_daily(evening_job, time=time(hour=20, minute=0))
-        logger.info("Job Pro schedulati: 08:00 / 16:00 / 22:00 ITA")
+        job_queue.run_daily(results_job, time=time(hour=21, minute=30))
+        logger.info("Job Pro schedulati: 08:00 / 16:00 / 22:00 / 23:30 ITA")
     else: logger.warning("JobQueue non disponibile")
     logger.info("QuotaVerace Pro avviato.")
     application.run_polling()
