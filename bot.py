@@ -319,32 +319,39 @@ def format_surebets(odds_data):
     return msg + DISCLAIMER
 
 
+
+def _update_results():
+    """Aggiorna risultati e rating dalle API. Ritorna (updated, stats)."""
+    from odds_api import SPORTS_MAP, fetch_scores
+    from tracker import save_result, get_results_stats, get_leagues_with_signals
+    from rating_engine import compute_ratings
+    leagues = get_leagues_with_signals(days=3)
+    updated = 0
+    for lg in leagues:
+        sport = SPORTS_MAP.get(lg)
+        if not sport:
+            continue
+        for m in fetch_scores(sport, days_from=2):
+            if not m.get("id"):
+                continue
+            sc = m.get("scores") or []
+            if len(sc) < 2:
+                continue
+            try:
+                sh = int(sc[0]["score"]); sa = int(sc[1]["score"])
+            except Exception:
+                continue
+            save_result(m["id"], lg, m.get("home_team", ""), m.get("away_team", ""),
+                        sh, sa, m.get("last_update", ""))
+            updated += 1
+    compute_ratings()
+    return updated, get_results_stats()
+
 async def cmd_risultati(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         from odds_api import SPORTS_MAP, fetch_scores
         from tracker import save_result, get_results_stats, get_leagues_with_signals
-        leagues = get_leagues_with_signals(days=3)
-        updated = 0
-        for lg in leagues:
-            sport = SPORTS_MAP.get(lg)
-            if not sport:
-                continue
-            for m in fetch_scores(sport, days_from=2):
-                if not m.get("id"):
-                    continue
-                sc = m.get("scores") or []
-                if len(sc) < 2:
-                    continue
-                try:
-                    sh = int(sc[0]["score"]); sa = int(sc[1]["score"])
-                except Exception:
-                    continue
-                save_result(m["id"], lg, m.get("home_team", ""), m.get("away_team", ""),
-                            sh, sa, m.get("last_update", ""))
-                updated += 1
-        from rating_engine import compute_ratings
-        compute_ratings()
-        stats = get_results_stats()
+        updated, stats = _update_results()
         if stats["total"] == 0:
             text = "📊 *RISULTATI TRACKING*\n\nNessuna scommessa chiusa ancora.\nI risultati si aggiornano da soli quando le partite finiscono."
         else:
@@ -408,6 +415,10 @@ async def morning_job(context: ContextTypes.DEFAULT_TYPE):
 async def afternoon_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Job pomeridiano: ricontrollo Pro")
     fetch_and_analyze_today()
+    try:
+        _update_results()
+    except Exception as e:
+        logger.error(f"Errore update risultati job: {e}")
     await notify_job(context)
 
 async def evening_job(context: ContextTypes.DEFAULT_TYPE):
