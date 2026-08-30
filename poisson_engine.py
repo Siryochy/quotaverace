@@ -22,30 +22,43 @@ def poisson_pmf(k: int, lam: float) -> float:
 def prob_score(home_goals: int, away_goals: int, lam_h: float, lam_a: float) -> float:
     return poisson_pmf(home_goals, lam_h) * poisson_pmf(away_goals, lam_a)
 
-def prob_1x2(lam_h: float, lam_a: float, max_goals: int = 10) -> Tuple[float, float, float]:
-    p1, px, p2 = 0.0, 0.0, 0.0
+
+RHO = -0.15  # Correzione Dixon-Coles (draw correlation)
+
+def _probs_matrix(lam_h: float, lam_a: float, max_goals: int = 10) -> Dict:
+    """Matrice punteggi con correzione Dixon-Coles, normalizzata a somma 1."""
+    total = 0.0
+    cells = {}
     for hg in range(max_goals + 1):
         for ag in range(max_goals + 1):
-            p = prob_score(hg, ag, lam_h, lam_a)
-            if hg > ag: p1 += p
-            elif hg == ag: px += p
-            else: p2 += p
+            p = poisson_pmf(hg, lam_h) * poisson_pmf(ag, lam_a)
+            if hg == 0 and ag == 0:
+                p *= (1 - lam_h * lam_a * RHO)
+            elif hg == 0 and ag == 1:
+                p *= (1 + lam_h * RHO)
+            elif hg == 1 and ag == 0:
+                p *= (1 + lam_a * RHO)
+            elif hg == 1 and ag == 1:
+                p *= (1 - RHO)
+            cells[(hg, ag)] = p
+            total += p
+    return {k: v / total for k, v in cells.items()}
+
+def prob_1x2(lam_h: float, lam_a: float, max_goals: int = 10) -> Tuple[float, float, float]:
+    m = _probs_matrix(lam_h, lam_a, max_goals)
+    p1 = sum(p for (hg, ag), p in m.items() if hg > ag)
+    px = sum(p for (hg, ag), p in m.items() if hg == ag)
+    p2 = sum(p for (hg, ag), p in m.items() if hg < ag)
     return p1, px, p2
 
 def prob_over_under(lam_h: float, lam_a: float, threshold: float = 2.5, max_goals: int = 10) -> Tuple[float, float]:
-    p_over = 0.0
-    for hg in range(max_goals + 1):
-        for ag in range(max_goals + 1):
-            if hg + ag > threshold:
-                p_over += prob_score(hg, ag, lam_h, lam_a)
+    m = _probs_matrix(lam_h, lam_a, max_goals)
+    p_over = sum(p for (hg, ag), p in m.items() if hg + ag > threshold)
     return p_over, 1.0 - p_over
 
 def prob_btts(lam_h: float, lam_a: float, max_goals: int = 10) -> float:
-    p = 0.0
-    for hg in range(1, max_goals + 1):
-        for ag in range(1, max_goals + 1):
-            p += prob_score(hg, ag, lam_h, lam_a)
-    return p
+    m = _probs_matrix(lam_h, lam_a, max_goals)
+    return sum(p for (hg, ag), p in m.items() if hg >= 1 and ag >= 1)
 
 def _find_team_league(team_name: str):
     for league, teams in ALL_LEAGUES.items():
