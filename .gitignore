@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 webapp/node_modules/
 webapp/.next/
+*.tsbuildinfo
 *.db
 *.tar.gz
 _archivio/
