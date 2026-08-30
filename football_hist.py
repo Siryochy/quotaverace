@@ -57,28 +57,46 @@ def _env(name: str) -> str:
     return ""
 
 
+MAX_RETRIES = 3        # tentativi per errore transitorio (rate-limit/rete)
+RETRY_BACKOFF = 3      # secondi tra i tentativi (x2 a ogni retry)
+
+
 def _api_get(path: str, params: Dict) -> Optional[dict]:
-    """GET con header x-apisports-key. Ritorna il body json (o None)."""
+    """GET con header x-apisports-key. Ritorna il body json (o None).
+
+    Gli errori transitori (429 rate-limit, 503, eccezioni di rete) vengono
+    ritentati con backoff esponenziale, cosi' una corsa lunga /sync non perde
+    intere leghe per un blocco temporaneo del free plan.
+    """
     key = _env("API_FOOTBALL_KEY")
     if not key:
         logger.warning("API_FOOTBALL_KEY mancante")
         return None
-    try:
-        r = requests.get(f"{BASE_URL}/{path}", headers={"x-apisports-key": key},
-                         params=params, timeout=30)
-        if r.status_code in (401, 403):
-            logger.warning(f"API-Football bloccata (codice {r.status_code}), key non valida o non attiva")
-            return None
-        if r.status_code in (429, 503):
-            # rate limit: attende e riprova una volta
-            time.sleep(2)
+    for attempt in range(MAX_RETRIES):
+        try:
             r = requests.get(f"{BASE_URL}/{path}", headers={"x-apisports-key": key},
                              params=params, timeout=30)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        logger.warning(f"Errore API-Football {path}: {e}")
-        return None
+            if r.status_code in (401, 403):
+                logger.warning(f"API-Football bloccata (codice {r.status_code}), key non valida o non attiva")
+                return None
+            if r.status_code in (429, 503):
+                wait = RETRY_BACKOFF * (2 ** attempt)
+                logger.info(f"Rate-limit API-Football ({r.status_code}), retry {attempt+1}/{MAX_RETRIES} tra {wait}s")
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Errore rete API-Football {path}: {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_BACKOFF * (2 ** attempt))
+                continue
+            return None
+        except Exception as e:
+            logger.warning(f"Errore API-Football {path}: {e}")
+            return None
+    logger.warning(f"API-Football {path}: rate-limit persistente dopo {MAX_RETRIES} tentativi")
+    return None
 
 
 def _match_db_name(api_name: str, league: str) -> Optional[str]:
@@ -183,15 +201,23 @@ def _parse_fixture(fx: dict, league: str) -> Optional[Tuple]:
     return match_id, home, away, sh, sa, date
 
 
-def _season_is_accessible(fx_body: Optional[dict]) -> bool:
-    """True se la stagione non e' bloccata dal free plan (nessun errore 'plan')."""
-    if not fx_body:
-        return False
+def _season_status(fx_body: Optional[dict]) -> str:
+    """Classifica l'esito della chiamata fixtures per una stagione.
+
+    Ritorna uno di:
+      "ok"        -> stagione disponibile e con dati
+      "skip"      -> stagione non esposta dal free plan (errore 'plan')
+      "retry"     -> errore transitorio (rate-limit / rete): da ritentare
+    """
+    if fx_body is None:
+        return "retry"
     errs = fx_body.get("errors")
     if not errs:
-        return True
+        return "ok"
     joined = " ".join(str(v).lower() for v in errs.values() if v)
-    return "free plans" not in joined
+    if "plan" in joined or "free" in joined:
+        return "skip"
+    return "retry"
 
 
 def sync_history(seasons: int = DEFAULT_SEASONS, leagues: Optional[List[str]] = None) -> Dict:
@@ -220,7 +246,12 @@ def sync_history(seasons: int = DEFAULT_SEASONS, leagues: Optional[List[str]] = 
         rows = []
         while collected < seasons and year >= 2018:
             body = _api_get("fixtures", {"league": lid, "season": year})
-            if not _season_is_accessible(body):
+            status = _season_status(body)
+            if status == "retry":
+                # errore transitorio (rate-limit/rete): riprova la stessa stagione
+                logger.info(f"Retry stesso anno per {league} {year} (status retry)")
+                continue
+            if status == "skip":
                 logger.info(f"Stagione {year} non accessibile ({league}), salto")
                 year -= 1
                 continue

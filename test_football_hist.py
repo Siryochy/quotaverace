@@ -78,6 +78,21 @@ class TestParseFixture:
         assert fh._parse_fixture(fx, "Serie A") is None
 
 
+class TestSeasonStatus:
+    def test_ok_senza_errori(self):
+        assert fh._season_status({"errors": [], "response": [1]}) == "ok"
+
+    def test_skip_errore_plan(self):
+        assert fh._season_status({"errors": {"plan": "Free plans do not have access"}}) == "skip"
+
+    def test_retry_body_none(self):
+        assert fh._season_status(None) == "retry"
+
+    def test_retry_altri_errori(self):
+        # errore di pagina o altro: transitorio, va ritentato
+        assert fh._season_status({"errors": {"page": "The Page field do not exist"}}) == "retry"
+
+
 class TestSyncHistory:
     def test_niente_key_restituisce_errore(self, monkeypatch):
         monkeypatch.delenv("API_FOOTBALL_KEY", raising=False)
