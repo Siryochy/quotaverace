@@ -79,8 +79,17 @@ def expected_goals(home_team: str, away_team: str):
     else:
         avg_hg, avg_ag = LEAGUE_AVGS.get(home_league, (1.50, 1.30))
     
-    home_data = ALL_LEAGUES[home_league][home_team]
-    away_data = ALL_LEAGUES[away_league][away_team]
+    try:
+        from rating_engine import get_rating
+        _rh = get_rating(home_team) or {}
+        _ra = get_rating(away_team) or {}
+    except Exception:
+        _rh, _ra = {}, {}
+    if _rh and _ra:
+        home_data, away_data = _rh, _ra
+    else:
+        home_data = ALL_LEAGUES[home_league][home_team]
+        away_data = ALL_LEAGUES[away_league][away_team]
     lam_h = avg_hg * home_data["attack_home"] * away_data["defense_away"]
     lam_a = avg_ag * away_data["attack_away"] * home_data["defense_home"]
     return lam_h, lam_a

@@ -342,6 +342,8 @@ async def cmd_risultati(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 save_result(m["id"], lg, m.get("home_team", ""), m.get("away_team", ""),
                             sh, sa, m.get("last_update", ""))
                 updated += 1
+        from rating_engine import compute_ratings
+        compute_ratings()
         stats = get_results_stats()
         if stats["total"] == 0:
             text = "📊 *RISULTATI TRACKING*\n\nNessuna scommessa chiusa ancora.\nI risultati si aggiornano da soli quando le partite finiscono."
