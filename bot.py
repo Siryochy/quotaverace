@@ -12,6 +12,7 @@ from tracker import init_db, log_signal, get_signals, get_performance_summary, a
 from odds_ingest import load_odds
 from value_filter import compute_ev, kelly_fraction, kelly_euro, filter_value_bets, is_sane, get_pro_stake
 from surebet_scanner import scan_surebets
+from backtest import run_backtest
 from fixture_engine import (fetch_and_analyze_today, get_calendar_formatted,
                             get_value_picks_for_schedina, format_schedina, build_multipla_block)
 
@@ -254,6 +255,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/setbankroll <€>` – imposta bankroll\n"
         "`/subscribe` – attiva notifiche Pro\n"
         "`/risultati` – statistiche reali dei segnali\n"
+        "`/backtest` – calibrazione EV atteso vs ROI realizzato\n"
         "`/quota` – crediti API rimanenti\n"
         "`/campionati` – elenco squadre\n\n"
         "🛡 *Filtri Pro attivi:*\n"
@@ -385,6 +387,10 @@ async def cmd_quota(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     await update.message.reply_text(text + DISCLAIMER, parse_mode="Markdown")
 
+async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = run_backtest()
+    await update.message.reply_text(text, parse_mode="Markdown")
+
 async def cmd_risultati(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         from odds_api import SPORTS_MAP, fetch_scores
@@ -504,6 +510,7 @@ def main() -> None:
     application.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     application.add_handler(CommandHandler("checknow", cmd_checknow))
     application.add_handler(CommandHandler("risultati", cmd_risultati))
+    application.add_handler(CommandHandler("backtest", cmd_backtest))
     application.add_handler(CommandHandler("quota", cmd_quota))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("start", cmd_help))
