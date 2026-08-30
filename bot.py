@@ -52,7 +52,11 @@ def get_odds_data():
             return odds
         except Exception as e:
             logger.warning(f"Quote reali non disponibili: {e}")
-    return load_odds()
+    try:
+        return load_odds()
+    except Exception as e:
+        logger.warning(f"Fallback quote non disponibile: {e}")
+        return []
 
 def _all_teams():
     teams = set()
