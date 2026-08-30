@@ -45,7 +45,7 @@ def set_bankroll(chat_id: int, amount: float) -> None:
     chat_bankrolls[chat_id] = max(10.0, amount)
 
 def get_odds_data():
-    if os.getenv("ODDS_API_KEY") and LIVE_ODDS_AVAILABLE:
+    if os.getenv("API_FOOTBALL_KEY") and LIVE_ODDS_AVAILABLE:
         try:
             odds = get_live_odds()
             logger.info(f"Quote reali caricate: {len(odds)} quote")
@@ -319,7 +319,7 @@ def format_surebets(odds_data):
     return msg + DISCLAIMER
 
 async def notify_job(context: ContextTypes.DEFAULT_TYPE):
-    if not os.getenv("ODDS_API_KEY") or not LIVE_ODDS_AVAILABLE: return
+    if not os.getenv("API_FOOTBALL_KEY") or not LIVE_ODDS_AVAILABLE: return
     try:
         odds = get_live_odds()
         if not odds: return

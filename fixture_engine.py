@@ -73,8 +73,8 @@ def _match_team(api_name: str, league_name: str) -> Optional[str]:
     return None
 
 def fetch_and_analyze_today():
-    if not os.getenv("ODDS_API_KEY"):
-        logger.warning("ODDS_API_KEY mancante, skip calendario")
+    if not os.getenv("API_FOOTBALL_KEY"):
+        logger.warning("API_FOOTBALL_KEY mancante, skip calendario")
         return 0, 0
     clear_old_matches()
     today = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -153,7 +153,7 @@ def _analyze_match(match_id, match, home_db, away_db, league):
 def get_calendar_formatted() -> str:
     rows = get_today_matches()
     if not rows:
-        return "📅 *CALENDARIO DEL GIORNO*\n\nNessuna partita trovata oggi.\nAssicurati che ODDS_API_KEY sia configurata."
+        return "📅 *CALENDARIO DEL GIORNO*\n\nNessuna partita trovata oggi.\nAssicurati che API_FOOTBALL_KEY sia configurata."
     msg = "📅 *CALENDARIO DEL GIORNO*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
     current_league = ""
     for row in rows:
