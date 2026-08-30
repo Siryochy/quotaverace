@@ -8,6 +8,7 @@ Endpoint:
   GET /api/storico           -> storico segnali + riepilogo 30gg
   GET /api/value             -> migliori value bet filtrate
   GET /api/schedina          -> schedina del giorno (picks + multipla)
+  GET /api/scan              -> catalogo Betfair (cache job 8:45; ?live=1 per scan immediata)
 
 Uso su Railway: dopo aver deployato il bot, crea un secondo servizio con
   startCommand = "python web_api.py"
@@ -34,7 +35,7 @@ def _bankroll():
     return float(os.getenv("BANKROLL_DEFAULT", "100.0"))
 
 
-def _odds_json():
+def _odds_json(params=None):
     """Legge le quote dalla tabella 'signals' o match_analysis come asset curato."""
     conn = _get_conn()
     c = conn.cursor()
@@ -49,7 +50,7 @@ def _odds_json():
     ]
 
 
-def _storico_json():
+def _storico_json(params=None):
     signals = get_signals(limit=30)
     out = []
     for s in signals:
@@ -72,7 +73,7 @@ def _storico_json():
     return {"segnali": out, "summary": summary}
 
 
-def _dashboard_json():
+def _dashboard_json(params=None):
     summary = get_performance_summary(days=30)
     value = _odds_json()
     # count segnali odierni
@@ -97,7 +98,7 @@ def _dashboard_json():
     }
 
 
-def _schedina_json():
+def _schedina_json(params=None):
     """Schedina del giorno: picks con valore + multipla prolungata."""
     try:
         from fixture_engine import get_value_picks_for_schedina, build_multipla
@@ -138,7 +139,7 @@ def _schedina_json():
     return {"picks": out, "multipla": multipla, "bankroll": _bankroll()}
 
 
-def _health_json():
+def _health_json(params=None):
     quota = None
     try:
         from odds_api import get_quota
@@ -149,28 +150,64 @@ def _health_json():
     return {"status": "ok", "api_football_key": bool(os.getenv("API_FOOTBALL_KEY")), "quota": creds}
 
 
+def _scan_json(params=None):
+    """Catalogo Betfair: cache del job giornaliero, o scan live con ?live=1.
+
+    Ritorna (status_code, payload) — il codice HTTP riflette lo stato:
+    200 = ok, 503 = nessuna cache o Betfair non configurato.
+    """
+    params = params or {}
+    from daily_scan_job import load_latest_scan, run_daily_scan
+    if params.get("live") == "1":
+        # ?date=YYYY-MM-DD per scansionare un giorno specifico (default: oggi UTC)
+        payload = run_daily_scan(params.get("date") or None)
+        if payload is None:
+            return 503, {
+                "error": "betfair_not_configured",
+                "message": "Configura BETFAIR_APP_KEY, BETFAIR_USERNAME, "
+                           "BETFAIR_PASSWORD, BETFAIR_CERT_PATH",
+            }
+        return 200, payload
+    cached = load_latest_scan()
+    if cached is None:
+        return 503, {
+            "error": "no_scan_cache",
+            "message": "Nessuna scansione salvata: usa /scan nel bot "
+                       "o GET /api/scan?live=1",
+        }
+    return 200, cached
+
+
 ROUTES = {
     "/api/health": _health_json,
     "/api/dashboard": _dashboard_json,
     "/api/storico": _storico_json,
     "/api/value": _odds_json,
     "/api/schedina": _schedina_json,
+    "/api/scan": _scan_json,
 }
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         import urllib.parse
-        path = urllib.parse.urlparse(self.path).path
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        params = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()}
         handler = ROUTES.get(path)
         if not handler:
             self._send(404, {"error": "not found", "routes": list(ROUTES.keys())})
             return
         try:
-            self._send(200, handler())
+            result = handler(params)
         except Exception as e:
             logger.exception("errore endpoint %s", path)
             self._send(500, {"error": str(e)})
+            return
+        if isinstance(result, tuple) and len(result) == 2:
+            self._send(*result)
+        else:
+            self._send(200, result)
 
     def _send(self, code, payload):
         body = json.dumps(payload, default=str).encode("utf-8")

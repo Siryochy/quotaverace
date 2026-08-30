@@ -18,6 +18,7 @@ from fixture_engine import (fetch_and_analyze_today, get_calendar_formatted,
                             get_value_picks_for_schedina, format_schedina, build_multipla_block)
 from daily_scanner import scan_day, group_same_start
 from betfair_client import get_client as get_betfair_client
+from daily_scan_job import run_daily_scan
 
 try:
     from odds_api import get_live_odds
@@ -646,6 +647,23 @@ async def results_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Errore results_job: {e}")
 
+async def betfair_scan_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job 8:45: scansione Betfair del giorno -> data/scan_<giorno>.json.
+
+    Solo lettura, nessun ordine. Salta silenziosamente se le credenziali
+    BETFAIR_* non sono configurate. Alimenta /api/scan (cache frontend).
+    """
+    if not os.getenv("BETFAIR_APP_KEY"):
+        logger.info("betfair_scan_job: BETFAIR_APP_KEY assente, salto")
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        res = await loop.run_in_executor(_scan_executor, run_daily_scan)
+        logger.info("betfair_scan_job: %s",
+                    f"ok ({res['events']} eventi)" if res else "saltata")
+    except Exception as e:
+        logger.error(f"Errore betfair_scan_job: {e}")
+
 async def history_sync_job(context: ContextTypes.DEFAULT_TYPE):
     """Sincronizzazione risultati storici (API-Football) + ricalcolo rating.
 
@@ -699,7 +717,8 @@ def main() -> None:
         job_queue.run_daily(evening_job, time=time(hour=20, minute=0))
         job_queue.run_daily(results_job, time=time(hour=21, minute=30))
         job_queue.run_daily(history_sync_job, time=time(hour=8, minute=30))
-        logger.info("Job Pro schedulati: 06:00 / 08:30 / 14:00 / 20:00 / 21:30 ITA")
+        job_queue.run_daily(betfair_scan_job, time=time(hour=8, minute=45))
+        logger.info("Job Pro schedulati: 06:00 / 08:30 / 08:45 / 14:00 / 20:00 / 21:30 ITA")
     else: logger.warning("JobQueue non disponibile")
     logger.info("QuotaVerace Pro avviato.")
     application.run_polling()
