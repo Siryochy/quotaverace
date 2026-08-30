@@ -245,8 +245,54 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
+
+def enrich_odds_with_probs(odds_data):
+    from poisson_engine import expected_goals, prob_1x2, prob_over_under
+    teams = _all_teams()
+
+    def match_team(t):
+        if t in teams: return t
+        t_low = t.lower().replace(" fc", "").replace("cf ", "").strip()
+        for tm in teams:
+            tm_low = tm.lower()
+            if t_low == tm_low or t_low in tm_low or tm_low in t_low:
+                return tm
+        return None
+
+    enriched = []
+    if hasattr(odds_data, "to_dict"):
+        odds_data = odds_data.to_dict(orient="records")
+    for odd in odds_data:
+        evento = odd.get("evento", "")
+        if " vs " not in evento: continue
+        parts = evento.split(" vs ")
+        home = parts[0].split(" – ")[-1].strip()
+        away = parts[1].strip()
+        hm, am = match_team(home), match_team(away)
+        if not (hm and am and hm != am): continue
+        try:
+            lh, la = expected_goals(hm, am)
+            p1, px, p2 = prob_1x2(lh, la)
+            po, pu = prob_over_under(lh, la)
+            esito = str(odd.get("esito", "")).lower()
+            prob = 0.0
+            if esito == "1": prob = p1
+            elif esito == "x": prob = px
+            elif esito == "2": prob = p2
+            elif "over" in esito: prob = po
+            elif "under" in esito: prob = pu
+            if prob > 0:
+                new_odd = odd.copy()
+                new_odd["probabilita"] = prob
+                new_odd["evento"] = f"{hm} vs {am}"
+                enriched.append(new_odd)
+        except Exception:
+            pass
+    return enriched
+
 def format_value_bets(odds_data, bankroll=100.0):
-    value_signals = filter_value_bets(odds_data, ev_threshold=0.03)
+    enriched = enrich_odds_with_probs(odds_data)
+    value_signals = filter_value_bets(enriched, ev_threshold=0.03)
     if not value_signals:
         return "📊 *Value Bet Pro*\n\nNessun segnale che supera i filtri (EV 3%-15%, Odds 1.50-5.00)." + DISCLAIMER
     msg = "📊 *VALUE BET PRO — Filtri attivi*\n"
@@ -277,7 +323,7 @@ async def notify_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         odds = get_live_odds()
         if not odds: return
-        value_signals = filter_value_bets(odds, ev_threshold=0.03)
+        value_signals = filter_value_bets(enrich_odds_with_probs(odds), ev_threshold=0.03)
         if not value_signals: return
         subscribers = get_subscribers()
         if not subscribers: return
