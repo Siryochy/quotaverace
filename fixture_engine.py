@@ -11,6 +11,8 @@ from tracker import save_match, get_today_matches, save_analysis, get_analysis_f
 
 logger = logging.getLogger(__name__)
 
+DERIV_BIAS = 0.01  # bonus EV ai mercati derivati (Over/Under): soft book meno efficienti
+
 TEAM_MAP = {
     "inter milan": "Inter", "ac milan": "Milan", "man united": "Manchester United",
     "man utd": "Manchester United", "man city": "Manchester City",
@@ -115,23 +117,23 @@ def _analyze_match(match_id, match, home_db, away_db, league):
     best = None
     for bm in match.get("bookmakers", []):
         for mkt in bm.get("markets", []):
+            bias = DERIV_BIAS if mkt["key"] == "totals" else 0.0
             if mkt["key"] == "h2h":
                 for out in mkt.get("outcomes", []):
                     name, price = out["name"], out["price"]
-                    prob = 0
-                    if name == match["home_team"]: prob = p1
-                    elif name == match["away_team"]: prob = p2
-                    else: prob = px
+                    prob = p1 if name == match["home_team"] else (p2 if name == match["away_team"] else px)
                     ev = compute_ev(prob, price)
-                    if best is None or ev > best["ev"]:
-                        best = {"ev": ev, "esito": name, "quota": price, "bookmaker": bm["title"], "prob": prob}
+                    if best is None or (ev + bias) > best["score"]:
+                        best = {"score": ev + bias, "ev": ev, "esito": name,
+                                "quota": price, "bookmaker": bm["title"], "prob": prob}
             elif mkt["key"] == "totals":
                 for out in mkt.get("outcomes", []):
                     if "over" in out["name"].lower() and out.get("point") == 2.5:
                         price = out["price"]
                         ev = compute_ev(p_over, price)
-                        if best is None or ev > best["ev"]:
-                            best = {"ev": ev, "esito": f"Over 2.5", "quota": price, "bookmaker": bm["title"], "prob": p_over}
+                        if best is None or (ev + bias) > best["score"]:
+                            best = {"score": ev + bias, "ev": ev, "esito": "Over 2.5",
+                                    "quota": price, "bookmaker": bm["title"], "prob": p_over}
     if not best:
         return "no_odds"
     
