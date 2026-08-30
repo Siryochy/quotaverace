@@ -7,3 +7,5 @@ webapp/.next/
 *.db
 *.tar.gz
 _archivio/
+.env
+.env.*

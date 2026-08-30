@@ -1,4 +1,29 @@
 import os
+from pathlib import Path
+
+
+def load_dotenv(path: str = ".env") -> None:
+    """Carica le variabili da un file .env (KEY=VALUE) senza sovrascrivere
+    quelle gia' presenti nell'ambiente.
+
+    Formato accettato:
+      - righe vuote e commenti (iniziano con #) ignorati
+      - KEY=VALUE, con spazio bianco attorno a KEY opzionale
+    Nessuna dipendenza esterna: il progetto usa solo variabili d'ambiente.
+    """
+    env_file = Path(os.path.dirname(os.path.abspath(__file__))) / path
+    if not env_file.exists():
+        return
+    for raw in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        os.environ.setdefault(key.upper(), value.strip())
+
 
 def _get_env(name: str, default: str = "") -> str:
     """Legge una variabile d'ambiente tollerando spazi o newline nel nome."""
@@ -9,6 +34,11 @@ def _get_env(name: str, default: str = "") -> str:
         if key.strip() == name:
             return value
     return default
+
+
+# Carica .env appena importato, cosi' TOKEN e le variabili lette dagli altri
+# moduli (ODDS_API_KEY, API_FOOTBALL_KEY, ...) sono disponibili ovunque.
+load_dotenv()
 
 
 TOKEN = _get_env("QUOTAVERACE_BOT_TOKEN", "")

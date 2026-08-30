@@ -16,8 +16,13 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 
+from config import load_dotenv
 from leagues_data import ALL_LEAGUES
 from rating_engine import compute_ratings
+
+# garantisce che .env sia caricato anche quando questo modulo e' eseguito
+# direttamente come CLI (python football_hist.py sync)
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 

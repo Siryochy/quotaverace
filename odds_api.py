@@ -1,5 +1,9 @@
 import json, os, time, logging, requests
 from pathlib import Path
+from config import load_dotenv
+
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 
 CACHE_DIR = Path(__file__).parent / "data"
