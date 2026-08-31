@@ -231,6 +231,27 @@ def run_backtest(source: Optional[str] = None) -> str:
     return format_backtest(backtest(bets))
 
 
+def backtest_stats(source: Optional[str] = None) -> Dict:
+    """Statistiche del backtest in forma JSON (per la webapp)."""
+    stats = backtest(_load(source))
+    beats = stats.get("beats_market")
+    no_beats = stats.get("no_beats_market")
+    return {
+        "n": stats["n"],
+        "won": stats["won"],
+        "lost": stats["lost"],
+        "hit_rate": round(stats["hit_rate"], 2),
+        "roi": round(stats["roi"], 2),
+        "roi_edge": round(stats["roi_edge"], 2),
+        "gap": round(stats["gap"], 2),
+        "net_units": round(stats["net_units"], 2),
+        "sufficiente": stats["sufficiente"],
+        "warn": stats["warn"],
+        "beats_market": {"roi": round(beats[0], 2), "n": beats[1]} if beats else None,
+        "no_beats_market": {"roi": round(no_beats[0], 2), "n": no_beats[1]} if no_beats else None,
+    }
+
+
 if __name__ == "__main__":
     import sys
     src = sys.argv[1] if len(sys.argv) > 1 else None

@@ -44,8 +44,52 @@ def _get_conn():
         match_id TEXT, esito TEXT,
         signal_quota REAL, closing_quota REAL, updated_at TEXT,
         PRIMARY KEY (match_id, esito))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS cassa (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        data TEXT, partita TEXT, esito TEXT, quota REAL,
+        importo REAL, ev REAL, timestamp TEXT)''')
     conn.commit()
     return conn
+
+
+# --- Cassa (registro scommesse inserite dal sito) ---
+def save_cassa_entry(partita, esito, quota, importo, ev=0.0, data=None):
+    """Registra una scommessa nella cassa."""
+    conn = _get_conn(); c = conn.cursor()
+    c.execute('''INSERT INTO cassa (data, partita, esito, quota, importo, ev, timestamp)
+                 VALUES (?,?,?,?,?,?,?)''',
+              (data or datetime.now().strftime("%Y-%m-%d"), partita, esito,
+               float(quota), float(importo), float(ev), datetime.now().isoformat()))
+    conn.commit(); conn.close()
+
+
+def get_cassa():
+    """Tutte le scommesse della cassa, dalla piu' recente."""
+    conn = _get_conn(); c = conn.cursor()
+    c.execute("SELECT id, data, partita, esito, quota, importo, ev, timestamp FROM cassa ORDER BY id DESC")
+    rows = c.fetchall(); conn.close()
+    return [
+        {"id": r[0], "data": r[1], "partita": r[2], "esito": r[3],
+         "quota": r[4], "importo": r[5], "ev": r[6], "timestamp": r[7]}
+        for r in rows
+    ]
+
+
+def cassa_totals(entries=None):
+    """Totali cassa: speso, vincita potenziale, profit potenziale."""
+    entries = entries if entries is not None else get_cassa()
+    speso = sum(e["importo"] or 0 for e in entries)
+    vincita = sum((e["importo"] or 0) * (e["quota"] or 0) for e in entries)
+    return {"n": len(entries), "totale_speso": round(speso, 2),
+            "vincita_potenziale": round(vincita, 2),
+            "profit_potenziale": round(vincita - speso, 2)}
+
+
+def clear_cassa():
+    """Svuota la cassa (backup server)."""
+    conn = _get_conn(); c = conn.cursor()
+    c.execute("DELETE FROM cassa")
+    conn.commit(); conn.close()
 
 def init_db():
     _get_conn().close()

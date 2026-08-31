@@ -151,6 +151,152 @@ def _health_json(params=None):
     return {"status": "ok", "api_football_key": bool(os.getenv("API_FOOTBALL_KEY")), "quota": creds}
 
 
+def _segnali_json(params=None):
+    """Segnale completo per una partita (usato dal calcolatore del sito).
+
+    GET /api/segnali?home=Inter&away=Napoli
+    Ritorna expected goals, probabilita' 1X2/Over/Under/BTTS, miglior esito
+    con EV, stake Kelly (1/4, cap 3%) e, se disponibili, le quote di
+    mercato reali dal calendario.
+    """
+    from poisson_engine import expected_goals, prob_1x2, prob_over_under, prob_btts
+    from value_filter import compute_ev, kelly_fraction, get_pro_stake, is_sane
+    from leagues_data import ALL_LEAGUES
+
+    home = (params.get("home") or "").strip()
+    away = (params.get("away") or "").strip()
+    if not home or not away:
+        return 400, {"error": "Specifica home e away", "esempio": "/api/segnali?home=Inter&away=Napoli"}
+    try:
+        lam_h, lam_a = expected_goals(home, away)
+    except Exception as e:
+        return 404, {"error": str(e), "home": home, "away": away}
+
+    p1, px, p2 = prob_1x2(lam_h, lam_a)
+    p_over, p_under = prob_over_under(lam_h, lam_a)
+    p_btts = prob_btts(lam_h, lam_a)
+
+    # Quote di riferimento: miglior prezzo dal calendario (se gia' analizzato)
+    league = None
+    for l, teams in ALL_LEAGUES.items():
+        if home in teams:
+            league = l
+            break
+    market_prob = market_edge = None
+    ref_odds = {}
+    if league:
+        try:
+            from tracker import _get_conn
+            conn = _get_conn(); c = conn.cursor()
+            c.execute("SELECT a.best_quota, a.market_prob, a.market_edge, a.best_esito "
+                      "FROM matches m JOIN match_analysis a ON a.match_id = m.id "
+                      "WHERE m.home_team=? AND m.away_team=? ORDER BY a.id DESC LIMIT 1",
+                      (home, away))
+            row = c.fetchone(); conn.close()
+            if row:
+                ref_odds["quota"] = row[0]
+                market_prob = row[1]
+                market_edge = row[2]
+        except Exception:
+            pass
+
+    candidates = [
+        {"esito": "1", "label": f"Vittoria {home}", "prob": p1, "quota": 2.0},
+        {"esito": "X", "label": "Pareggio", "prob": px, "quota": 3.2},
+        {"esito": "2", "label": f"Vittoria {away}", "prob": p2, "quota": 2.0},
+        {"esito": "Over 2.5", "label": "Over 2.5 Gol", "prob": p_over, "quota": ref_odds.get("quota", 2.10)},
+    ]
+    for cand in candidates:
+        cand["ev"] = compute_ev(cand["prob"], cand["quota"])
+    best = max(candidates, key=lambda c: c["ev"])
+    pro = get_pro_stake(100.0, best["prob"], best["quota"])
+    sane, reason = is_sane(best["prob"], best["quota"], best["ev"], market_prob=market_prob)
+
+    return {
+        "home": home, "away": away, "league": league or "",
+        "lam_h": round(lam_h, 3), "lam_a": round(lam_a, 3),
+        "p1": round(p1, 4), "pX": round(px, 4), "p2": round(p2, 4),
+        "p_over": round(p_over, 4), "p_under": round(p_under, 4),
+        "p_btts": round(p_btts, 4),
+        "best": {"esito": best["esito"], "label": best["label"],
+                  "quota": best["quota"], "prob": round(best["prob"], 4),
+                  "ev": round(best["ev"], 4)},
+        "stake_kelly_pct": round(pro["stake_pct_of_bankroll"], 2),
+        "sane": sane, "sane_reason": reason,
+        "market": ({"prob": round(market_prob, 4), "edge": round(market_edge, 4)}
+                    if market_prob is not None else None),
+    }
+
+
+def _calendario_json(params=None):
+    """Partite del giorno con analisi (come /calendario del bot)."""
+    from tracker import get_today_matches, get_analysis_for_match
+    rows = get_today_matches()
+    out = []
+    for row in rows:
+        mid, league, home, away, commence, status, _ = row
+        item = {"league": league, "home": home, "away": away,
+                "commence": commence, "status": status, "match_id": mid}
+        ana = get_analysis_for_match(mid)
+        if ana:
+            (_, _, lam_h, lam_a, p1, px, p2, p_over, best_ev, best_esito,
+             best_quota, best_bookmaker, a_status, _, market_prob, market_edge) = ana
+            item.update({
+                "lam_h": lam_h, "lam_a": lam_a, "prob_1": p1, "prob_X": px,
+                "prob_2": p2, "prob_over": p_over,
+                "best_esito": best_esito, "best_quota": best_quota,
+                "best_bookmaker": best_bookmaker, "best_ev": best_ev,
+                "analisi_status": a_status, "market_prob": market_prob,
+                "market_edge": market_edge,
+            })
+        out.append(item)
+    return {"partite": out, "n": len(out)}
+
+
+def _backtest_json(params=None):
+    """Statistiche di calibrazione modello vs mercato."""
+    from backtest import backtest_stats
+    try:
+        return backtest_stats()
+    except Exception as e:
+        return 500, {"error": str(e)}
+
+
+def _campionati_json(params=None):
+    """Lista campionati e squadre per la ricerca del calcolatore."""
+    from leagues_data import ALL_LEAGUES
+    return {"campionati": [{"nome": name, "squadre": sorted(teams.keys())}
+                            for name, teams in ALL_LEAGUES.items()]}
+
+
+def _cassa_get(params=None):
+    from tracker import get_cassa, cassa_totals
+    entries = get_cassa()
+    return {"scommesse": entries, "totali": cassa_totals(entries)}
+
+
+def _cassa_post(params=None, body=None):
+    from tracker import save_cassa_entry, get_cassa, cassa_totals
+    data = body or {}
+    partita = (data.get("partita") or "").strip()
+    esito = (data.get("esito") or "").strip()
+    quota = float(data.get("quota") or 0)
+    importo = float(data.get("importo") or 0)
+    if not partita or not esito or quota <= 1.0 or importo <= 0:
+        return 400, {"error": "Campi mancanti o non validi: servono partita, esito, quota>1, importo>0"}
+    ev = float(data.get("ev") or 0)
+    save_cassa_entry(partita, esito, quota, importo, ev=ev, data=data.get("data"))
+    entries = get_cassa()
+    return {"ok": True, "scommesse": entries, "totali": cassa_totals(entries)}
+
+
+def _cassa_delete(params=None):
+    from tracker import clear_cassa
+    clear_cassa()
+    return {"ok": True, "scommesse": [], "totali": {"n": 0, "totale_speso": 0,
+                                                    "vincita_potenziale": 0, "profit_potenziale": 0}}
+
+
 def _scan_json(params=None):
     """Catalogo Betfair: cache del job giornaliero, o scan live con ?live=1.
 
@@ -186,21 +332,53 @@ ROUTES = {
     "/api/value": _odds_json,
     "/api/schedina": _schedina_json,
     "/api/scan": _scan_json,
+    "/api/segnali": _segnali_json,
+    "/api/calendario": _calendario_json,
+    "/api/backtest": _backtest_json,
+    "/api/campionati": _campionati_json,
+    "/api/cassa": _cassa_get,
+}
+
+POST_ROUTES = {
+    "/api/cassa": _cassa_post,
+}
+
+DELETE_ROUTES = {
+    "/api/cassa": _cassa_delete,
 }
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        self._dispatch(ROUTES, None)
+
+    def do_POST(self):
+        self._dispatch(POST_ROUTES, self._read_body())
+
+    def do_DELETE(self):
+        self._dispatch(DELETE_ROUTES, None)
+
+    def _read_body(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0:
+                return {}
+            raw = self.rfile.read(length).decode("utf-8")
+            return json.loads(raw) if raw else {}
+        except Exception:
+            return {}
+
+    def _dispatch(self, routes, body):
         import urllib.parse
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         params = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()}
-        handler = ROUTES.get(path)
+        handler = routes.get(path)
         if not handler:
             self._send(404, {"error": "not found", "routes": list(ROUTES.keys())})
             return
         try:
-            result = handler(params)
+            result = handler(params, body) if body is not None else handler(params)
         except Exception as e:
             logger.exception("errore endpoint %s", path)
             self._send(500, {"error": str(e)})
