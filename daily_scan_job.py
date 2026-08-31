@@ -24,11 +24,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from betfair_client import get_client
+from config import DATA_DIR
 from daily_scanner import scan_day
 
 logger = logging.getLogger("daily_scan_job")
 
-SCAN_DIR = Path(__file__).parent / "data"
+SCAN_DIR = DATA_DIR
 
 
 def run_daily_scan(target_date: str | None = None) -> dict | None:

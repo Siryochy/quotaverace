@@ -1,12 +1,12 @@
 import json, os, time, logging, requests
 from pathlib import Path
-from config import load_dotenv
+from config import DATA_DIR, load_dotenv
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-CACHE_DIR = Path(__file__).parent / "data"
+CACHE_DIR = DATA_DIR
 ODDS_TTL = 86400          # cache 24h = 1 chiamata/giorno per lega
 MIN_REMAINING = 20        # stop sotto 20 crediti
 

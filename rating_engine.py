@@ -2,9 +2,10 @@
 import math
 import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "quotaverace.db"
+from config import DATA_DIR
+
+DB_PATH = DATA_DIR / "quotaverace.db"
 HALF_LIFE_DAYS = 100.0   # mezza vita (ricerca: 100-150 giorni)
 PRIOR_MATCHES = 6.0      # forza del prior (shrinkage verso la media)
 MIN_MATCHES = 1          # sotto questa soglia si usa il rating statico

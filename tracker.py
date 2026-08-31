@@ -4,7 +4,9 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "quotaverace.db"
+from config import DATA_DIR
+
+DB_PATH = DATA_DIR / "quotaverace.db"
 
 class Signal:
     def __init__(self, id, chat_id, evento, esito, quota, probabilita, ev, timestamp, esito_finale, profit):

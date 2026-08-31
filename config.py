@@ -43,3 +43,12 @@ load_dotenv()
 
 TOKEN = _get_env("QUOTAVERACE_BOT_TOKEN", "")
 BANKROLL_DEFAULT = 100.0
+
+# Directory dei dati persistenti (DB, data/, log, cache, kill-switch).
+# Su Railway punta a /app/data: monta un Volume su QUOTAVERACE_DATA_DIR
+# (o sul default /app/data) cosi' i dati sopravvivono ai redeploy. Non
+# montare MAI sul volume la root di /app: Railway NON usa overlay e
+# nasconderebbe i sorgenti (vedi DEPLOY.md §persistenza).
+_DATA_DIR_ENV = _get_env("QUOTAVERACE_DATA_DIR", "")
+DATA_DIR = Path(_DATA_DIR_ENV).resolve() if _DATA_DIR_ENV else Path(__file__).parent / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)

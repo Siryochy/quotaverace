@@ -22,13 +22,14 @@ import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from config import DATA_DIR
 from tracker import _get_conn, _create_results_table, get_performance_summary, get_signals
 
 logger = logging.getLogger("web_api")
 
 # Railway injects PORT; fall back to WEB_API_PORT, then 8000 for local use.
 PORT = int(os.getenv("PORT") or os.getenv("WEB_API_PORT") or "8000")
-DB = Path(__file__).parent / "quotaverace.db"
+DB = DATA_DIR / "quotaverace.db"
 
 
 def _bankroll():

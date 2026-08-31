@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
 # Riutilizziamo il contratto di quote normalizzato da odds_ingest
+from config import DATA_DIR
 from odds_ingest import load_odds
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,7 @@ DEFAULT_MIN_MARGIN = 0.001  # 0.1% margine minimo per segnalare (abbassato per t
 DEFAULT_STAKE_UNIT = 100.0  # unità base per calcolo allocazione
 
 # Percorso database opportunità (per verifica ex-post)
-SUREBET_DB = Path(__file__).parent / "surebet_log.jsonl"
+SUREBET_DB = DATA_DIR / "surebet_log.jsonl"
 
 
 # ---------------------------------------------------------------------------

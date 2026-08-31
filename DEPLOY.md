@@ -29,6 +29,7 @@ Il progetto si compone di due servizi:
 | `BETFAIR_CERT_KEY_PATH` | opzionale | Chiave privata separata (se non unita nel pem di `BETFAIR_CERT_PATH`) |
 | `BETFAIR_DRY_RUN` | opzionale | `1` (default) = dry-run: nessun ordine reale. `0` = abilita la modalità live (con `BETFAIR_LIVE=1`) |
 | `BETFAIR_LIVE` | opzionale | `0` (default) = solo simulazione. `1` = abilita ordini reali (solo insieme a `BETFAIR_DRY_RUN=0`) |
+| `QUOTAVERACE_DATA_DIR` | opzionale | Directory dei dati persistenti (default `/app/data`). Su Railway punta al Volume montato; non usare `/app` |
 
 > 💡 Tutte le `BETFAIR_*` sono opzionali: il bot funziona senza Betfair
 > (i comandi `/scan` rispondono con le istruzioni di configurazione).
@@ -43,19 +44,26 @@ Crea un **secondo servizio** nello stesso progetto Railway, con le stesse variab
 - Railway inietta `PORT` automaticamente: `web_api.py` lo legge (fallback `WEB_API_PORT`, poi `8000`).
 - Apri la porta pubblicata e copia l'URL pubblico (es. `https://quotaverace-backend.up.railway.app`).
 
-> ⚠️ **Persistenza dati**: `quotaverace.db` è un SQLite locale al container.
-> Su Railway il filesystem è effimero: monta un **Volume** su `/app` (o usa un
-> database gestito) se vuoi che storico e risultati sopravvivano ai redeploy.
-
+> ✅ **Persistenza dati**: tutti i dati (DB, `data/`, log, cache, kill-switch)
+> vivono in `QUOTAVERACE_DATA_DIR` (default **`/app/data`**, accentrato in
+> `config.DATA_DIR`). `railway.ts` definisce un **volume condiviso**: esegui
+> `railway config apply` per crearlo e montarlo su `/app/data` di **entrambi**
+> i servizi. Dopo di che `quotaverace.db`, `data/scan_*.json`, `orders.jsonl`
+> e `surebet_log.jsonl` sopravvivono ai redeploy.
+>
+> ⚠️ **Monta il volume su `/app/data`, MAI su `/app`**: Railway **non usa
+> overlay** — un volume sulla root `/app` nasconderebbe i sorgenti applicativi
+> (vedi [docs Railway — Volumes](https://docs.railway.com/volumes)).
+>
 > ⚠️ **Persistenza cache Betfair (bot vs API)**: il job 8:45 del bot scrive
-> `data/scan_<giorno>.json`, ma il servizio API è un **container separato**:
-> di default NON vede quel file e `GET /api/scan` risponde 503 `no_scan_cache`.
-> Due opzioni:
-> 1. **Volume condiviso**: in Railway allega lo stesso Volume su `/app` a
->    ENTRAMBI i servizi (Settings → Volumes). Il bot scrive, l'API legge.
-> 2. **Job lato API**: aggiungi al servizio API un processo separato con
->    start `python daily_scan_job.py` schedulato (Railway Cron) — l'API
->    e il job condividono il suo Volume.
+> `data/scan_<giorno>.json`, ma il servizio API è un **container separato**.
+> Con il **volume condiviso** di `railway.ts` (stesso volume su `/app/data` di
+> entrambi i servizi) il bot scrive e l'API legge lo stesso file: niente 503
+> `no_scan_cache`.
+>
+> 💡 Migrazione locale: se `quotaverace.db` era alla root del progetto, spostalo
+> in `data/` (nuovo percorso) oppure imposta `QUOTAVERACE_DATA_DIR` al vecchio
+> percorso prima del primo avvio.
 
 ---
 

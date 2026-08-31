@@ -41,6 +41,8 @@ from typing import Any
 
 import requests
 
+from config import DATA_DIR
+
 logger = logging.getLogger("betfair_client")
 
 CERT_LOGIN_URL = "https://identitysso-cert.betfair.it/api/certlogin"
@@ -54,8 +56,8 @@ ITALY_STAKE_STEP = 0.50
 ITALY_MAX_INSTRUCTIONS = 50
 ITALY_MAX_WINNINGS = 10000.0
 
-ORDERS_LOG = Path(__file__).parent / "data" / "orders.jsonl"
-KILL_SWITCH = Path(__file__).parent / "data" / "kill_switch"
+ORDERS_LOG = DATA_DIR / "orders.jsonl"
+KILL_SWITCH = DATA_DIR / "kill_switch"
 
 _session_cache: dict[str, Any] = {"token": None, "ts": 0.0}
 
