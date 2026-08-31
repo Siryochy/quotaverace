@@ -297,6 +297,20 @@ def _cassa_delete(params=None):
                                                     "vincita_potenziale": 0, "profit_potenziale": 0}}
 
 
+def _analisi_json(params=None, body=None):
+    """Rigenera calendario + analisi con la strategia corrente (come /analisi del bot).
+
+    POST /api/analisi — esegue fetch_and_analyze_today e ritorna il riepilogo.
+    """
+    try:
+        from fixture_engine import fetch_and_analyze_today
+        total, value = fetch_and_analyze_today()
+        return {"ok": True, "partite": total, "value": value}
+    except Exception as e:
+        logger.exception("errore analisi")
+        return 500, {"error": str(e)}
+
+
 def _scan_json(params=None):
     """Catalogo Betfair: cache del job giornaliero, o scan live con ?live=1.
 
@@ -341,6 +355,7 @@ ROUTES = {
 
 POST_ROUTES = {
     "/api/cassa": _cassa_post,
+    "/api/analisi": _analisi_json,
 }
 
 DELETE_ROUTES = {
