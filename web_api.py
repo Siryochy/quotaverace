@@ -304,6 +304,14 @@ def _analisi_json(params=None, body=None):
     """
     try:
         from fixture_engine import fetch_and_analyze_today
+        from rating_engine import compute_ratings
+        # Ricalcola prima i rating dai risultati piu' recenti, cosi' l'analisi
+        # usa sempre la forma corrente del modello (le stime dinamiche entrano
+        # in gioco con campioni sufficienti, MIN_MATCHES=6).
+        try:
+            compute_ratings()
+        except Exception as e:
+            logger.warning("ricalcolo rating fallito: %s", e)
         total, value = fetch_and_analyze_today()
         return {"ok": True, "partite": total, "value": value}
     except Exception as e:

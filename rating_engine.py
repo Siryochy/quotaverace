@@ -76,7 +76,14 @@ def compute_ratings():
         # 1 (molto prima del prior). expected_goals moltiplica: lam = avg*att*def,
         # quindi un coeff 1.0 = forza media, >1 attacca di piu', <1 difende di piu'.
         coeff = obs / avg if avg > 0 else 1.0
-        return (coeff * wsum + 1.0 * PRIOR_MATCHES) / (wsum + PRIOR_MATCHES), n
+        # SHRINK SUL CONTEGGIO REALE n, NON su wsum. Il time-decay (halflife
+        # ~100gg) rende minuscola la somma dei pesi dei match storici: usare
+        # wsum schiaccia tutti i coefficienti verso 1.0 (un prior di 6 partite
+        # domina su wsum=0.4), rendendo il modello incapace di distinguere le
+        # squadre. Il prior va applicato sul numero di partite GIOCATE: con 36
+        # match reali l'osservazione pesa 36/(36+6)=86%, indipendentemente
+        # dall'eta' (il decay pesa comunque quali partite contano in obs).
+        return (coeff * n + 1.0 * PRIOR_MATCHES) / (n + PRIOR_MATCHES), n
 
     c.execute("DELETE FROM team_ratings")
     for team, a in acc.items():
