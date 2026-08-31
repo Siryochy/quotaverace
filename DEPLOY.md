@@ -2,23 +2,45 @@
 
 Il progetto si compone di due servizi:
 
-1. **Backend** (bot Telegram + API JSON) → **Railway**
+1. **Backend** (bot Telegram **+** API JSON nello stesso processo) → **Railway**
 2. **Frontend** (webapp Next.js) → **Vercel**
 
 ---
 
 ## 1. Backend su Railway
 
+### Architettura (servizio unico)
+
+Bot Telegram e API JSON girano **nello stesso container** ed entrypoint:
+`run_all.py` avvia la web API (`web_api.py`) in un thread e poi il bot
+(`bot.py`, long-polling) in primo piano. Un **unico volume** su `/app/data`
+contiene DB, `data/scan_*.json`, log, cache e kill-switch: così persiste tutto
+ed è condiviso per costruzione.
+
+> ⚠️ **Railway non supporta volumi condivisi tra servizi separati**: ogni
+> container avrebbe il proprio volume e i dati divergerebbero. Per questo bot e
+> API devono stare nello **stesso** servizio. `Dockerfile.api` e il concetto di
+> "secondo servizio API" sono superati e non devono essere usati.
+
 ### Setup
 
-1. Crea un nuovo progetto su [Railway](https://railway.app) e collega questa repo GitHub.
-2. Railway rileva il `Dockerfile` e userà `railway.toml` (start: `python bot.py`).
+1. Crea un nuovo progetto su [Railway](https://railway.app) e collega questa
+   repo GitHub.
+2. Railway rileva il `Dockerfile` (`CMD ["python", "run_all.py"]`) che avvia
+   bot + API insieme. L'infrastruttura è gestita via IaC in `.railway/railway.ts`:
 
-### Variabili d'ambiente (servizio bot)
+   ```bash
+   railway config apply --yes --confirm-destructive
+   ```
+
+3. Il volume `api-volume` viene creato/montato su `/app/data` (vedi
+   **§1ter Volume**).
+
+### Variabili d'ambiente (servizio api)
 
 | Variabile | Obbligatoria | Descrizione |
 |---|---|---|
-| `QUOTAVERACE_BOT_TOKEN` | ✅ | Token del bot Telegram (@BotFather) |
+| `QUOTAVERACE_BOT_TOKEN` | ✅ | Token del bot Telegram (@BotFather). Se manca, `run_all.py` termina: il servizio resta in Crash |
 | `ODDS_API_KEY` | opzionale | Chiave the-odds-api (quote live + notifiche) |
 | `API_FOOTBALL_KEY` | opzionale | Chiave API-Football (rating dinamici + sync storico) |
 | `BANKROLL_DEFAULT` | opzionale | Bankroll di default (default `100.0`) |
@@ -35,35 +57,45 @@ Il progetto si compone di due servizi:
 > (i comandi `/scan` rispondono con le istruzioni di configurazione).
 > Per configurazione e certificato, vedi **§1bis Integrazione Betfair**.
 
-### Servizio API JSON
-
-Crea un **secondo servizio** nello stesso progetto Railway, con le stesse variabili più:
-
-- **Builder**: Dockerfile → imposta `Dockerfile.api`
-- **Start command**: `python web_api.py` (il `Dockerfile.api` lo imposta già)
-- Railway inietta `PORT` automaticamente: `web_api.py` lo legge (fallback `WEB_API_PORT`, poi `8000`).
-- Apri la porta pubblicata e copia l'URL pubblico (es. `https://quotaverace-backend.up.railway.app`).
+Questo è il **secondo servizio API non esiste più**: l'API è servita dallo
+stesso container del bot sulla porta `PORT` iniettata da Railway.
+`railway variable set --service api <KEY>=<value>` per gestirne i valori.
 
 > ✅ **Persistenza dati**: tutti i dati (DB, `data/`, log, cache, kill-switch)
 > vivono in `QUOTAVERACE_DATA_DIR` (default **`/app/data`**, accentrato in
-> `config.DATA_DIR`). `railway.ts` definisce un **volume condiviso**: esegui
-> `railway config apply` per crearlo e montarlo su `/app/data` di **entrambi**
-> i servizi. Dopo di che `quotaverace.db`, `data/scan_*.json`, `orders.jsonl`
-> e `surebet_log.jsonl` sopravvivono ai redeploy.
+> `config.DATA_DIR`). Il volume `api-volume` montato su `/app/data` preserva
+> `quotaverace.db`, `data/scan_*.json`, `orders.jsonl`, `surebet_log.jsonl` e
+> il kill-switch a ogni redeploy.
 >
 > ⚠️ **Monta il volume su `/app/data`, MAI su `/app`**: Railway **non usa
 > overlay** — un volume sulla root `/app` nasconderebbe i sorgenti applicativi
 > (vedi [docs Railway — Volumes](https://docs.railway.com/volumes)).
 >
-> ⚠️ **Persistenza cache Betfair (bot vs API)**: il job 8:45 del bot scrive
-> `data/scan_<giorno>.json`, ma il servizio API è un **container separato**.
-> Con il **volume condiviso** di `railway.ts` (stesso volume su `/app/data` di
-> entrambi i servizi) il bot scrive e l'API legge lo stesso file: niente 503
-> `no_scan_cache`.
->
 > 💡 Migrazione locale: se `quotaverace.db` era alla root del progetto, spostalo
 > in `data/` (nuovo percorso) oppure imposta `QUOTAVERACE_DATA_DIR` al vecchio
 > percorso prima del primo avvio.
+
+---
+
+## 1ter. Volume di persistenza
+
+Un volume misura i dati persistenti di tutto l'app ed è dichiarato in
+`.railway/railway.ts` (`api-volume`, 500 MB, montato su `/app/data`).
+Montarlo su `/app/data` — **mai su `/app`**: Railway non usa overlay e un
+volume sulla root nasconderebbe i sorgenti.
+
+```bash
+railway config plan              # anteprima
+railway config apply --yes --confirm-destructive
+
+# Stato volume e font: crea il pem con:
+#   BETFAIR_CERT_PATH=/app/data/certs/client-ssl.cert.pem
+railway volume list
+railway volume files list / --json
+```
+
+> 💡 **UPsize** in live: da Hobby/Pro puoi ridimensionare il volume dalla
+> dashboard senza downtime (Settings → live resize).
 
 ---
 
@@ -104,15 +136,14 @@ cat client-ssl.crt client-ssl.key > client-ssl.cert.pem
 
 ### Setup certificato su Railway
 
-Railway non accetta upload di file: metti il pem su un **Volume** montato
-su `/app` e punta l'env lì:
+Railway non accetta upload di file: metti il pem sul **volume** montato su
+`/app/data` e punta l'env lì:
 
 ```
 BETFAIR_CERT_PATH=/app/data/certs/client-ssl.cert.pem
 ```
 
-1. Crea un Volume su `/app` nel servizio bot (serve comunque per
-   `quotaverace.db`, `orders.jsonl` e il kill-switch).
+1. Il volume `api-volume` è già su `/app/data` (servizio unico, vedi **§1ter**).
 2. Copia il pem nel volume (es. `railway run` + `scp`, oppure un commit
    temporaneo con un file non sensibile e poi spostalo nel volume —
    **mai** nel repo: la chiave privata NON deve finire su GitHub).
@@ -169,6 +200,9 @@ curl https://<vercel-url>/api/backend/api/health   # via proxy
 
 ## 4. Note
 
+- **Nuovo deployment**: quando riavvii il servizio, il volume resta montato
+  e i dati persistono. Verifica con `railway logs` le righe
+  `Mounting volume on: ...` e `QuotaVerace Pro avviato.`.
 - **Rate limit**: il free plan di the-odds-api ha 500 req/mese; quello di
   API-Football 100 req/giorno. I job del bot sono già tarati per rientrare.
 - **Betfair**: le chiamate Exchange non rientrano nei limiti the-odds-api;
