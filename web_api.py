@@ -311,6 +311,36 @@ def _analisi_json(params=None, body=None):
         return 500, {"error": str(e)}
 
 
+def _db_stats_json(params=None):
+    """Diagnostica: conteggi del DB (ratings, risultati, analisi)."""
+    conn = sqlite3.connect(str(DB))
+    c = conn.cursor()
+    out = {}
+    for table, q in [
+        ("match_results", "SELECT COUNT(*) FROM match_results"),
+        ("team_ratings", "SELECT COUNT(*) FROM team_ratings"),
+        ("match_analysis", "SELECT COUNT(*) FROM match_analysis"),
+        ("signals", "SELECT COUNT(*) FROM signals"),
+        ("cassa", "SELECT COUNT(*) FROM cassa"),
+    ]:
+        try:
+            out[table] = c.execute(q).fetchone()[0]
+        except Exception:
+            out[table] = None
+    try:
+        out["ultima_analisi"] = c.execute(
+            "SELECT timestamp FROM match_analysis ORDER BY id DESC LIMIT 1").fetchone()[0]
+    except Exception:
+        out["ultima_analisi"] = None
+    try:
+        out["ratings_sotto_soglia"] = c.execute(
+            "SELECT COUNT(*) FROM team_ratings WHERE (n_home + n_away) < 6").fetchone()[0]
+    except Exception:
+        out["ratings_sotto_soglia"] = None
+    conn.close()
+    return out
+
+
 def _scan_json(params=None):
     """Catalogo Betfair: cache del job giornaliero, o scan live con ?live=1.
 
@@ -351,6 +381,7 @@ ROUTES = {
     "/api/backtest": _backtest_json,
     "/api/campionati": _campionati_json,
     "/api/cassa": _cassa_get,
+    "/api/db_stats": _db_stats_json,
 }
 
 POST_ROUTES = {
