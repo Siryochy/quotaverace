@@ -60,3 +60,12 @@ class TestRatingCoeff:
     def test_nessun_dato_nessun_rating(self, _tmp_db):
         compute_ratings()
         assert get_rating("Inter") is None
+
+    def test_campione_minimo_sotto_soglia_usa_statico(self, _tmp_db):
+        # 1-2 partite estreme NON devono ribaltare il modello: sotto la
+        # soglia MIN_MATCHES il rating dinamico non viene usato (None ->
+        # expected_goals ricade sul rating statico curato).
+        _seed(2, 1, 4, 0, "2026-08-20T18:00:00Z")  # Inter vince 4-0 due volte
+        compute_ratings()
+        r = get_rating("Inter")
+        assert r is None or (r["attack_home"] + r["attack_away"]) < 2.0

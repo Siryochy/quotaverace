@@ -8,7 +8,13 @@ from config import DATA_DIR
 DB_PATH = DATA_DIR / "quotaverace.db"
 HALF_LIFE_DAYS = 100.0   # mezza vita (ricerca: 100-150 giorni)
 PRIOR_MATCHES = 6.0      # forza del prior (shrinkage verso la media)
-MIN_MATCHES = 1          # sotto questa soglia si usa il rating statico
+# Sotto questa soglia di partite REALI si usa il rating statico curato.
+# Campioni di 1-2 partite producono coefficienti estremi (un 3-0 singolo
+# ribalta il modello): servono ~6 partite per una stima stabile (ricerca
+# sui rating systems). Il job dei risultati scarica solo gli ultimi 2
+# giorni, quindi i rating dinamici entrano in gioco quando la stagione
+# accumula partite sufficienti.
+MIN_MATCHES = 6
 
 GLOBAL_H = 1.52          # gol medi casa
 GLOBAL_A = 1.28          # gol medi trasferta
