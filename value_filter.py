@@ -2,6 +2,13 @@
 
 from typing import List, Dict, Any
 
+from market_calib import (
+    blend_probability,
+    favourite_longshot_adjust,
+    market_edge as _market_edge,
+    MARKET_EDGE_MIN,  # ri-esportata: soglia +3pp sul mercato (ricerca 2026)
+)
+
 
 # === FILTRI DI SANITÀ ===
 EV_MIN = 0.03          # +3% minimo
@@ -10,7 +17,6 @@ ODDS_MIN = 1.50        # quota minima
 ODDS_MAX = 5.00        # quota massima
 KELLY_FRACTION = 0.25  # 1/4 Kelly
 MAX_STAKE_PCT = 0.03   # cap 3% del bankroll
-
 
 def compute_ev(prob: float, odds: float) -> float:
     """Expected Value: (prob * odds) - 1"""
@@ -69,8 +75,22 @@ def kelly_euro(bankroll: float, prob: float, odds: float, fraction: float = KELL
     return min(stake, cap)
 
 
-def is_sane(prob: float, odds: float, ev: float) -> tuple[bool, str]:
-    """Verifica se il segnale supera i filtri di sanità"""
+def market_edge(model_prob: float, market_prob: float) -> float:
+    """Edge del modello sul mercato: model_prob - market_prob."""
+    return _market_edge(model_prob, market_prob) or 0.0
+
+
+def is_sane(prob: float, odds: float, ev: float,
+            market_prob: float | None = None,
+            market_edge_min: float = MARKET_EDGE_MIN) -> tuple[bool, str]:
+    """Verifica se il segnale supera i filtri di sanità.
+
+    Con market_prob disponibile, aggiunge il vincolo "beating the market":
+    il segnale e' valore solo se il modello stima una probabilita' SUPERIORE
+    a quella implicita nel mercato (devig). Questo e' il test decisivo
+    della strategia value betting: EV positivo contro un bookmaker non basta,
+    bisogna battere la closing line.
+    """
     if odds < ODDS_MIN:
         return False, f"quota troppo bassa ({odds:.2f} < {ODDS_MIN})"
     if odds > ODDS_MAX:
@@ -79,11 +99,34 @@ def is_sane(prob: float, odds: float, ev: float) -> tuple[bool, str]:
         return False, f"EV troppo basso ({ev*100:.1f}% < {EV_MIN*100:.0f}%)"
     if ev > EV_MAX:
         return False, f"ANOMALIA: EV troppo alto ({ev*100:.1f}% > {EV_MAX*100:.0f}%) — possibile errore dati"
+    if market_prob is not None:
+        edge = prob - market_prob
+        if edge < market_edge_min:
+            return False, (f"non batte il mercato (edge {edge*100:.1f}pp < {market_edge_min*100:.0f}pp "
+                           f"vs prob. di mercato {market_prob*100:.1f}%)")
     return True, "OK"
 
 
+def adjusted_probability(model_prob: float, market_prob: float | None,
+                         odds: float) -> float:
+    """Probabilita' finale del segnale, calibrata sul mercato.
+
+    Combina i due correttivi della ricerca:
+    1. blending modello+mercato (riduce l'overconfidence del modello);
+    2. correzione favourite-longshot (sopra LONG_SHOT_ODDS la stima del
+       modello viene compressa verso il mercato).
+    """
+    p = blend_probability(model_prob, market_prob)
+    return favourite_longshot_adjust(p, market_prob, odds)
+
+
 def filter_value_bets(odds_data: List[Dict[str, Any]], ev_threshold: float = EV_MIN) -> List[Dict[str, Any]]:
-    """Filtra le quote con EV positivo, applicando filtri di sanità Pro"""
+    """Filtra le quote con EV positivo, applicando filtri di sanità Pro.
+
+    Backward-compatible: se la riga non ha "market_prob" (nessun riferimento
+    di mercato) mantiene il comportamento storico; se la ha, aggiunge i campi
+    market_edge / beats_market e il vincolo "beating the market" alla sanita'.
+    """
     value_signals = []
     for odd in odds_data:
         prob = odd.get("probabilita", 0.0)
@@ -91,7 +134,12 @@ def filter_value_bets(odds_data: List[Dict[str, Any]], ev_threshold: float = EV_
         if prob <= 0 or quota <= 1.0:
             continue
         ev = compute_ev(prob, quota)
-        sane, reason = is_sane(prob, quota, ev)
+        market_prob = odd.get("market_prob")
+        if market_prob is not None:
+            edge = prob - market_prob
+            odd["market_edge"] = edge
+            odd["beats_market"] = edge >= MARKET_EDGE_MIN
+        sane, reason = is_sane(prob, quota, ev, market_prob=market_prob)
         odd["ev"] = ev
         odd["kelly"] = kelly_fraction(prob, quota)
         odd["sane"] = sane

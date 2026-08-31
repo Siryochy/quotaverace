@@ -7,7 +7,9 @@ from odds_api import fetch_odds, SPORTS_MAP
 from leagues_data import ALL_LEAGUES
 from poisson_engine import expected_goals, prob_1x2, prob_over_under
 from value_filter import (compute_ev, kelly_fraction, kelly_euro, is_sane,
-                           combined_quota, combined_probability, multipla_stake)
+                           combined_quota, combined_probability, multipla_stake,
+                           adjusted_probability)
+from market_calib import market_implied, MARKET_EDGE_STRONG
 from tracker import (save_match, get_today_matches, save_analysis, get_analysis_for_match,
                       clear_old_matches, save_clv)
 
@@ -110,34 +112,109 @@ def fetch_and_analyze_today():
     return total_matches, value_count
 
 def _analyze_match(match_id, match, home_db, away_db, league):
+    """Analizza un match: modello Poisson vs mercato (devig).
+
+    Strategia (ricerca 2026): il valore esiste SOLO se il modello batte la
+    probabilita' implicita del mercato (proxy della closing line), non se
+    l'EV contro un singolo bookmaker e' positivo. Il flusso e':
+
+    1. line shopping: per ogni esito si prende il MIGLIOR prezzo tra tutti
+       i bookmaker (l'edge piu' facile da raccogliere);
+    2. devig (metodo power): i prezzi di mercato vengono privati del margine
+       -> probabilita' fair di mercato, con correzione del favourite-longshot
+       bias;
+    3. probabilita' finale = blend modello+mercato (riduce l'overconfidence
+       del modello) + correzione longshot;
+    4. EV calcolato sulla probabilita' blend, e il segnale e' valore solo se
+       il modello batte il mercato di almeno MARKET_EDGE_MIN punti.
+    """
     try:
         lam_h, lam_a = expected_goals(home_db, away_db)
     except Exception:
         return "error"
     p1, px, p2 = prob_1x2(lam_h, lam_a)
     p_over, _ = prob_over_under(lam_h, lam_a)
-    best = None
+
+    home_api = (match.get("home_team") or "").strip().lower()
+    away_api = (match.get("away_team") or "").strip().lower()
+
+    # 1. Line shopping: miglior prezzo (e book) per esito, su tutti i bookmaker.
+    h2h_prices: Dict[str, tuple] = {}    # "1"/"X"/"2" -> (prezzo, bookmaker)
+    total_prices: Dict[str, tuple] = {}  # "Over 2.5" -> (prezzo, bookmaker)
     for bm in match.get("bookmakers", []):
+        bname = bm.get("title") or bm.get("key") or "Sconosciuto"
         for mkt in bm.get("markets", []):
-            bias = DERIV_BIAS if mkt["key"] == "totals" else 0.0
-            if mkt["key"] == "h2h":
+            if mkt.get("key") == "h2h":
                 for out in mkt.get("outcomes", []):
-                    name, price = out["name"], out["price"]
-                    prob = p1 if name == match["home_team"] else (p2 if name == match["away_team"] else px)
-                    ev = compute_ev(prob, price)
-                    if best is None or (ev + bias) > best["score"]:
-                        best = {"score": ev + bias, "ev": ev, "esito": name,
-                                "quota": price, "bookmaker": bm["title"], "prob": prob}
-            elif mkt["key"] == "totals":
+                    name = (out.get("name") or "").strip()
+                    price = out.get("price")
+                    if not name or not price or float(price) <= 1.0:
+                        continue
+                    low = name.lower()
+                    if low == home_api:
+                        esito = "1"
+                    elif low == away_api:
+                        esito = "2"
+                    elif low in ("draw", "pareggio"):
+                        esito = "X"
+                    else:
+                        continue
+                    cur = h2h_prices.get(esito)
+                    if cur is None or float(price) > cur[0]:
+                        h2h_prices[esito] = (float(price), name, bname)
+            elif mkt.get("key") == "totals":
                 for out in mkt.get("outcomes", []):
-                    if "over" in out["name"].lower() and out.get("point") == 2.5:
-                        price = out["price"]
-                        ev = compute_ev(p_over, price)
-                        if best is None or (ev + bias) > best["score"]:
-                            best = {"score": ev + bias, "ev": ev, "esito": "Over 2.5",
-                                    "quota": price, "bookmaker": bm["title"], "prob": p_over}
-    if not best:
+                    name = (out.get("name") or "").strip()
+                    price = out.get("price")
+                    if not name or not price or float(price) <= 1.0:
+                        continue
+                    if out.get("point") == 2.5:
+                        low = name.lower()
+                        if "over" in low:
+                            mkey, disp = "Over 2.5", "Over 2.5"
+                        elif "under" in low:
+                            mkey, disp = "Under 2.5", "Under 2.5"
+                        else:
+                            continue
+                        cur = total_prices.get(mkey)
+                        if cur is None or float(price) > cur[0]:
+                            total_prices[mkey] = (float(price), disp, bname)
+
+    # 2. Probabilita' fair di mercato (devig power, corregge il longshot bias).
+    market_h2h = market_implied({k: v[0] for k, v in h2h_prices.items()}) if len(h2h_prices) >= 2 else None
+    market_tot = market_implied({k: v[0] for k, v in total_prices.items()}) if len(total_prices) >= 2 else None
+
+    # 3. Candidati: esito (chiave mercato) -> modello + mercato.
+    candidates = []
+    for mkey, model_prob, market, prices in (
+        ("1", p1, market_h2h, h2h_prices),
+        ("X", px, market_h2h, h2h_prices),
+        ("2", p2, market_h2h, h2h_prices),
+        ("Over 2.5", p_over, market_tot, total_prices),
+    ):
+        entry = prices.get(mkey)
+        if not entry:
+            continue
+        price, display_esito, bookmaker = entry
+        market_prob = market.get(mkey) if market else None
+        bias = DERIV_BIAS if mkey == "Over 2.5" else 0.0
+        final_prob = adjusted_probability(model_prob, market_prob, price)
+        ev = compute_ev(final_prob, price)
+        candidates.append({
+            "score": ev + bias,
+            "ev": ev,
+            "esito": display_esito,
+            "quota": price,
+            "bookmaker": bookmaker,
+            "prob": final_prob,
+            "prob_model": model_prob,
+            "market_prob": market_prob,
+            "market_edge": (model_prob - market_prob) if market_prob is not None else None,
+        })
+
+    if not candidates:
         return "no_odds"
+    best = max(candidates, key=lambda c: c["score"])
 
     # CLV: la prima volta che vediamo il match il prezzo e' quello del segnale;
     # le letture successive convergono verso la quota di chiusura del mercato.
@@ -146,20 +223,24 @@ def _analyze_match(match_id, match, home_db, away_db, league):
         save_clv(match_id, str(best["esito"]), best["quota"], signal_started=signal_started)
     except Exception as e:
         logger.warning(f"Errore tracking CLV per {match_id}: {e}")
-    
-    sane, reason = is_sane(best["prob"], best["quota"], best["ev"])
+
+    sane, reason = is_sane(best["prob"], best["quota"], best["ev"],
+                           market_prob=best["market_prob"])
     if not sane:
         status = "rejected"
         # Log solo a livello debug per non sporcare la dashboard
         logger.debug(f"FILTRATO: {home_db} vs {away_db} — {reason}")
-    elif best["ev"] > 0.08:
+    elif best["ev"] > 0.08 and (best["market_edge"] is None
+                                 or best["market_edge"] >= MARKET_EDGE_STRONG):
         status = "strong_value"
     elif best["ev"] > 0.03:
         status = "value"
     else:
         status = "no_value"
-    
-    save_analysis(match_id, lam_h, lam_a, p1, px, p2, p_over, best["ev"], best["esito"], best["quota"], best["bookmaker"], status)
+
+    save_analysis(match_id, lam_h, lam_a, p1, px, p2, p_over, best["ev"], best["esito"],
+                  best["quota"], best["bookmaker"], status,
+                  market_prob=best["market_prob"], market_edge=best["market_edge"])
     return status
 
 def get_calendar_formatted() -> str:
@@ -176,12 +257,14 @@ def get_calendar_formatted() -> str:
         time_str = commence[11:16] if len(commence) > 16 else "--:--"
         ana = get_analysis_for_match(mid)
         if ana:
-            _, _, lam_h, lam_a, p1, px, p2, p_over, best_ev, best_esito, best_quota, best_bookmaker, status, _ = ana
+            (_, _, lam_h, lam_a, p1, px, p2, p_over, best_ev, best_esito,
+             best_quota, best_bookmaker, status, _, market_prob, market_edge) = ana
             ev_txt = f"+{best_ev*100:.1f}%" if best_ev > 0 else f"{best_ev*100:.1f}%"
+            mkt_txt = f" | 🎯 mercato {market_edge*100:+.1f}pp" if market_edge is not None else ""
             if status == "strong_value":
-                line = f"🔥 {time_str} {home} vs {away} → {best_esito} @ {best_quota:.2f} (EV {ev_txt})"
+                line = f"🔥 {time_str} {home} vs {away} → {best_esito} @ {best_quota:.2f} (EV {ev_txt}{mkt_txt})"
             elif status == "value":
-                line = f"🟡 {time_str} {home} vs {away} → {best_esito} @ {best_quota:.2f} (EV {ev_txt})"
+                line = f"🟡 {time_str} {home} vs {away} → {best_esito} @ {best_quota:.2f} (EV {ev_txt}{mkt_txt})"
             elif status == "rejected":
                 line = f"❌ {time_str} {home} vs {away} → FILTRATO"
             else:
@@ -199,7 +282,7 @@ def get_value_picks_for_schedina() -> List[Dict]:
         conn = _get_conn()
         c = conn.cursor()
         today = datetime.now().strftime("%Y-%m-%d")
-        c.execute('''SELECT m.league, m.home_team, m.away_team, a.best_esito, a.best_quota, a.best_bookmaker, a.best_ev, a.lam_h, a.lam_a
+        c.execute('''SELECT m.league, m.home_team, m.away_team, a.best_esito, a.best_quota, a.best_bookmaker, a.best_ev, a.lam_h, a.lam_a, a.market_edge, a.market_prob
                      FROM matches m JOIN match_analysis a ON m.id = a.match_id
                      WHERE m.commence_time LIKE ? AND a.status IN ('value','strong_value')
                      ORDER BY a.best_ev DESC LIMIT 7''', (f"{today}%",))
@@ -209,6 +292,7 @@ def get_value_picks_for_schedina() -> List[Dict]:
             picks.append({
                 "league": r[0], "home": r[1], "away": r[2], "esito": r[3],
                 "quota": r[4], "bookmaker": r[5], "ev": r[6], "lam_h": r[7], "lam_a": r[8],
+                "market_edge": r[9], "market_prob": r[10],
                 "evento": f"{r[0]} – {r[1]} vs {r[2]}"
             })
         return picks
@@ -232,11 +316,12 @@ def format_schedina(picks: List[Dict], bankroll: float = 100.0) -> str:
         pro = get_pro_stake(bankroll, prob, p["quota"])
         stake = pro["stake"]
         total_stake += stake
+        mkt_txt = f" | 🎯 batte il mercato di {p['market_edge']*100:+.1f}pp" if p.get("market_edge") is not None else ""
         msg += (
             f"*{i}. {p['evento']}*\n"
             f"   🎯 {p['esito']} @ {p['quota']:.2f} ({p['bookmaker']})\n"
-            f"   📈 EV: +{p['ev']*100:.1f}% | Stake: €{stake:.2f} ({pro['stake_pct_of_bankroll']:.1f}% bankroll)\n"
-            f"   🛡 Filtri: Kelly 1/4 | Cap 3% | EV 3-15% | Odds 1.50-5.00\n\n"
+            f"   📈 EV: +{p['ev']*100:.1f}%{mkt_txt} | Stake: €{stake:.2f} ({pro['stake_pct_of_bankroll']:.1f}% bankroll)\n"
+            f"   🛡 Filtri: Kelly 1/4 | Cap 3% | EV 3-15% | Odds 1.50-5.00 | Mercato: devig power\n\n"
         )
     msg += f"💵 *Investimento totale:* €{total_stake:.2f} ({(total_stake/bankroll*100):.1f}% bankroll)\n"
     msg += f"💰 *Bankroll di riferimento:* €{bankroll:.2f}\n\n"

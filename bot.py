@@ -428,16 +428,20 @@ def format_value_bets(odds_data, bankroll=100.0):
         return "📊 *Value Bet Pro*\n\nNessun segnale che supera i filtri (EV 3%-15%, Odds 1.50-5.00)." + DISCLAIMER
     msg = "📊 *VALUE BET PRO — Filtri attivi*\n"
     msg += "🛡 EV: 3%-15% | Odds: 1.50-5.00 | Kelly 1/4 | Cap 3%\n"
+    msg += "🎯 Bonus: confronto col mercato (devig power)\n"
     msg += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
     for sig in value_signals[:5]:
         ev_pct = sig["ev"] * 100
         prob = sig.get("probabilita", 0)
         quota = sig.get("quota_decimale", 1.0)
         pro = get_pro_stake(bankroll, prob, quota)
+        mkt_txt = ""
+        if sig.get("market_edge") is not None:
+            mkt_txt = f" | 🎯 mercato {sig['market_edge']*100:+.1f}pp"
         msg += (
             f"🏟 {sig['evento']}\n"
             f"🎯 {sig['esito']} @ {sig['quota_decimale']:.2f} ({sig['bookmaker']})\n"
-            f"📈 EV: +{ev_pct:.2f}% | Stake: €{pro['stake']:.2f} ({pro['stake_pct_of_bankroll']:.1f}%)\n\n"
+            f"📈 EV: +{ev_pct:.2f}%{mkt_txt} | Stake: €{pro['stake']:.2f} ({pro['stake_pct_of_bankroll']:.1f}%)\n\n"
         )
     msg += f"💰 Bankroll: €{bankroll:.2f}"
     return msg + DISCLAIMER

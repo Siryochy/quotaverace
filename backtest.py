@@ -45,7 +45,7 @@ def _load_from_db() -> List[Dict]:
     try:
         _create_results_table(conn)
         c.execute('''SELECT r.home_team, r.away_team, r.score_home, r.score_away,
-                            a.best_esito, a.best_quota, a.best_ev, a.status
+                            a.best_esito, a.best_quota, a.best_ev, a.status, a.market_edge
                      FROM match_results r
                      JOIN match_analysis a ON a.match_id = r.match_id''')
         rows = c.fetchall()
@@ -53,7 +53,7 @@ def _load_from_db() -> List[Dict]:
         conn.close()
 
     bets: List[Dict] = []
-    for home, away, sh, sa, esito, quota, ev, status in rows:
+    for home, away, sh, sa, esito, quota, ev, status, market_edge in rows:
         if status not in ("value", "strong_value") or not esito or not quota or quota <= 1.0:
             continue
         el = esito.lower().strip()
@@ -73,6 +73,7 @@ def _load_from_db() -> List[Dict]:
             "quota": quota,
             "ev": ev or 0.0,
             "won": won,
+            "market_edge": market_edge,
         })
     return bets
 
@@ -127,6 +128,23 @@ def backtest(bets: List[Dict]) -> Dict:
     net = sum(r["pnl"] for r in records)
     ev_total = sum(r["ev"] for r in records)
 
+    # Split per edge sul mercato (ricerca 2026): i segnali che BATTONO la
+    # closing line (market_edge >= 3pp) dovrebbero performare meglio di
+    # quelli che non la battono. E' il test decisivo della calibrazione.
+    beats = [r for r in records if r.get("market_edge") is not None
+             and r["market_edge"] >= 0.03]
+    no_beats = [r for r in records if r.get("market_edge") is not None
+                and r["market_edge"] < 0.03]
+
+    def _roi(group):
+        if not group:
+            return None
+        g = sum(r["pnl"] for r in group)
+        return g / len(group) * 100.0, len(group)
+
+    beats_roi = _roi(beats)
+    no_beats_roi = _roi(no_beats)
+
     return {
         "n": n,
         "won": won,
@@ -138,6 +156,8 @@ def backtest(bets: List[Dict]) -> Dict:
         "net_units": net,
         "sufficiente": n >= MIN_SAMPLE,
         "warn": n >= MIN_WARN_SAMPLE,
+        "beats_market": beats_roi,
+        "no_beats_market": no_beats_roi,
     }
 
 
@@ -145,6 +165,18 @@ def format_backtest(stats: Dict) -> str:
     n = stats["n"]
     if n == 0:
         return "📊 *BACKTEST*" + DISCLAIMER
+    mkt_lines = ""
+    if stats.get("beats_market") or stats.get("no_beats_market"):
+        b = stats["beats_market"]
+        nb = stats["no_beats_market"]
+        b_txt = f"{b[0]:+.2f}% ({b[1]})" if b else "n.d."
+        nb_txt = f"{nb[0]:+.2f}% ({nb[1]})" if nb else "n.d."
+        mkt_lines = (
+            f"\n🎯 *Edge vs mercato (closing line):*\n"
+            f"   ✅ Batte il mercato: ROI {b_txt}\n"
+            f"   ⚠️ Non batte il mercato: ROI {nb_txt}\n\n"
+        )
+
     body = (
         "📊 *BACKTEST SEGNALI* — Verifica di calibrazione\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -157,6 +189,7 @@ def format_backtest(stats: Dict) -> str:
         f"💰 ROI realizzato: {stats['roi']:+.2f}%\n"
         f"🔬 Gap calibrazione (ROI−EV): {stats['gap']:+.2f}%\n"
         f"📦 P/L cumulato: {stats['net_units']:+.2f} unità\n\n"
+        + mkt_lines
     )
 
     if not stats["sufficiente"] and not stats["warn"]:

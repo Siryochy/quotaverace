@@ -30,7 +30,14 @@ def _get_conn():
         lam_h REAL, lam_a REAL, prob_1 REAL, prob_X REAL, prob_2 REAL,
         prob_over REAL, best_ev REAL, best_esito TEXT, best_quota REAL,
         best_bookmaker TEXT, status TEXT, timestamp TEXT,
+        market_prob REAL, market_edge REAL,
         FOREIGN KEY (match_id) REFERENCES matches(id))''')
+    # Migrazione per DB esistenti: aggiunge le colonne mercato se mancano.
+    cols = [r[1] for r in c.execute("PRAGMA table_info(match_analysis)")]
+    if "market_prob" not in cols:
+        c.execute("ALTER TABLE match_analysis ADD COLUMN market_prob REAL")
+    if "market_edge" not in cols:
+        c.execute("ALTER TABLE match_analysis ADD COLUMN market_edge REAL")
     c.execute('''CREATE TABLE IF NOT EXISTS notifications (
         match_id TEXT, date TEXT, PRIMARY KEY (match_id, date))''')
     c.execute('''CREATE TABLE IF NOT EXISTS clv_history (
@@ -96,11 +103,18 @@ def get_today_matches():
     rows = c.fetchall(); conn.close()
     return rows
 
-def save_analysis(match_id, lam_h, lam_a, p1, px, p2, p_over, best_ev, best_esito, best_quota, best_bookmaker, status):
+def save_analysis(match_id, lam_h, lam_a, p1, px, p2, p_over, best_ev, best_esito, best_quota, best_bookmaker, status,
+                  market_prob=None, market_edge=None):
+    """Salva l'analisi di un match, incluso il confronto col mercato.
+
+    market_prob: probabilita' implicita del mercato (devig) per l'esito scelto.
+    market_edge: model_prob - market_prob (quanto il modello batte il mercato).
+    """
     conn = _get_conn(); c = conn.cursor()
-    c.execute('''INSERT INTO match_analysis (match_id,lam_h,lam_a,prob_1,prob_X,prob_2,prob_over,best_ev,best_esito,best_quota,best_bookmaker,status,timestamp)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-              (match_id, lam_h, lam_a, p1, px, p2, p_over, best_ev, best_esito, best_quota, best_bookmaker, status, datetime.now().isoformat()))
+    c.execute('''INSERT INTO match_analysis (match_id,lam_h,lam_a,prob_1,prob_X,prob_2,prob_over,best_ev,best_esito,best_quota,best_bookmaker,status,timestamp,market_prob,market_edge)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+              (match_id, lam_h, lam_a, p1, px, p2, p_over, best_ev, best_esito, best_quota, best_bookmaker, status,
+               datetime.now().isoformat(), market_prob, market_edge))
     conn.commit(); conn.close()
 
 def get_analysis_for_match(match_id):
