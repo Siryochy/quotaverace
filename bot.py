@@ -1,11 +1,14 @@
 import json
 import logging
 import os
+import shutil
+import sqlite3
 from datetime import time, datetime
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+from config import DATA_DIR
 from poisson_engine import expected_goals, prob_1x2, prob_over_under, prob_btts
 from leagues_data import ALL_LEAGUES
 from tracker import init_db, log_signal, get_signals, get_performance_summary, add_subscriber, remove_subscriber, get_subscribers, is_notified, mark_notified
@@ -701,6 +704,64 @@ async def history_sync_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Errore history_sync_job: {e}")
 
+def _db_path():
+    """Percorso del DB SQLite (vive in DATA_DIR)."""
+    return DATA_DIR / "quotaverace.db"
+
+
+def backup_data_job(context: ContextTypes.DEFAULT_TYPE):
+    """Backup giornaliero dei dati persistenti in DATA_DIR/backups/.
+
+    Copia quotaverace.db (via sqlite3 backup, sicuro anche con connessioni
+    aperte) e la cartella data/ corrente. Tiene gli ultimi BACKUP_KEEP
+    snapshot e rimuove i piu' vecchi, per non far crescere il volume
+    all'infinito.
+    """
+    from tracker import DB_PATH
+    backup_root = DATA_DIR / "backups"
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = backup_root / stamp
+    dest.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # DB tramite backup API: coerente anche se qualcun altro ha una
+        # connessione aperta (es. web_api in thread).
+        src_db = DB_PATH
+        if src_db.exists():
+            out = sqlite3.connect(str(dest / "quotaverace.db"))
+            with sqlite3.connect(str(src_db)) as src:
+                src.backup(out)
+            out.close()
+    except Exception as e:
+        logger.error(f"backup_data_job: errore DB: {e}")
+
+    try:
+        # Copia i file data/ (scan, cache, orders, surebet_log...)
+        for item in DATA_DIR.iterdir():
+            if item.name == "backups" or item == dest:
+                continue
+            target = dest / item.name
+            if item.is_dir():
+                shutil.copytree(item, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, target)
+    except Exception as e:
+        logger.error(f"backup_data_job: errore copia data/: {e}")
+
+    # Pulizia: mantieni solo i BACKUP_KEEP piu' recenti.
+    BACKUP_KEEP = 7
+    try:
+        snaps = sorted((p for p in backup_root.iterdir() if p.is_dir()),
+                       key=lambda p: p.name)
+        for old in snaps[:-BACKUP_KEEP]:
+            shutil.rmtree(old, ignore_errors=True)
+    except Exception as e:
+        logger.error(f"backup_data_job: errore pulizia: {e}")
+
+    logger.info(f"backup_data_job: snapshot {stamp} salvato in {dest} "
+                f"(tiene ultimi {BACKUP_KEEP})")
+
+
 def main() -> None:
     if not TOKEN: raise ValueError("Token non configurato.")
     init_db()
@@ -739,7 +800,9 @@ def main() -> None:
         job_queue.run_daily(results_job, time=time(hour=21, minute=30))
         job_queue.run_daily(history_sync_job, time=time(hour=8, minute=30))
         job_queue.run_daily(betfair_scan_job, time=time(hour=8, minute=45))
-        logger.info("Job Pro schedulati: 06:00 / 08:30 / 08:45 / 14:00 / 20:00 / 21:30 ITA")
+        job_queue.run_daily(backup_data_job, time=time(hour=3, minute=30))
+        job_queue.run_once(backup_data_job, when=10)  # snapshot di base all'avvio
+        logger.info("Job Pro schedulati: 03:30 backup / 06:00 / 08:30 / 08:45 / 14:00 / 20:00 / 21:30 ITA")
     else: logger.warning("JobQueue non disponibile")
     logger.info("QuotaVerace Pro avviato.")
     application.run_polling()
