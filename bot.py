@@ -11,7 +11,9 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from config import DATA_DIR
 from poisson_engine import expected_goals, prob_1x2, prob_over_under, prob_btts
 from leagues_data import ALL_LEAGUES
-from tracker import init_db, log_signal, get_signals, get_performance_summary, add_subscriber, remove_subscriber, get_subscribers, is_notified, mark_notified
+from tracker import (init_db, log_signal, get_signals, get_performance_summary,
+                     add_subscriber, remove_subscriber, get_subscribers, set_tier,
+                     get_subscription, is_premium, is_notified, mark_notified)
 from odds_ingest import load_odds
 from value_filter import compute_ev, kelly_fraction, kelly_euro, filter_value_bets, is_sane, get_pro_stake
 from surebet_scanner import scan_surebets
@@ -331,7 +333,7 @@ async def cmd_multipla(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     add_subscriber(update.effective_chat.id)
     await update.message.reply_text(
-        "🔔 *Iscrizione attivata!*\n\nRiceverai:\n"
+        "🔔 *Iscrizione attivata!* (piano: FREE)\n\nRiceverai:\n"
         "• Schedina mattutina alle 8:00\n"
         "• Notifiche value bet (EV 3%-15%, Odds 1.50-5.00)\n"
         "• Aggiornamenti pomeriggio e sera\n\n"
@@ -339,11 +341,70 @@ async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• Kelly 1/4 | Cap puntata 3%\n"
         "• EV min +3% | EV max +15%\n"
         "• Odds 1.50-5.00\n\n"
-        "`/unsubscribe` per disiscriverti.", parse_mode="Markdown")
+        "💎 *Premium* (segnali istantanei, strong value, surebet): "
+        "`/premium` per info.", parse_mode="Markdown")
 
 async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     remove_subscriber(update.effective_chat.id)
     await update.message.reply_text("🔕 Disiscrizione completata.", parse_mode="Markdown")
+
+async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Attiva il piano premium GRATUITAMENTE (offerta lancio).
+
+    Nessun pagamento richiesto: chiunque puo' sbloccare premium con
+    /premium. L'infrastruttura dei tier resta pronta per monetizzare
+    in futuro — basta impostare PREMIUM_FREE=0 per chiudere il gate
+    e richiedere il pagamento (Telegram Stars / Stripe).
+    """
+    chat_id = update.effective_chat.id
+    add_subscriber(chat_id)
+    days = 90
+    if context.args:
+        try:
+            days = max(1, int(context.args[0]))
+        except ValueError:
+            pass
+    from datetime import timedelta
+    until = (datetime.now() + timedelta(days=days)).isoformat()
+    premium_free = os.getenv("PREMIUM_FREE", "1").lower() not in ("0", "false", "no")
+    if premium_free:
+        set_tier(chat_id, "premium", until)
+        await update.message.reply_text(
+            "💎 *Premium attivo — GRATIS!*\n\n"
+            f"Scadenza: {datetime.strptime(until[:10], '%Y-%m-%d').strftime('%d/%m/%Y')} "
+            "(rinnovabile sempre gratis con `/premium`)\n\n"
+            "Hai sbloccato:\n"
+            "• Segnali value IMMEDIATI (no ritardo di 3 ore)\n"
+            "• Alert surebet in tempo reale\n"
+            "• Badge 💎 sui segnali\n\n"
+            "`/mytier` per lo stato. `/unsubscribe` per disiscriverti.",
+            parse_mode="Markdown")
+    else:
+        await update.message.reply_text(
+            "💎 *Piano Premium*\n\n"
+            "Riceverai (rispetto al piano free):\n"
+            "• Segnali value IMMEDIATI (il piano free li riceve in ritardo)\n"
+            "• Alert surebet in tempo reale\n\n"
+            "Per attivarlo contatta l'amministratore.", parse_mode="Markdown")
+
+async def cmd_mytier(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sub = get_subscription(update.effective_chat.id)
+    if not sub:
+        await update.message.reply_text(
+            "Non risulti iscritto. `/subscribe` per attivare le notifiche.",
+            parse_mode="Markdown")
+        return
+    tier, until = sub
+    if tier == "premium":
+        expiry = (datetime.fromisoformat(until).strftime("%d/%m/%Y")
+                  if until else "senza scadenza")
+        await update.message.reply_text(
+            f"💎 Piano: PREMIUM (scadenza: {expiry})", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(
+            "🆓 Piano: FREE\n\n"
+            "Il piano premium aggiunge: segnali immediati, strong value, "
+            "surebet. `/premium` per info.", parse_mode="Markdown")
 
 async def cmd_checknow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("🔍 Controllo quote reali con filtri Pro...", parse_mode="Markdown")
@@ -588,14 +649,29 @@ async def cmd_risultati(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.error(f"Errore risultati: {e}")
         await update.message.reply_text("❌ Errore nel recupero risultati.", parse_mode="Markdown")
 
-async def notify_job(context: ContextTypes.DEFAULT_TYPE):
+# Ritardo dei segnali per il piano free (ore): il premium li riceve subito.
+FREE_DELAY_HOURS = 3
+
+async def notify_job(context: ContextTypes.DEFAULT_TYPE, delayed: bool = False):
+    """Notifica value bet: immediata per premium, ritardata per free.
+
+    delayed=True e' usato dal job free (3 ore dopo): ripete il controllo ma
+    salta i segnali gia' spediti ai premium (mark_notified e' globale).
+    """
     if not os.getenv("ODDS_API_KEY") or not LIVE_ODDS_AVAILABLE: return
     try:
         odds = get_live_odds()
         if not odds: return
         value_signals = filter_value_bets(enrich_odds_with_probs(odds), ev_threshold=0.03)
         if not value_signals: return
-        subscribers = get_subscribers()
+        if delayed:
+            # Piano free: solo segnali non ancora notificati (i premium li
+            # hanno gia' ricevuti al giro immediato, con mark_notified).
+            subscribers = [cid for cid in get_subscribers(tier="free")
+                           if not is_premium(cid)]
+        else:
+            subscribers = [cid for cid in get_subscribers()
+                           if is_premium(cid)]
         if not subscribers: return
         today = __import__('datetime').datetime.now().strftime("%Y-%m-%d")
         for sig in value_signals[:3]:
@@ -604,8 +680,9 @@ async def notify_job(context: ContextTypes.DEFAULT_TYPE):
             prob = sig.get("probabilita", 0)
             quota = sig.get("quota_decimale", 1.0)
             pro = get_pro_stake(100.0, prob, quota)
+            tag = "💎 PREMIUM" if not delayed else "🔔 VALUE BET"
             msg = (
-                f"🔔 *NOTIFICA VALUE BET PRO*\n"
+                f"🔔 *NOTIFICA {tag}*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"🏟 {sig['evento']}\n"
                 f"🎯 {sig['esito']} @ {sig['quota_decimale']:.2f} ({sig['bookmaker']})\n"
@@ -636,7 +713,12 @@ async def afternoon_job(context: ContextTypes.DEFAULT_TYPE):
         _update_results()
     except Exception as e:
         logger.error(f"Errore update risultati job: {e}")
-    await notify_job(context)
+    await notify_job(context)          # immediato per i premium
+    await notify_job(context, delayed=True)  # ritardo 3h per il piano free
+
+async def free_delayed_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job con ritardo di 3 ore per il piano free."""
+    await notify_job(context, delayed=True)
 
 async def evening_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Job serale: ricontrollo Pro")
@@ -676,12 +758,14 @@ async def betfair_scan_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Errore betfair_scan_job: {e}")
         return
     # pipeline surebet su dati reali (cache-only, zero rete aggiuntiva)
+    # Alert surebet: SOLO premium (vantaggio competitivo in tempo reale).
     try:
         alerts = await loop.run_in_executor(_scan_executor, run_surebet_alert)
         if alerts:
             text = format_alert(alerts)
-            subscribers = get_subscribers()
-            logger.info("surebet alert su dati reali: %d opportunita', %d iscritti",
+            subscribers = [cid for cid in get_subscribers(tier="premium")
+                           if is_premium(cid)]
+            logger.info("surebet alert su dati reali: %d opportunita', %d iscritti premium",
                         len(alerts), len(subscribers))
             for chat_id in subscribers:
                 try:
@@ -784,6 +868,8 @@ def main() -> None:
     application.add_handler(CommandHandler("multipla", cmd_multipla))
     application.add_handler(CommandHandler("subscribe", cmd_subscribe))
     application.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
+    application.add_handler(CommandHandler("premium", cmd_premium))
+    application.add_handler(CommandHandler("mytier", cmd_mytier))
     application.add_handler(CommandHandler("checknow", cmd_checknow))
     application.add_handler(CommandHandler("risultati", cmd_risultati))
     application.add_handler(CommandHandler("backtest", cmd_backtest))
@@ -806,7 +892,9 @@ def main() -> None:
         job_queue.run_daily(betfair_scan_job, time=time(hour=8, minute=45))
         job_queue.run_daily(backup_data_job, time=time(hour=3, minute=30))
         job_queue.run_once(backup_data_job, when=10)  # snapshot di base all'avvio
-        logger.info("Job Pro schedulati: 03:30 backup / 06:00 / 08:30 / 08:45 / 14:00 / 20:00 / 21:30 ITA")
+        # Piano free: riceve gli stessi segnali con 3 ore di ritardo.
+        job_queue.run_daily(free_delayed_job, time=time(hour=17, minute=0))
+        logger.info("Job Pro schedulati: 03:30 backup / 06:00 / 08:30 / 08:45 / 14:00 / 17:00 free / 20:00 / 21:30 ITA")
     else: logger.warning("JobQueue non disponibile")
     logger.info("QuotaVerace Pro avviato.")
     application.run_polling()

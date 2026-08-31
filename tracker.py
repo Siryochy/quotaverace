@@ -22,6 +22,12 @@ def _get_conn():
         chat_id INTEGER, evento TEXT, esito TEXT, quota REAL,
         probabilita REAL, ev REAL, timestamp TEXT, esito_finale TEXT, profit REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS subscribers (chat_id INTEGER PRIMARY KEY)''')
+    # Migrazione free/premium: colonne tier e scadenza abbonamento.
+    sub_cols = [r[1] for r in c.execute("PRAGMA table_info(subscribers)")]
+    if "tier" not in sub_cols:
+        c.execute("ALTER TABLE subscribers ADD COLUMN tier TEXT DEFAULT 'free'")
+    if "premium_until" not in sub_cols:
+        c.execute("ALTER TABLE subscribers ADD COLUMN premium_until TEXT")
     c.execute('''CREATE TABLE IF NOT EXISTS matches (
         id TEXT PRIMARY KEY, league TEXT, home_team TEXT, away_team TEXT,
         commence_time TEXT, status TEXT, last_updated TEXT)''')
@@ -117,9 +123,15 @@ def get_performance_summary(days=30):
     roi = (profit/total*100) if total>0 else 0.0
     return {"closed":total or 0, "won":won or 0, "lost":lost or 0, "net_profit":profit or 0.0, "roi":roi}
 
-def add_subscriber(chat_id):
+def add_subscriber(chat_id, tier="free"):
+    """Iscrive una chat. tier: 'free' o 'premium'.
+
+    Se la chat esiste gia' la riga non viene sovrascritta (INSERT OR IGNORE):
+    il tier esistente resta invariato; usare set_tier() per cambiarlo.
+    """
     conn = _get_conn(); c = conn.cursor()
-    c.execute('INSERT OR IGNORE INTO subscribers VALUES (?)', (chat_id,))
+    c.execute('INSERT OR IGNORE INTO subscribers (chat_id, tier, premium_until) VALUES (?,?,NULL)',
+              (chat_id, tier))
     conn.commit(); conn.close()
 
 def remove_subscriber(chat_id):
@@ -127,9 +139,56 @@ def remove_subscriber(chat_id):
     c.execute('DELETE FROM subscribers WHERE chat_id=?', (chat_id,))
     conn.commit(); conn.close()
 
-def get_subscribers():
+def set_tier(chat_id, tier, premium_until=None):
+    """Aggiorna tier e scadenza premium di un iscritto.
+
+    tier 'premium' senza premium_until = abbonamento senza scadenza.
+    """
     conn = _get_conn(); c = conn.cursor()
-    c.execute('SELECT chat_id FROM subscribers')
+    c.execute('UPDATE subscribers SET tier=?, premium_until=? WHERE chat_id=?',
+              (tier, premium_until, chat_id))
+    conn.commit(); conn.close()
+
+def get_subscription(chat_id):
+    """Ritorna (tier, premium_until) di una chat, o None se non iscritta.
+
+    Un abbonamento premium scaduto viene degradato a 'free' (senza cancellare
+    la riga: e' comunque un iscritto).
+    """
+    conn = _get_conn(); c = conn.cursor()
+    c.execute('SELECT tier, premium_until FROM subscribers WHERE chat_id=?', (chat_id,))
+    row = c.fetchone(); conn.close()
+    if not row:
+        return None
+    tier, premium_until = row
+    if tier == "premium" and premium_until:
+        try:
+            if datetime.fromisoformat(premium_until) < datetime.now():
+                tier = "free"
+        except ValueError:
+            tier = "free"
+    return tier, premium_until
+
+def is_premium(chat_id):
+    """True se la chat e' iscritta con abbonamento premium valido."""
+    sub = get_subscription(chat_id)
+    return bool(sub) and sub[0] == "premium"
+
+def get_subscribers(tier=None):
+    """Chat_id degli iscritti, opzionalmente filtrati per tier.
+
+    Con tier='premium' include solo abbonamenti ancora validi (scadenza
+    futura o assente). Con tier='free' include anche i premium scaduti.
+    """
+    conn = _get_conn(); c = conn.cursor()
+    if tier is None:
+        c.execute('SELECT chat_id FROM subscribers')
+    elif tier == "premium":
+        c.execute("SELECT chat_id FROM subscribers WHERE tier='premium' AND "
+                  "(premium_until IS NULL OR premium_until >= ?)",
+                  (datetime.now().isoformat(),))
+    else:
+        c.execute("SELECT chat_id FROM subscribers WHERE tier=? OR tier IS NULL", (tier,))
     rows = c.fetchall(); conn.close()
     return [r[0] for r in rows]
 
