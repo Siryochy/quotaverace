@@ -341,6 +341,23 @@ def _db_stats_json(params=None):
     return out
 
 
+def _ratings_json(params=None):
+    """Coefficienti di rating per squadre specifiche (?teams=Roma,Barcelona)."""
+    teams = [t.strip() for t in (params.get("teams") or "").split(",") if t.strip()]
+    conn = sqlite3.connect(str(DB))
+    c = conn.cursor()
+    out = []
+    for t in teams:
+        try:
+            row = c.execute("SELECT team, league, attack_home, defense_home, attack_away, defense_away, n_home, n_away "
+                            "FROM team_ratings WHERE team=?", (t,)).fetchone()
+        except Exception:
+            row = None
+        out.append({"team": t, "rating": row})
+    conn.close()
+    return {"ratings": out}
+
+
 def _scan_json(params=None):
     """Catalogo Betfair: cache del job giornaliero, o scan live con ?live=1.
 
@@ -382,6 +399,7 @@ ROUTES = {
     "/api/campionati": _campionati_json,
     "/api/cassa": _cassa_get,
     "/api/db_stats": _db_stats_json,
+    "/api/ratings": _ratings_json,
 }
 
 POST_ROUTES = {
