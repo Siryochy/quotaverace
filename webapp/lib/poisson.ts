@@ -13,7 +13,7 @@ export const AVG_AWAY_GOALS = 1.28
 type TeamRatings = Record<string, { attack_home: number; attack_away: number; defense_home: number; defense_away: number }>
 
 // Sottoinsieme delle squadre top per i campionati principali (stesse medie di leagues_data.py)
-const TEAM_RATINGS: TeamRatings = {
+export const TEAM_RATINGS: TeamRatings = {
   // Serie A
   inter:       { attack_home: 1.45, attack_away: 1.35, defense_home: 0.65, defense_away: 0.70 },
   'ac milan':  { attack_home: 1.30, attack_away: 1.15, defense_home: 0.80, defense_away: 0.85 },
