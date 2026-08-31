@@ -1,8 +1,0 @@
-[build]
-builder = "DOCKERFILE"
-
-[deploy]
-# Il CMD dei Dockerfile decide cosa avviare:
-# Dockerfile -> bot.py, Dockerfile.api -> web_api.py
-restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 10

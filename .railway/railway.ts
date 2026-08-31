@@ -30,7 +30,7 @@ export default defineRailway(() => {
     build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" },
     replicas: { "ams": 1 },
     volumeMounts: { ["/app/data"]: { type: "volume", name: data.name, address: data.address } },
-    env: { ...sharedEnv, RAILWAY_CONFIG_PATH: preserve(), RAILWAY_DOCKERFILE_PATH: preserve() },
+    env: { ...sharedEnv, RAILWAY_DOCKERFILE_PATH: preserve() },
   });
 
   return project("quotaverace", {
