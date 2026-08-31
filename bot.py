@@ -709,7 +709,7 @@ def _db_path():
     return DATA_DIR / "quotaverace.db"
 
 
-def backup_data_job(context: ContextTypes.DEFAULT_TYPE):
+async def backup_data_job(context: ContextTypes.DEFAULT_TYPE):
     """Backup giornaliero dei dati persistenti in DATA_DIR/backups/.
 
     Copia quotaverace.db (via sqlite3 backup, sicuro anche con connessioni
