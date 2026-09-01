@@ -15,6 +15,7 @@ from value_filter import (compute_ev, kelly_fraction, kelly_euro, is_sane,
 from market_calib import market_implied, MARKET_EDGE_STRONG
 from tracker import (save_match, get_today_matches, save_analysis, get_analysis_for_match,
                       clear_old_matches, save_clv, save_prediction)
+from line_movement import record_snapshot, detect_rlm, detect_steam
 
 logger = logging.getLogger(__name__)
 
@@ -316,7 +317,8 @@ def _analyze_match(match_id, match, home_db, away_db, league):
         price, display_esito, bookmaker = entry
         market_prob = market.get(mkey) if market else None
         bias = DERIV_BIAS if mkey == "Over 2.5" else 0.0
-        final_prob = adjusted_probability(model_prob, market_prob, price)
+        final_prob = adjusted_probability(model_prob, market_prob, price,
+                                          league=league)
         ev = compute_ev(final_prob, price)
         candidates.append({
             "score": ev + bias,
@@ -351,7 +353,8 @@ def _analyze_match(match_id, match, home_db, away_db, league):
                 model_prob, _, _ = ah_outcome_probs(lam_h, lam_a, away_line, "away")
                 market_prob = market_ah.get("away") if market_ah else None
                 esito_disp = f"Away {away_line:+.2f}"
-            final_prob = adjusted_probability(model_prob, market_prob, price)
+            final_prob = adjusted_probability(model_prob, market_prob, price,
+                                              league=league)
             ev = compute_ev(final_prob, price)
             ah_candidates.append({
                 "score": ev,
@@ -370,6 +373,21 @@ def _analyze_match(match_id, match, home_db, away_db, league):
         return "no_odds"
     best = max(candidates, key=lambda c: c["score"])
 
+    # Snapshot prezzo per line movement tracking.
+    try:
+        for esito_key, entry in h2h_prices.items():
+            record_snapshot(match_id, esito_key, entry[0],
+                            bookmaker=entry[2],
+                            market_prob=(market_h2h.get(esito_key)
+                                         if market_h2h else None))
+        for mkey, entry in total_prices.items():
+            record_snapshot(match_id, mkey, entry[0],
+                            bookmaker=entry[2],
+                            market_prob=(market_tot.get(mkey)
+                                         if market_tot else None))
+    except Exception as e:
+        logger.debug(f"Snapshot prezzo fallito per {match_id}: {e}")
+
     # CLV: la prima volta che vediamo il match il prezzo e' quello del segnale;
     # le letture successive convergono verso la quota di chiusura del mercato.
     # La quota Pinnacle (se presente nel feed) e' la closing line sharp.
@@ -380,6 +398,15 @@ def _analyze_match(match_id, match, home_db, away_db, league):
                  pinnacle_quota=pinnacle_prices.get(best.get("esito_key")))
     except Exception as e:
         logger.warning(f"Errore tracking CLV per {match_id}: {e}")
+
+    # RLM / Steam detection: segnali di money sharp sul miglior esito.
+    rlm_info = None
+    steam_info = None
+    try:
+        rlm_info = detect_rlm(match_id, str(best["esito"]))
+        steam_info = detect_steam(match_id, str(best["esito"]))
+    except Exception:
+        pass
 
     sane, reason = is_sane(best["prob"], best["quota"], best["ev"],
                            market_prob=best["market_prob"])
@@ -394,6 +421,18 @@ def _analyze_match(match_id, match, home_db, away_db, league):
         status = "value"
     else:
         status = "no_value"
+
+    # RLM/steam come segnale di conferma: loggato per il report.
+    # Non modifica lo status (ev e market_edge restano i criteri primari)
+    # ma fornisce info aggiuntiva per valutare la qualita' del segnale.
+    if rlm_info:
+        logger.info(f"RLM su {match_id} {best['esito']}: "
+                    f"{rlm_info['total_move_pct']:+.1f}% in "
+                    f"{rlm_info['span_minutes']:.0f} min")
+    if steam_info:
+        logger.info(f"STEAM su {match_id} {best['esito']}: "
+                    f"{steam_info['move_pct']:+.1f}% in "
+                    f"{steam_info['span_minutes']:.0f} min")
 
     save_analysis(match_id, lam_h, lam_a, p1, px, p2, p_over, best["ev"], best["esito"],
                   best["quota"], best["bookmaker"], status,

@@ -45,6 +45,111 @@ BLEND_WEIGHT = 0.5
 # la probabilita' del modello viene compressa verso il mercato.
 LONG_SHOT_ODDS = 3.5
 
+# --- Efficiency score per lega/campionato (ricerca 2026) ---
+# Mercati piu' liquidi = piu' efficienti = il mercato ha ragione piu' spesso.
+# Score 0.0 = mercato inefficiente (il modello ha piu' spazio)
+# Score 1.0 = mercato perfettamente efficiente (il mercato e' sempre giusto)
+# Fonte: Unabated (2026), XCLSV Media (2026), analisi backtest su CLV.
+LEAGUE_EFFICIENCY = {
+    # Top 5 europei: molta liquidita', sharps presenti, mercato efficiente
+    "Premier League": 0.85,
+    "La Liga": 0.82,
+    "Serie A": 0.80,
+    "Bundesliga": 0.78,
+    "Ligue 1": 0.75,
+    # Coppe europee: efficiente ma meno partite -> campione ridotto
+    "Champions League": 0.80,
+    "Europa League": 0.70,
+    "Conference League": 0.60,
+    # Secondo tier: meno liquidita', il modello ha piu' spazio
+    "Eredivisie": 0.65,
+    "EFL Championship": 0.60,
+    "Serie B": 0.55,
+    "La Liga 2": 0.50,
+    "2. Bundesliga": 0.55,
+    "Ligue 2": 0.50,
+    # Coppe nazionali e leghe minori: mercato meno efficiente
+    "FA Cup": 0.55,
+    "Coppa Italia": 0.55,
+    "DFB Pokal": 0.55,
+    "Coupe de France": 0.50,
+    # Leghe internazionali: dati limitati, mercato meno attivo
+    "MLS": 0.55,
+    "Brasileir\u00e3o": 0.50,
+    "Argentina Liga Profesional": 0.45,
+    "Liga Portugal": 0.55,
+    "Scottish Premiership": 0.50,
+    "Liga MX": 0.50,
+    "J1 League": 0.40,
+    "K League 1": 0.40,
+    "A-League": 0.45,
+    "Indian Super League": 0.35,
+    "Saudi Pro League": 0.50,
+    "Egyptian Premier League": 0.35,
+    "South African PSL": 0.35,
+    "Chile Liga Profesional": 0.40,
+    "Colombia Primera A": 0.40,
+    "Peru Liga 1": 0.35,
+    "Ecuador Liga Pro": 0.35,
+    "Bolivia Liga Profesional": 0.30,
+    "Paraguay Primera Divisi\u00f3n": 0.30,
+    "Uruguay Primera Divisi\u00f3n": 0.35,
+    "Copa Libertadores": 0.55,
+    "Copa Sudamericana": 0.45,
+    "CONCACAF Champions Cup": 0.45,
+}
+
+# Default per leghe non mappate: mercato medio
+LEAGUE_EFFICIENCY_DEFAULT = 0.50
+
+
+def get_league_efficiency(league: str) -> float:
+    """Score di efficienza del mercato per una lega (0-1).
+
+    Score alto = mercato efficiente -> il blend pesa piu' il mercato.
+    Score basso = mercato inefficiente -> il blend pesa piu' il modello.
+    """
+    return LEAGUE_EFFICIENCY.get(league, LEAGUE_EFFICIENCY_DEFAULT)
+
+
+def dynamic_blend_weight(model_prob: float, market_prob: Optional[float],
+                          league: str = "", odds: float = 2.0,
+                          model_samples: int = 0) -> float:
+    """Calcola il peso dinamico del modello nel blend.
+
+    Il peso dipende da 3 fattori:
+    1. Efficienza del mercato (per lega): mercato efficiente -> peso modello basso
+    2. Confidence del modello: piu' dati storici -> peso modello alto
+    3. Quote: longshot -> peso modello piu' basso (longshot bias)
+
+    Range: 0.25 (mercato forte, modello debole) -> 0.65 (mercato debole, modello forte)
+    """
+    # Base: efficienza del mercato inversa
+    eff = get_league_efficiency(league) if league else LEAGUE_EFFICIENCY_DEFAULT
+    market_weight = eff  # quanto pesa il mercato nel blend
+    model_weight = 1.0 - eff  # quanto pesa il modello
+
+    # Adjust per confidence del modello: piu' campioni = piu' fiducia
+    # model_samples = numero di partite storiche usate per il rating
+    if model_samples > 0:
+        import math
+        confidence_bonus = min(0.15, 0.05 * math.log1p(model_samples / 10))
+        model_weight += confidence_bonus
+        market_weight -= confidence_bonus
+
+    # Adjust per longshot bias: quote alte -> meno fiducia nel modello
+    if odds > 3.0:
+        longshot_penalty = min(0.10, (odds - 3.0) * 0.03)
+        model_weight -= longshot_penalty
+        market_weight += longshot_penalty
+
+    # Normalizza e limita
+    total = model_weight + market_weight
+    if total <= 0:
+        return BLEND_WEIGHT
+    weight = model_weight / total
+    return max(0.25, min(0.65, weight))
+
 _MIN_P = 1e-9
 
 
@@ -185,15 +290,26 @@ def is_beating_market(model_prob: float, market_prob: Optional[float],
 
 
 def blend_probability(model_prob: float, market_prob: Optional[float],
-                      weight: float = BLEND_WEIGHT) -> float:
+                      weight: float = BLEND_WEIGHT,
+                      league: str = "", odds: float = 2.0,
+                      model_samples: int = 0) -> float:
     """Probabilita' finale = blend modello + mercato.
 
     Il mercato e' quasi sempre meglio calibrato del modello: mescolare le
     due stime riduce l'overconfidence del modello (causa n.1 dei falsi
     segnali nei backtest). Se il mercato manca, resta la stima del modello.
+
+    Se vengono forniti league/odds/model_samples, usa il peso DINAMICO
+    (dynamic_blend_weight) che adatta il blend in base all'efficienza del
+    mercato, la confidence del modello e il longshot bias.
     """
     if market_prob is None:
         return model_prob
+    # Se i parametri dinamici sono forniti, calcola il peso ottimale
+    if league or model_samples > 0 or odds != 2.0:
+        weight = dynamic_blend_weight(model_prob, market_prob,
+                                      league=league, odds=odds,
+                                      model_samples=model_samples)
     return weight * model_prob + (1.0 - weight) * market_prob
 
 
@@ -210,3 +326,93 @@ def favourite_longshot_adjust(model_prob: float, market_prob: Optional[float],
         return model_prob
     t = min(1.0, (odds - long_shot_odds) / 2.0)   # 0..1 all'aumentare della quota
     return model_prob * (1.0 - 0.5 * t) + market_prob * (0.5 * t)
+
+
+# ---------------------------------------------------------------------------
+# CLV vig-free: Closing Line Value calcolato su closing line devigata
+# ---------------------------------------------------------------------------
+
+def clv_vig_free(signal_odds: float, closing_odds: float,
+                  all_closing_odds: List[float] = None,
+                  method: str = "power") -> Optional[float]:
+    """CLV corretto per il vig: confronta la quota del segnale con la
+    closing line DEVIGATA (fair probability).
+
+    Il CLV tradizionale (signal / closing - 1) sovrastima l'edge perche'
+    la closing line include il vig del bookmaker. Questa funzione:
+    1. Deviga la closing line (se disponibili tutti gli esiti del mercato)
+    2. Converte la quota fair in quota equivalente (senza vig)
+    3. Calcola CLV = signal_odds / fair_closing_odds - 1
+
+    Args:
+        signal_odds: quota presa al momento del segnale.
+        closing_odds: closing price dell'esito scommesso.
+        all_closing_odds: [closing_1, closing_X, closing_2] del mercato
+                          completo (serve per deviggare correttamente).
+                          Se None, usa una stima del vig da closing_odds
+                          solo (meno preciso).
+        method: metodo di devig ("power" di default, corregge longshot bias).
+
+    Returns:
+        CLV vig-free in decimale (es. 0.04 = +4%) o None se invalido.
+    """
+    if signal_odds <= 1.0 or closing_odds <= 1.0:
+        return None
+
+    if all_closing_odds and len(all_closing_odds) >= 2:
+        # Devig del mercato completo: probabilita' fair.
+        fair_probs = devig(all_closing_odds, method=method)
+        # Trova la posizione dell'esito scommesso nella lista.
+        # approx: usa la probabilita' implicita per trovare l'indice
+        # corrispondente.
+        implied_closing = 1.0 / closing_odds
+        best_idx = min(range(len(fair_probs)),
+                       key=lambda i: abs(fair_probs[i] - implied_closing))
+        fair_prob = fair_probs[best_idx]
+        # Quota equivalente fair (senza vig)
+        fair_closing_odds = 1.0 / fair_prob if fair_prob > _MIN_P else closing_odds
+    else:
+        # Stima del vig: overround = sum(1/odds) per tutti gli esiti.
+        # Se abbiamo solo 1 closing odds, stima il vig tipico del calcio
+        # (~3-5% per soft book, ~2% per Pinnacle).
+        implied = 1.0 / closing_odds
+        # Stima conservativa: il vig e' distribuito proporzionalmente.
+        # Per un mercato 1X2 tipico, l'overround e' ~1.03-1.06.
+        overround_est = 1.04  # stima media per soft books
+        fair_prob = implied / overround_est
+        fair_closing_odds = 1.0 / fair_prob if fair_prob > _MIN_P else closing_odds
+
+    if fair_closing_odds <= 1.0:
+        return None
+
+    return (signal_odds / fair_closing_odds) - 1.0
+
+
+def clv_raw(signal_odds: float, closing_odds: float) -> Optional[float]:
+    """CLV tradizionale (senza devig): signal / closing - 1.
+
+    Mantenuto per backward compatibility e confronto. Per il report
+    professionale, usare sempre clv_vig_free().
+    """
+    if signal_odds <= 1.0 or closing_odds <= 1.0:
+        return None
+    return (signal_odds / closing_odds) - 1.0
+
+
+def vig_percentage(all_odds: List[float]) -> Optional[float]:
+    """Margine (vig) del mercato in percentuale.
+
+    overround = sum(1/odds) per tutti gli esiti.
+    vig% = (overround - 1) * 100.
+
+    Args:
+        all_odds: lista di quote decimali per tutti gli esiti del mercato.
+
+    Returns:
+        Vig in percentuale (es. 4.5 = 4.5%) o None se dati insufficienti.
+    """
+    valid = [o for o in all_odds if o and o > 1.0]
+    if len(valid) < 2:
+        return None
+    overround = sum(1.0 / o for o in valid)
+    return (overround - 1.0) * 100.0

@@ -108,15 +108,19 @@ def is_sane(prob: float, odds: float, ev: float,
 
 
 def adjusted_probability(model_prob: float, market_prob: float | None,
-                         odds: float) -> float:
+                         odds: float, league: str = "",
+                         model_samples: int = 0) -> float:
     """Probabilita' finale del segnale, calibrata sul mercato.
 
     Combina i due correttivi della ricerca:
-    1. blending modello+mercato (riduce l'overconfidence del modello);
+    1. blending modello+mercato dinamico (riduce l'overconfidence del
+       modello, adattandosi all'efficienza del mercato per lega);
     2. correzione favourite-longshot (sopra LONG_SHOT_ODDS la stima del
        modello viene compressa verso il mercato).
     """
-    p = blend_probability(model_prob, market_prob)
+    p = blend_probability(model_prob, market_prob,
+                          league=league, odds=odds,
+                          model_samples=model_samples)
     return favourite_longshot_adjust(p, market_prob, odds)
 
 

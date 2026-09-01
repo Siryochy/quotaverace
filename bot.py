@@ -766,18 +766,31 @@ def format_daily_report(since: str, label: str) -> str:
         lines.append("💰 *Cassa:* nessuna puntata saldata nel periodo.")
 
     try:
+        from market_calib import clv_vig_free, clv_raw
         conn = _get_conn(); c = conn.cursor()
         rows = c.execute("SELECT signal_quota, closing_quota, pinnacle_quota "
                          "FROM clv_history WHERE updated_at >= ?", (since,)).fetchall()
         conn.close()
-        clvs = [(s / clos) - 1.0 for s, clos, _ in rows if clos and clos > 0]
-        if clvs:
-            lines.append(f"📈 *CLV medio:* {sum(clvs)/len(clvs)*100:+.2f}% (n {len(clvs)})")
+        clvs_raw = []
+        clvs_vf = []
+        for s, clos, pin in rows:
+            if not (clos and clos > 0 and s and s > 0):
+                continue
+            clvs_raw.append((s / clos) - 1.0)
+            # Vig-free: usa Pinnacle come proxy fair (vig ~1-2%)
+            fair = pin if (pin and pin > 0) else clos
+            vf = clv_vig_free(s, fair)
+            if vf is not None:
+                clvs_vf.append(vf)
+        if clvs_raw:
+            lines.append(f"📈 *CLV medio:* {sum(clvs_raw)/len(clvs_raw)*100:+.2f}% (n {len(clvs_raw)})")
+        if clvs_vf:
+            lines.append(f"🎯 *CLV vig-free:* {sum(clvs_vf)/len(clvs_vf)*100:+.2f}% (n {len(clvs_vf)})")
         # CLV vs Pinnacle: la closing line piu' sharp del mercato.
         pin_clvs = [(s / pin) - 1.0 for s, _, pin in rows
                     if pin and pin > 0]
         if pin_clvs:
-            lines.append(f"🎯 *CLV vs Pinnacle:* {sum(pin_clvs)/len(pin_clvs)*100:+.2f}% "
+            lines.append(f"🏆 *CLV vs Pinnacle:* {sum(pin_clvs)/len(pin_clvs)*100:+.2f}% "
                          f"(n {len(pin_clvs)})")
     except Exception:
         pass

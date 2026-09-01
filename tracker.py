@@ -839,19 +839,31 @@ def get_results_stats():
                  FROM match_results r
                  JOIN match_analysis a ON a.match_id = r.match_id''')
     rows = c.fetchall(); conn.close()
-    # Mappa CLV per (match_id, esito)
+    # Mappa CLV per (match_id, esito): raw + vig-free.
     clv_map = {}
+    clv_vf_map = {}  # vig-free CLV
     try:
+        from market_calib import clv_vig_free, clv_raw, devig
         conn2 = _get_conn(); c2 = conn2.cursor()
-        c2.execute("SELECT match_id, esito, signal_quota, closing_quota FROM clv_history")
-        for mid, esito, sig, clos in c2.fetchall():
-            if clos and clos > 0:
-                clv_map[(mid, (esito or "").lower().strip())] = (sig / clos) - 1.0
+        c2.execute("SELECT match_id, esito, signal_quota, closing_quota, "
+                   "pinnacle_quota FROM clv_history")
+        for mid, esito, sig, clos, pin in c2.fetchall():
+            el = (esito or "").lower().strip()
+            if clos and clos > 0 and sig and sig > 0:
+                clv_map[(mid, el)] = (sig / clos) - 1.0
+                # CLV vig-free: usa Pinnacle come closing line se disponibile
+                # (Pinnacle ha vig minimo, quasi fair).
+                # Altrimenti deviga la closing quota stimando il mercato.
+                fair_close = pin if (pin and pin > 0) else clos
+                vf = clv_vig_free(sig, fair_close)
+                if vf is not None:
+                    clv_vf_map[(mid, el)] = vf
         conn2.close()
     except Exception:
         pass
     bets = []
     clvs = []
+    clvs_vf = []
     for home, away, sh, sa, esito, quota, ev, status, mid in rows:
         if status not in ("value", "strong_value") or not esito or not quota or quota <= 1.0:
             continue
@@ -870,6 +882,9 @@ def get_results_stats():
         clv = clv_map.get((mid, el))
         if clv is not None:
             clvs.append(clv)
+        clvf = clv_vf_map.get((mid, el))
+        if clvf is not None:
+            clvs_vf.append(clvf)
     total = len(bets)
     won_n = sum(1 for b in bets if b["won"])
     net = sum((b["quota"] - 1) if b["won"] else -1 for b in bets)
@@ -880,4 +895,6 @@ def get_results_stats():
         "avg_ev": (sum(b["ev"] for b in bets) / total) if total else 0.0,
         "clv_tracked": len(clvs),
         "avg_clv": (sum(clvs) / len(clvs)) if clvs else 0.0,
+        "avg_clv_vf": (sum(clvs_vf) / len(clvs_vf)) if clvs_vf else 0.0,
+        "clv_vf_tracked": len(clvs_vf),
     }
