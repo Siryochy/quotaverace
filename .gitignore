@@ -12,3 +12,5 @@ _archivio/
 .env.*
 .vercel
 .env*
+
+.askpass_github.sh
