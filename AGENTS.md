@@ -102,6 +102,12 @@ cd webapp && npm run build            # build Next.js
 ## Stato attuale (ultimo aggiornamento)
 
 - **Deploy Railway**: Online, volume montato, bot in polling, health 200.
+  **Consegna notifiche Telegram VERIFICATA** (test end-to-end 01/09):
+  `POST /api/test_notify` con la chiave giusta ha consegnato il messaggio al
+  Chat ID proprietario `7718157436` (ADMIN_CHAT_ID corretto su Railway).
+  Endpoint protetto da `TEST_NOTIFY_KEY` (variabile Railway, mai nel repo).
+  Bug storico fixato nello stesso giro: `format_schedina` mancava
+  di `get_pro_stake` import → la schedina delle 08:00 non partiva con picks.
 - **Vault segreti**: attivo da locale (vault.bin Fernet/PBKDF2, 5 segreti
   cifrati, plaintext cancellati) — vedi sezione "Segreti".
 - **Cassa**: funziona con doppia persistenza (localStorage + backup server sul
