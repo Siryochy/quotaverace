@@ -38,6 +38,30 @@ class TestProbabilitaPoisson:
         p_over, p_under = prob_over_under(1.5, 1.0)
         assert abs((p_over + p_under) - 1.0) < 0.01
 
+
+class TestFormatSchedina:
+    """Regressione: format_schedina con picks non deve mai crashare
+    (mancava get_pro_stake importato in fixture_engine → la schedina
+    delle 08:00 non sarebbe mai partita con picks presenti)."""
+
+    def test_con_picks_non_crasha(self):
+        from fixture_engine import format_schedina
+        picks = [
+            {"evento": "Serie A – Inter vs Napoli", "esito": "1", "quota": 2.21,
+             "bookmaker": "Pinnacle", "ev": 0.061, "market_edge": 0.10},
+            {"evento": "Serie A – Milan vs Juventus", "esito": "Over 2.5", "quota": 2.38,
+             "bookmaker": "Bet365", "ev": 0.095, "market_edge": 0.12},
+        ]
+        msg = format_schedina(picks, 100.0)
+        assert "SCHEDINA DEL GIORNO" in msg
+        assert "Inter" in msg and "Over 2.5" in msg
+        assert "MULTIPLA" in msg and "EV" in msg
+
+    def test_senza_picks(self):
+        from fixture_engine import format_schedina
+        msg = format_schedina([], 100.0)
+        assert "Nessuna partita" in msg
+
     def test_favorito_casa_con_lambda_maggiore(self):
         p1, px, p2 = prob_1x2(2.5, 0.8)
         assert p1 > p2

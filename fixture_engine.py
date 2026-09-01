@@ -8,7 +8,7 @@ from leagues_data import ALL_LEAGUES
 from poisson_engine import expected_goals, prob_1x2, prob_over_under, ah_outcome_probs
 from value_filter import (compute_ev, kelly_fraction, kelly_euro, is_sane,
                            combined_quota, combined_probability, multipla_stake,
-                           adjusted_probability)
+                           adjusted_probability, get_pro_stake)
 from market_calib import market_implied, MARKET_EDGE_STRONG
 from tracker import (save_match, get_today_matches, save_analysis, get_analysis_for_match,
                       clear_old_matches, save_clv, save_prediction)
