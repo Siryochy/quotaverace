@@ -28,6 +28,9 @@ export default function Backtest() {
   const beats = d.beats_market
   const noBeats = d.no_beats_market
 
+  const pmEntries: [string, any][] = Object.entries(d.per_mercato || {}).sort((a: any, b: any) => (b[1].n || 0) - (a[1].n || 0))
+  const worst: [string, any] | undefined = pmEntries.filter(([, m]: any) => (m.n || 0) >= 10).sort((a: any, b: any) => a[1].roi - b[1].roi)[0]
+
   const verdict =
     n < 30 ? { icon: '⚠️', text: 'Campione troppo piccolo. Servono ≥100 scommesse chiuse per trarre conclusioni.', color: 'text-amber-400' }
     : roi >= 0 && roi >= roiEdge - 3 ? { icon: '🟢', text: 'Modello calibrato: il ROI realizzato è coerente (o migliore) dell\'EV atteso.', color: 'text-emerald-400' }
@@ -80,6 +83,58 @@ export default function Backtest() {
         </div>
       </div>
 
+      {/* Telemetria per mercato (ledger previsioni) */}
+      <div className="bg-gray-800 rounded-xl p-6 mb-6">
+        <h2 className="text-xl font-bold mb-1">📈 Telemetria per mercato</h2>
+        <p className="text-gray-400 text-sm mb-4">
+          ROI realizzato vs EV atteso per ogni mercato: dove il modello batte davvero la
+          closing line (edge medio positivo) e dove invece sbaglia e va corretto.
+        </p>
+        {pmEntries.length === 0 ? (
+          <p className="text-gray-400 text-sm">Nessuna previsione chiusa ancora: la telemetria apparirà quando il ledger inizierà a saldarsi.</p>
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-gray-400 border-b border-gray-700">
+                    <th className="text-left py-2 pr-3">Mercato</th>
+                    <th className="text-right py-2 px-3">Chiusi</th>
+                    <th className="text-right py-2 px-3">V/P/P</th>
+                    <th className="text-right py-2 px-3">Hit rate</th>
+                    <th className="text-right py-2 px-3">ROI</th>
+                    <th className="text-right py-2 px-3">EV atteso</th>
+                    <th className="text-right py-2 px-3">Gap (ROI−EV)</th>
+                    <th className="text-right py-2 pl-3">Edge mercato</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pmEntries.map(([key, m]: any) => (
+                    <tr key={key} className="border-b border-gray-800">
+                      <td className="py-2 pr-3 font-medium">{MKT_LABELS[key] || key}</td>
+                      <td className="text-right py-2 px-3">{m.n}</td>
+                      <td className="text-right py-2 px-3">{m.won}/{m.lost}/{m.push}</td>
+                      <td className="text-right py-2 px-3">{Number(m.hit_rate || 0).toFixed(1)}%</td>
+                      <td className={`text-right py-2 px-3 font-semibold ${Number(m.roi) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmtPct(m.roi)}</td>
+                      <td className="text-right py-2 px-3">{fmtPct(m.avg_ev)}</td>
+                      <td className={`text-right py-2 px-3 ${Number(m.gap) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmtPct(m.gap)}</td>
+                      <td className="text-right py-2 pl-3">{m.avg_market_edge != null ? fmtPct(m.avg_market_edge) : 'n.d.'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {worst && Number(worst[1].roi) < 0 && (
+              <p className="mt-4 text-sm text-amber-400">
+                ⚠️ Mercato critico: <b>{MKT_LABELS[worst[0]] || worst[0]}</b> a <b>{fmtPct(worst[1].roi)}</b>
+                {' '}su {worst[1].n} chiusi. Quando il campione supera ~100 scommesse, intervenire su questo
+                mercato: peso blend, soglia EV o metodo di devig.
+              </p>
+            )}
+          </>
+        )}
+      </div>
+
       <div className={`bg-gray-800 border-l-4 rounded-xl p-5 ${verdict.color}`}>
         <span className="text-xl">{verdict.icon}</span> <b>{verdict.text}</b>
       </div>
@@ -104,4 +159,15 @@ function Metric({ label, value, highlight }: { label: string; value: string; hig
     <div className="text-gray-400 text-sm mb-1">{label}</div>
     <div className={`text-3xl font-bold ${highlight ? 'text-emerald-400' : ''}`}>{value}</div>
   </div>
+}
+
+const MKT_LABELS: Record<string, string> = {
+  '1X2': '1X2',
+  OU: 'Over/Under',
+  AH: 'Asian Handicap',
+}
+
+function fmtPct(v: any) {
+  const n = Number(v || 0)
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`
 }
