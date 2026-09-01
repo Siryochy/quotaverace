@@ -41,6 +41,10 @@ def test_roster_coppe_coprono_le_top():
     """Le coppe nazionali copiano i roster dei campionati: almeno le squadre
     principali devono essere riconosciute (es. Inter in Coppa Italia)."""
     assert "Inter" in ALL_LEAGUES["Coppa Italia"]
+    # regressione: le squadre di Serie B giocano la Coppa Italia
+    # (Parma-Cremonese 1/9/2026 veniva persa: roster solo Serie A)
+    assert "Parma" in ALL_LEAGUES["Coppa Italia"]
+    assert "Cremonese" in ALL_LEAGUES["Coppa Italia"]
     assert "Real Madrid" in ALL_LEAGUES["Copa del Rey"]
     assert "Paris Saint-Germain" in ALL_LEAGUES["Coupe de France"]
     assert "Bayern Munich" in ALL_LEAGUES["DFB Pokal"]

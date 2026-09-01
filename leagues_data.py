@@ -314,7 +314,10 @@ CONFERENCE_LEAGUE = {
 }
 
 # === CAMPIONATI SECONDARI E COPPE ===
-COPPA_ITALIA = SERIE_A_2025_26.copy()
+# La Coppa Italia include le squadre di Serie B (es. Parma, Cremonese,
+# Sassuolo, Frosinone): senza il merge quelle partite venivano saltate
+# da _match_team (roster solo Serie A).
+COPPA_ITALIA = {**SERIE_A_2025_26, **SERIE_B}
 COPPA_DEL_REY = LA_LIGA_2025_26.copy()
 COUPE_DE_FRANCE = LIGUE_1_2025_26.copy()
 DFB_POKAL = BUNDESLIGA_2025_26.copy()
