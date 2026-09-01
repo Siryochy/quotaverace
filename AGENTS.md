@@ -153,9 +153,15 @@ cd webapp && npm run build            # build Next.js
 - **Sticker premium**: inviato prima dei messaggi premium (set pubblico
   `PREMIUM_STICKER_SET`, default "Diamond") — workaround gratis alle custom
   emoji (che richiederebbero Fragment o Premium sull'account proprietario).
+- **Coppe attive**: SPORTS_MAP (odds_api.py) ora interroga anche Champions
+  League, Europa League, Conference League, Coppa Italia, Copa del Rey,
+  Coupe de France, DFB Pokal (chiavi ufficiali the-odds-api, verificate sul
+  sito) — 15 leghe totali, +7 chiamate/giorno con cache 24h. I dati Poisson
+  delle coppe erano già in leagues_data.py. Test: test_odds_api.py.
 - **Webapp**: 8 sezioni live (Dashboard, Calcola, Schedina, Storico, Cassa,
   Calendario, Backtest, Value).
-- **Test**: 275/275 verdi.
+- **Test**: 327/327 verdi (la suite completa richiede ~4 min: PBKDF2 del
+  vault a ogni import + Poisson — non è un blocco).
 - **Sicurezza**: token da ruotare (vedi regola 7).
 
 ## Prossimi passi possibili (non urgenti)

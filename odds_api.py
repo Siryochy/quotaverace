@@ -15,6 +15,14 @@ SPORTS_MAP = {
     "La Liga": "soccer_spain_la_liga", "Bundesliga": "soccer_germany_bundesliga",
     "Ligue 1": "soccer_france_ligue_one", "Eredivisie": "soccer_netherlands_eredivisie",
     "MLS": "soccer_usa_mls", "Brasileirao": "soccer_brazil_serie_a",
+    # Coppe (chiavi ufficiali the-odds-api, verificate su the-odds-api.com)
+    "Champions League": "soccer_uefa_champs_league",
+    "Europa League": "soccer_uefa_europa_league",
+    "Conference League": "soccer_uefa_europa_conference_league",
+    "Coppa Italia": "soccer_italy_coppa_italia",
+    "Copa del Rey": "soccer_spain_copa_del_rey",
+    "Coupe de France": "soccer_france_coupe_de_france",
+    "DFB Pokal": "soccer_germany_dfb_pokal",
 }
 
 def _env(name):
