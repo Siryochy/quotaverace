@@ -1,0 +1,130 @@
+"""Test del flusso di puntate automatiche (auto_bet.run_today_bets).
+
+Usa un client finto e un catalogo di scansione sintetico: nessuna chiamata
+di rete, nessun ordine reale.
+"""
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+import tracker
+import auto_bet
+
+
+@pytest.fixture()
+def temp_db(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        db_path = Path(td) / "test.db"
+        monkeypatch.setattr(tracker, "DB_PATH", db_path)
+        tracker.init_db()
+        yield db_path
+
+
+class FakeClient:
+    dry_run = True
+
+    def __init__(self):
+        self.calls = []
+
+    def place_orders(self, market_id, instructions, customer_ref=None):
+        self.calls.append((market_id, instructions, customer_ref))
+        return {"status": "SUCCESS", "betId": f"DRY-{len(self.calls)}"}
+
+
+def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
+                      quota=2.10, status="value"):
+    start = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+    tracker.save_match(mid, "Serie A", home, away, start)
+    # esito "1" -> best_esito = nome squadra di casa (come da API bookmaker)
+    best_esito = home if esito == "1" else (away if esito == "2" else "Draw")
+    tracker.save_analysis(mid, 1.7, 1.1, 0.52, 0.27, 0.21, 0.58, 0.08,
+                          best_esito, quota, "Pinnacle", status,
+                          market_prob=0.45, market_edge=0.07)
+
+
+def _scan(day=None, price=2.10, start_offset_h=3):
+    start = (datetime.now(timezone.utc) + timedelta(hours=start_offset_h)) \
+        .isoformat().replace("+00:00", "Z")
+    return {
+        "day": day or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "opportunities": [
+            {"event_id": "e1", "event_name": "Osasuna v Getafe",
+             "market_id": "1.100", "market_type": "MATCH_ODDS",
+             "selection_id": 101, "selection_name": "Osasuna", "side": "BACK",
+             "price": price, "price_size": 200.0, "start_time": start},
+        ],
+    }
+
+
+def test_places_dry_run_bet(monkeypatch, temp_db):
+    _seed_value_match()
+    scan = _scan(price=2.20)
+    monkeypatch.setattr(auto_bet, "load_latest_scan", lambda: scan)
+    fc = FakeClient()
+    placed = auto_bet.run_today_bets(client=fc, stake_eur=5.0)
+    assert len(placed) == 1
+    p = placed[0]
+    assert p["esito_key"] == "1" and p["price"] == 2.20 and p["stake"] == 5.0
+    assert p["mode"] == "dry-run" and p["status"] == "SUCCESS"
+    # ordine inviato al client finto con la selezione giusta
+    assert fc.calls[0][0] == "1.100"
+    ins = fc.calls[0][1][0]
+    assert ins["selectionId"] == 101 and ins["side"] == "BACK"
+    assert ins["limitOrder"]["size"] == 5.0 and ins["limitOrder"]["price"] == 2.20
+    # registrata nel DB
+    bets = tracker.get_bets()
+    assert len(bets) == 1
+    assert tracker.bet_exists_open("m1", "1") is True
+
+
+def test_no_duplicate_bet_on_rerun(monkeypatch, temp_db):
+    _seed_value_match()
+    monkeypatch.setattr(auto_bet, "load_latest_scan", lambda: _scan(price=2.20))
+    fc = FakeClient()
+    auto_bet.run_today_bets(client=fc, stake_eur=5.0)
+    placed2 = auto_bet.run_today_bets(client=fc, stake_eur=5.0)
+    assert placed2 == []           # gia' aperta
+    assert len(tracker.get_bets()) == 1
+
+
+def test_skips_low_price(monkeypatch, temp_db):
+    _seed_value_match(quota=2.10)
+    # prezzo Exchange 1.95 < 2.10*0.95 -> salto
+    monkeypatch.setattr(auto_bet, "load_latest_scan", lambda: _scan(price=1.95))
+    fc = FakeClient()
+    placed = auto_bet.run_today_bets(client=fc, stake_eur=5.0)
+    assert placed == [] and fc.calls == []
+
+
+def test_skips_near_start(monkeypatch, temp_db):
+    _seed_value_match()
+    monkeypatch.setattr(auto_bet, "load_latest_scan",
+                        lambda: _scan(price=2.20, start_offset_h=0))
+    fc = FakeClient()
+    placed = auto_bet.run_today_bets(client=fc, stake_eur=5.0)
+    assert placed == [] and fc.calls == []
+
+
+def test_skips_stale_catalogue(monkeypatch, temp_db):
+    _seed_value_match()
+    monkeypatch.setattr(auto_bet, "load_latest_scan",
+                        lambda: _scan(price=2.20, day="2020-01-01"))
+    fc = FakeClient()
+    placed = auto_bet.run_today_bets(client=fc, stake_eur=5.0)
+    assert placed == [] and fc.calls == []
+
+
+def test_normalizes_stake_below_minimum(monkeypatch, temp_db):
+    _seed_value_match()
+    monkeypatch.setattr(auto_bet, "load_latest_scan", lambda: _scan(price=2.20))
+    fc = FakeClient()
+    # stake 1.00 -> sotto il minimo Exchange Italia: nessun ordine
+    placed = auto_bet.run_today_bets(client=fc, stake_eur=1.0)
+    assert placed == [] and fc.calls == []
+
+
+def test_skips_without_betfair(monkeypatch, temp_db):
+    monkeypatch.setattr(auto_bet, "get_client", lambda: None)
+    assert auto_bet.run_today_bets(stake_eur=5.0) == []

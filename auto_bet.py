@@ -1,0 +1,219 @@
+"""auto_bet.py — Puntate automatiche giornaliere su Betfair Exchange.
+
+Flusso del mattino (job 08:50 UTC, dopo scansione e analisi):
+
+1. Legge i segnali value/strong_value del giorno da match_analysis (quelli
+   che battono il mercato, come la schedina);
+2. Trova sul catalogo Betfair (cache scan_<giorno>.json) il mercato e il
+   runner corrispondenti (MATCH_ODDS -> 1/X/2, OVER_UNDER_25 -> Over/Under 2.5);
+3. Piazza un ordine BACK a limite con stake FISSO (BET_STAKE_EUR, default
+   5.00 EUR; minimo Exchange Italia 2.00, step 0.50);
+4. Registra l'ordine nella tabella `bets` per tracking, settlement e
+   riepilogo di fine giornata.
+
+Sicurezza (ereditata da betfair_client): DRY-RUN di default — nessun ordine
+reale finche' BETFAIR_DRY_RUN=0 E BETFAIR_LIVE=1; kill-switch
+(data/kill_switch) blocca tutto; ogni ordine finisce su data/orders.jsonl.
+
+Regole prudenti di esecuzione (scelte per questo progetto):
+- si scommette SOLO su segnali value/strong_value che battono il mercato;
+- si salta una partita se manca < 15 minuti al calcio d'inizio;
+- si salta se il prezzo back dell'Exchange e' oltre il 5% sotto la quota
+  del segnale (l'edge si sarebbe eroso);
+- una sola puntata per (match, esito): la UNIQUE(match_id, esito) in `bets`
+  impedisce di raddoppiare se il job viene rilanciato.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from datetime import datetime, timedelta, timezone
+
+from betfair_client import get_client, normalize_stake
+from config import DATA_DIR
+from daily_scanner import _split_teams, _esito_from_selection
+from daily_scan_job import load_latest_scan
+
+logger = logging.getLogger("auto_bet")
+
+BET_STAKE_DEFAULT_EUR = 5.0
+MIN_MINUTES_TO_START = 15
+PRICE_GUARD = 0.95  # accetta solo prezzi >= 95% della quota del segnale
+
+
+def _norm_team(name: str) -> str:
+    from tracker import _norm_team as nt
+    return nt(name)
+
+
+def _canonical_esito(esito: str, home: str, away: str) -> dict | None:
+    """Esito del segnale -> (mercato, esito_key) canonici per Betfair."""
+    el = str(esito or "").lower().strip()
+    if "over" in el:
+        return {"mercato": "OU", "esito_key": "Over 2.5"}
+    if "under" in el:
+        return {"mercato": "OU", "esito_key": "Under 2.5"}
+    if el in ("x", "draw", "pareggio"):
+        return {"mercato": "1X2", "esito_key": "X"}
+    if el == "1":
+        return {"mercato": "1X2", "esito_key": "1"}
+    if el == "2":
+        return {"mercato": "1X2", "esito_key": "2"}
+    hn, an, en = _norm_team(home), _norm_team(away), _norm_team(el)
+    if en == hn:
+        return {"mercato": "1X2", "esito_key": "1"}
+    if en == an:
+        return {"mercato": "1X2", "esito_key": "2"}
+    return None
+
+
+def _today_value_picks() -> list[dict]:
+    """Partite del giorno con segnale value/strong_value (esito canonico)."""
+    from tracker import _get_conn
+    conn = _get_conn()
+    c = conn.cursor()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    rows = c.execute('''SELECT m.id, m.home_team, m.away_team, m.commence_time,
+                               a.best_esito, a.best_quota
+                        FROM matches m JOIN match_analysis a ON m.id = a.match_id
+                        WHERE m.commence_time LIKE ? AND a.status IN ('value','strong_value')
+                        ORDER BY a.best_ev DESC''', (f"{today}%",)).fetchall()
+    conn.close()
+    out = []
+    for mid, home, away, commence, esito, quota in rows:
+        canon = _canonical_esito(esito, home, away)
+        if not canon:
+            continue
+        out.append({"match_id": mid, "home": home, "away": away,
+                    "commence": commence, "esito_raw": esito,
+                    "quota": float(quota or 0), **canon})
+    return out
+
+
+def _find_opportunity(opps: list[dict], pick: dict) -> dict | None:
+    """Trova il runner Betfair del segnale nel catalogo di scansione."""
+    mtype = "MATCH_ODDS" if pick["mercato"] == "1X2" else "OVER_UNDER_25"
+    target = (_norm_team(pick["home"]), _norm_team(pick["away"]))
+    best = None
+    for o in opps:
+        if o.get("market_type") != mtype:
+            continue
+        teams = _split_teams(o.get("event_name") or "")
+        if not teams:
+            continue
+        if (_norm_team(teams[0]), _norm_team(teams[1])) != target:
+            continue
+        esito = _esito_from_selection(mtype, o.get("selection_name") or "",
+                                      o.get("event_name") or "")
+        if esito != pick["esito_key"]:
+            continue
+        price = o.get("price")
+        if not price or float(price) <= 1.0:
+            continue
+        if best is None or float(price) > best["price"]:
+            best = {**o, "price": float(price)}
+    return best
+
+
+def _too_close_to_start(start_time: str | None) -> bool:
+    if not start_time:
+        return False
+    try:
+        start = datetime.fromisoformat(str(start_time).replace("Z", "+00:00"))
+    except Exception:
+        return False
+    return start <= datetime.now(timezone.utc) + timedelta(minutes=MIN_MINUTES_TO_START)
+
+
+def run_today_bets(client=None, stake_eur: float | None = None) -> list[dict]:
+    """Piazza le puntate del giorno (dry-run di default). Ritorna il riepilogo.
+
+    Non lancia mai eccezioni verso il chiamante: ogni passo fallito viene
+    loggato e saltato (fail-closed, come betfair_client).
+    """
+    if client is None:
+        client = get_client()
+    if client is None:
+        logger.info("auto_bet: Betfair non configurato (BETFAIR_APP_KEY assente), salto")
+        return []
+    stake_eur = stake_eur if stake_eur is not None else float(
+        os.getenv("BET_STAKE_EUR", str(BET_STAKE_DEFAULT_EUR)))
+    stake = normalize_stake(stake_eur)
+    if stake <= 0:
+        logger.warning("auto_bet: stake %.2f sotto il minimo Exchange Italia (2.00), salto",
+                       stake_eur)
+        return []
+
+    scan = load_latest_scan()
+    if not scan or not scan.get("opportunities"):
+        logger.info("auto_bet: nessun catalogo Betfair in cache, salto")
+        return []
+    if scan.get("day") != datetime.now(timezone.utc).strftime("%Y-%m-%d"):
+        logger.info("auto_bet: catalogo del %s non di oggi, salto", scan.get("day"))
+        return []
+
+    from tracker import bet_exists_open
+    placed: list[dict] = []
+    for pick in _today_value_picks():
+        if bet_exists_open(pick["match_id"], pick["esito_key"]):
+            logger.info("auto_bet: puntata gia' aperta per %s (%s), salto",
+                        pick["match_id"], pick["esito_key"])
+            continue
+        opp = _find_opportunity(scan["opportunities"], pick)
+        if not opp:
+            logger.info("auto_bet: nessun mercato Betfair per %s vs %s (%s)",
+                        pick["home"], pick["away"], pick["esito_key"])
+            continue
+        if _too_close_to_start(opp.get("start_time")):
+            logger.info("auto_bet: %s vs %s a meno di %d min dall'inizio, salto",
+                        pick["home"], pick["away"], MIN_MINUTES_TO_START)
+            continue
+        price = opp["price"]
+        if price < (pick["quota"] or 0) * PRICE_GUARD:
+            logger.info("auto_bet: prezzo Exchange %.2f sotto il %.0f%% della quota "
+                        "segnale %.2f — salto %s", price, PRICE_GUARD * 100,
+                        pick["quota"], pick["esito_key"])
+            continue
+
+        ins = {"selectionId": opp["selection_id"], "side": "BACK",
+               "orderType": "LIMIT",
+               "limitOrder": {"size": stake, "price": price,
+                              "persistenceType": "LAPSE"}}
+        try:
+            result = client.place_orders(opp["market_id"], [ins],
+                                         customer_ref=f"qv-{pick['match_id']}")
+        except Exception as e:
+            logger.warning("auto_bet: ordine fallito %s: %s", pick["match_id"], e)
+            continue
+        status = (result or {}).get("status")
+        bet_id = (result or {}).get("betId")
+        mode = "live" if not client.dry_run else "dry-run"
+        record = {**pick, "price": price, "stake": stake,
+                  "market_id": opp["market_id"],
+                  "selection_id": opp["selection_id"],
+                  "status": status, "bet_id": bet_id, "mode": mode}
+        placed.append(record)
+        try:
+            from tracker import save_bet
+            save_bet(match_id=pick["match_id"], mercato=pick["mercato"],
+                     esito=pick["esito_key"], market_id=opp["market_id"],
+                     selection_id=opp["selection_id"], price=price, stake=stake,
+                     mode=mode, status=status, bet_id=bet_id)
+        except Exception as e:
+            logger.warning("auto_bet: salvataggio ordine %s: %s", pick["match_id"], e)
+
+    logger.info("auto_bet: %d puntate piazzate (%s)",
+                len(placed), placed[0]["mode"] if placed else "nessuna")
+    return placed
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    res = run_today_bets()
+    print(f"✅ {len(res)} puntate piazzate (modalità "
+          f"{res[0]['mode'] if res else 'nessuna'})")
+    for p in res:
+        print(f"• {p['home']} vs {p['away']} — {p['esito_key']} @ {p['price']:.2f} "
+              f"(€{p['stake']:.2f}) [{p['status']}]")

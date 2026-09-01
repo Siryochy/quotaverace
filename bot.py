@@ -25,6 +25,7 @@ from daily_scanner import scan_day, group_same_start
 from betfair_client import get_client as get_betfair_client
 from daily_scan_job import run_daily_scan
 from surebet_pipeline import run_surebet_alert, format_alert
+from auto_bet import run_today_bets
 
 try:
     from odds_api import get_live_odds
@@ -110,6 +111,10 @@ def get_bankroll(chat_id: int) -> float:
 def set_bankroll(chat_id: int, amount: float) -> None:
     chat_bankrolls[chat_id] = max(10.0, amount)
 
+# File di fallback delle quote reali (schema odds_ingest).
+ODDS_FALLBACK_FILE = DATA_DIR / "odds_sample.json"
+
+
 def get_odds_data():
     if os.getenv("ODDS_API_KEY") and LIVE_ODDS_AVAILABLE:
         try:
@@ -119,10 +124,30 @@ def get_odds_data():
         except Exception as e:
             logger.warning(f"Quote reali non disponibili: {e}")
     try:
-        return load_odds()
+        return load_odds(str(ODDS_FALLBACK_FILE))
     except Exception as e:
         logger.warning(f"Fallback quote non disponibile: {e}")
         return []
+
+
+def get_odds_freshness_note() -> str | None:
+    """Nota di freschezza delle quote per i segnali manuali.
+
+    None se le quote vengono dal feed live (ODDS_API_KEY). Altrimenti
+    l'eta' del file di fallback: se vecchio, chi punta deve verificare
+    il prezzo attuale sul bookmaker (le quote stale = edge finto).
+    """
+    if os.getenv("ODDS_API_KEY") and LIVE_ODDS_AVAILABLE:
+        return None
+    try:
+        age_sec = datetime.now().timestamp() - ODDS_FALLBACK_FILE.stat().st_mtime
+        age_min = int(age_sec / 60)
+    except Exception:
+        return "Quote di mercato non disponibili: segnale basato solo sul modello."
+    if age_min < 60:
+        return None
+    return (f"Quote di mercato da cache ({age_min} min fa): verifica il prezzo "
+            f"attuale sul bookmaker prima di puntare.")
 
 def _all_teams():
     teams = set()
@@ -130,7 +155,55 @@ def _all_teams():
         teams.update(lt.keys())
     return teams
 
-def format_segnale_pronto(home, away, lam_h, lam_a, quota_over=2.10, bookmaker="Generico", bankroll=100.0):
+# --- Sticker premium animato (gratis: nessun Telegram Premium/Fragment richiesto) ---
+# Telegram non permette custom emoji nel testo senza usernames su Fragment o
+# Premium sull'account proprietario. Workaround: il bot invia uno sticker
+# animato (set pubblico configurabile via PREMIUM_STICKER_SET) prima dei
+# messaggi premium. Mai bloccante: se fallisce si manda solo il testo.
+PREMIUM_STICKER_SET = os.getenv("PREMIUM_STICKER_SET", "Diamond")
+_PREMIUM_STICKER_EMOJIS = ("💎", "🔔", "⚡", "🔥", "🏆", "💰", "✅")
+_premium_sticker_file_id: str | None = None
+
+
+async def get_premium_sticker_file_id(bot) -> str | None:
+    """File_id di uno sticker del set configurato, preferendo animato ed emoji pertinente.
+
+    Il file_id e' stabile per bot: viene recuperato una sola volta e messo in
+    cache in memoria.
+    """
+    global _premium_sticker_file_id
+    if _premium_sticker_file_id:
+        return _premium_sticker_file_id
+    try:
+        sticker_set = await bot.get_sticker_set(PREMIUM_STICKER_SET)
+        stickers = list(sticker_set.stickers)
+        if not stickers:
+            return None
+        def _score(s):
+            return (bool(getattr(s, "is_animated", False)),
+                    str(getattr(s, "emoji", "")) in _PREMIUM_STICKER_EMOJIS)
+        best = max(stickers, key=_score)
+        _premium_sticker_file_id = best.file_id
+        logger.info("Sticker premium pronto: %s/%s (animato=%s)",
+                    PREMIUM_STICKER_SET, best.emoji,
+                    getattr(best, "is_animated", False))
+        return _premium_sticker_file_id
+    except Exception as e:
+        logger.warning("Sticker set '%s' non disponibile: %s", PREMIUM_STICKER_SET, e)
+        return None
+
+
+async def send_premium_sticker(bot, chat_id) -> None:
+    """Invia lo sticker animato prima di un messaggio premium (mai bloccante)."""
+    try:
+        file_id = await get_premium_sticker_file_id(bot)
+        if file_id:
+            await bot.send_sticker(chat_id=chat_id, sticker=file_id)
+    except Exception as e:
+        logger.warning(f"Sticker premium non inviato a {chat_id}: {e}")
+
+def format_segnale_pronto(home, away, lam_h, lam_a, quota_over=2.10, bookmaker="Generico", bankroll=100.0,
+                          extra_note=None):
     p1, px, p2 = prob_1x2(lam_h, lam_a)
     p_over, p_under = prob_over_under(lam_h, lam_a)
     p_btts = prob_btts(lam_h, lam_a)
@@ -176,6 +249,8 @@ def format_segnale_pronto(home, away, lam_h, lam_a, quota_over=2.10, bookmaker="
         f"   EV: 3%-15% | Odds: 1.50-5.00 | Kelly: 1/4 | Cap: 3%\n\n"
         f"{valore_label}\n{raccomandazione}\n\n📅 *Data:* oggi"
     )
+    if extra_note:
+        msg += f"\n\n⚠️ {extra_note}"
     return msg + DISCLAIMER
 
 async def cmd_test_segnale(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -211,7 +286,16 @@ async def cmd_segnale(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                                  and "over" in o.get("esito","").lower()), key=lambda x: x.get("quota_decimale",0), default=None)
             except: pass
         quota, bookmaker = (best_over["quota_decimale"], best_over["bookmaker"]) if best_over else (2.10, "Modello")
-        text = format_segnale_pronto(home, away, lam_h, lam_a, quota, bookmaker, get_bankroll(update.effective_chat.id))
+        notes = []
+        if bookmaker == "Modello":
+            notes.append("Quota di MODELLO, non verificata su un bookmaker reale: "
+                         "controlla il miglior prezzo disponibile prima di puntare.")
+        fresh = get_odds_freshness_note()
+        if fresh:
+            notes.append(fresh)
+        text = format_segnale_pronto(home, away, lam_h, lam_a, quota, bookmaker,
+                                     get_bankroll(update.effective_chat.id),
+                                     extra_note=" ".join(notes) if notes else None)
         await update.message.reply_text(text, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Errore segnale: {e}")
@@ -369,6 +453,7 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     premium_free = os.getenv("PREMIUM_FREE", "1").lower() not in ("0", "false", "no")
     if premium_free:
         set_tier(chat_id, "premium", until)
+        await send_premium_sticker(context.bot, chat_id)
         await update.message.reply_text(
             "💎 *Premium attivo — GRATIS!*\n\n"
             f"Scadenza: {datetime.strptime(until[:10], '%Y-%m-%d').strftime('%d/%m/%Y')} "
@@ -563,8 +648,29 @@ def format_scan_result(result: dict, max_events: int = 8,
 def _update_results():
     """Aggiorna risultati e rating dalle API. Ritorna (updated, stats)."""
     from odds_api import SPORTS_MAP, fetch_scores
-    from tracker import save_result, get_results_stats, get_leagues_with_signals
+    from tracker import (save_result, get_results_stats, get_leagues_with_signals,
+                          settle_cassa, settle_predictions, settle_bets)
     from rating_engine import compute_ratings
+    # Salda la cassa (le tue puntate reali) e il ledger previsioni (tutti i
+    # segnali proposti) coi risultati appena scaricati.
+    try:
+        settled = settle_cassa()
+        if settled:
+            logger.info("Cassa: saldate %d scommesse coi risultati reali.", settled)
+    except Exception as e:
+        logger.warning("settle_cassa fallita: %s", e)
+    try:
+        settled, pushes = settle_predictions()
+        if settled:
+            logger.info("Previsioni: saldate %d (di cui %d push).", settled, pushes)
+    except Exception as e:
+        logger.warning("settle_predictions fallita: %s", e)
+    try:
+        settled, pushes = settle_bets()
+        if settled:
+            logger.info("Puntate auto: saldate %d (di cui %d push).", settled, pushes)
+    except Exception as e:
+        logger.warning("settle_bets fallita: %s", e)
     leagues = get_leagues_with_signals(days=3)
     updated = 0
     for lg in leagues:
@@ -586,6 +692,139 @@ def _update_results():
             updated += 1
     compute_ratings()
     return updated, get_results_stats()
+
+
+def _admin_chat_ids() -> list:
+    """Chat ID che ricevono SEMPRE i report (proprietario), anche senza /subscribe.
+
+    Variabile ADMIN_CHAT_ID, separata da virgole se piu' di uno.
+    """
+    ids = []
+    for part in os.getenv("ADMIN_CHAT_ID", "").split(","):
+        part = part.strip()
+        if part.lstrip("-").isdigit():
+            ids.append(int(part))
+    return ids
+
+
+def _missing_env_keys() -> list:
+    """Chiavi mancanti: i job corrispondenti saltano in silenzio."""
+    missing = []
+    for key, what in (("API_FOOTBALL_KEY", "calendario/analisi"),
+                      ("ODDS_API_KEY", "quote live e notifiche value"),
+                      ("BETFAIR_APP_KEY", "scansione Betfair e surebet")):
+        if not os.getenv(key):
+            missing.append(f"{key} ({what})")
+    return missing
+
+
+def format_daily_report(since: str, label: str) -> str:
+    """Riepilogo di un periodo (ISO `since`): previsioni chiuse per mercato,
+    cassa saldata, CLV medio e job saltati per chiavi mancanti."""
+    from tracker import predictions_summary, cassa_period, _get_conn
+
+    by_mkt = predictions_summary(settled_since=since)
+    ct = cassa_period(since)
+
+    total_n = sum(b["n"] for b in by_mkt.values())
+    total_pnl = sum((b["roi"] / 100.0) * b["n"] for b in by_mkt.values())
+    total_ev = sum((b["avg_ev"] / 100.0) * b["n"] for b in by_mkt.values())
+
+    lines = [f"📅 *RIEPILOGO — {label}*", "━━━━━━━━━━━━━━━━━━━━━━\n"]
+    if total_n:
+        lines.append(f"🎯 *Previsioni chiuse:* {total_n}")
+        for mkt in ("1X2", "OU", "BTTS", "AH"):
+            b = by_mkt.get(mkt)
+            if not b or not b["n"]:
+                continue
+            outcome = f"✅ {b['won']}/❌ {b['lost']}"
+            if b["push"]:
+                outcome += f"/⚪ {b['push']}"
+            lines.append(
+                f"   {mkt}: {b['n']} ({outcome}) ROI {b['roi']:+.1f}% "
+                f"vs EV {b['avg_ev']:+.1f}%"
+            )
+        closed = max(total_n - sum(b["push"] for b in by_mkt.values()), 1)
+        hit = (sum(b["won"] for b in by_mkt.values()) / closed) * 100
+        roi_tot = (total_pnl / total_n * 100) if total_n else 0.0
+        lines.append(
+            f"   *Totale: P/L {total_pnl:+.1f}u | ROI {roi_tot:+.1f}% "
+            f"| hit {hit:.0f}%* (EV medio atteso {total_ev/total_n*100:+.1f}%)"
+        )
+    else:
+        lines.append("🎯 *Nessuna previsione chiusa nel periodo.*")
+
+    if ct["chiusi"]:
+        lines.append(
+            f"💰 *Cassa saldata:* {ct['chiusi']} (✅ {ct['vinti']}/❌ {ct['persi']}) "
+            f"| speso €{ct['speso']:.2f} | P/L €{ct['profit']:+.2f} | "
+            f"ROI {ct['roi']:+.1f}%"
+        )
+    else:
+        lines.append("💰 *Cassa:* nessuna puntata saldata nel periodo.")
+
+    try:
+        conn = _get_conn(); c = conn.cursor()
+        rows = c.execute("SELECT signal_quota, closing_quota FROM clv_history "
+                         "WHERE updated_at >= ?", (since,)).fetchall()
+        conn.close()
+        clvs = [(s / clos) - 1.0 for s, clos in rows if clos and clos > 0]
+        if clvs:
+            lines.append(f"📈 *CLV medio:* {sum(clvs)/len(clvs)*100:+.2f}% (n {len(clvs)})")
+    except Exception:
+        pass
+
+    try:
+        from tracker import bets_period
+        bp = bets_period(since)
+        if bp["piazzate"]:
+            line = (f"🎯 *Puntate automatiche:* {bp['piazzate']} "
+                    f"(€{bp['stake_totale']:.2f})")
+            if bp["chiusi"]:
+                outcome = f"✅ {bp['vinti']}/❌ {bp['persi']}"
+                if bp["push"]:
+                    outcome += f"/⚪ {bp['push']}"
+                line += (f" | chiuse {bp['chiusi']} ({outcome}) "
+                         f"P/L €{bp['profit']:+.2f}")
+            lines.append(line)
+    except Exception:
+        pass
+
+    missing = _missing_env_keys()
+    if missing:
+        lines.append("\n⚠️ *Job saltati per chiavi mancanti:*\n   " + "\n   ".join(missing))
+    else:
+        lines.append("\n✅ Tutti i job attivi (chiavi presenti).")
+    return "\n".join(lines)
+
+
+async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mostra il Chat ID: utile per impostare ADMIN_CHAT_ID nel .env."""
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(
+        f"🆔 Il tuo Chat ID: `{chat_id}`\n\n"
+        "Impostalo nel file `.env` (o su Railway) come:\n"
+        f"`ADMIN_CHAT_ID={chat_id}`\n\n"
+        "Così il bot ti invia SEMPRE i report mattutino e serale "
+        "su Telegram, anche senza /subscribe.",
+        parse_mode="Markdown")
+
+
+async def cmd_riepilogo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Riepilogo del periodo: oggi (default), 'ieri' o una data YYYY-MM-DD."""
+    from datetime import timedelta
+    arg = " ".join(context.args or []).strip().lower()
+    if arg in ("ieri", "yesterday"):
+        since = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        label = "IERI"
+    elif arg:
+        since = arg
+        label = since
+    else:
+        since = datetime.now().strftime("%Y-%m-%d")
+        label = "OGGI"
+    text = format_daily_report(since, label)
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def cmd_quota(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -644,6 +883,40 @@ async def cmd_risultati(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 text += clv_line
         if updated:
             text += f"\n\n🔄 Aggiornate {updated} partite dai risultati."
+        try:
+            from tracker import cassa_totals
+            ct = cassa_totals()
+            if ct["chiusi"]:
+                text += (
+                    "\n\n💰 *CASSA REALE* (le tue puntate)\n"
+                    f"   Chiuse: {ct['chiusi']} (✅ {ct['vinti']} / ❌ {ct['persi']}) "
+                    f"| in gioco: {ct['in_gioco']}\n"
+                    f"   Speso: €{ct['totale_speso']:.2f} | "
+                    f"P/L: €{ct['profit_realizzato']:+.2f} | ROI: {ct['roi']:+.2f}%"
+                )
+        except Exception:
+            pass
+        # Telemetria di calibrazione: torto/ragione per MERCATO. E' qui che
+        # si vede se il modello batte davvero la closing line, per mercato.
+        try:
+            from tracker import predictions_summary
+            by_mkt = predictions_summary()
+            lines = []
+            for mkt in ("1X2", "OU", "BTTS", "AH"):
+                b = by_mkt.get(mkt)
+                if not b or not b["n"]:
+                    continue
+                outcome = f"✅ {b['won']}/❌ {b['lost']}"
+                if b["push"]:
+                    outcome += f"/⚪ {b['push']}"
+                lines.append(
+                    f"   {mkt}: {b['n']} prev ({outcome}) "
+                    f"ROI {b['roi']:+.1f}% vs EV {b['avg_ev']:+.1f}%"
+                )
+            if lines:
+                text += "\n\n📊 *CALIBRAZIONE PER MERCATO*\n" + "\n".join(lines)
+        except Exception:
+            pass
         await update.message.reply_text(text + DISCLAIMER, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Errore risultati: {e}")
@@ -674,6 +947,10 @@ async def notify_job(context: ContextTypes.DEFAULT_TYPE, delayed: bool = False):
                            if is_premium(cid)]
         if not subscribers: return
         today = __import__('datetime').datetime.now().strftime("%Y-%m-%d")
+        if not delayed:
+            # Sticker animato una volta per chat, prima dei messaggi premium.
+            for chat_id in subscribers:
+                await send_premium_sticker(context.bot, chat_id)
         for sig in value_signals[:3]:
             if is_notified(sig.get("match_id","unknown"), today): continue
             ev_pct = sig["ev"] * 100
@@ -691,8 +968,14 @@ async def notify_job(context: ContextTypes.DEFAULT_TYPE, delayed: bool = False):
                 f"💡 `/segnale` per analisi dettagliata"
             )
             for chat_id in subscribers:
-                try: await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                except: pass
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                    # Traccia il segnale ricevuto: alimenta /storico_personale,
+                    # il backtest e il tracking risultati/CLV.
+                    log_signal(chat_id, sig["evento"], sig["esito"],
+                               sig["quota_decimale"], prob, sig["ev"])
+                except Exception:
+                    pass
             mark_notified(sig.get("match_id","unknown"), today)
     except Exception as e: logger.error(f"Errore notify: {e}")
 
@@ -702,9 +985,7 @@ async def morning_job(context: ContextTypes.DEFAULT_TYPE):
     picks = get_value_picks_for_schedina()
     if not picks: return
     text = format_schedina(picks, 100.0)
-    for chat_id in get_subscribers():
-        try: await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
-        except: pass
+    await _send_report_to_recipients(context, text)
 
 async def afternoon_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Job pomeridiano: ricontrollo Pro")
@@ -737,6 +1018,79 @@ async def results_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Errore results_job: {e}")
 
+async def _send_report_to_recipients(context, text: str):
+    """Invia il messaggio agli iscritti + sempre ai chat ADMIN_CHAT_ID."""
+    chat_ids = set(get_subscribers())
+    chat_ids.update(_admin_chat_ids())
+    for chat_id in sorted(chat_ids):
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text,
+                                           parse_mode="Markdown")
+        except Exception:
+            pass
+
+
+async def end_of_day_report_job(context: ContextTypes.DEFAULT_TYPE):
+    """Riepilogo quando FINISCE L'ULTIMA PARTITA della giornata.
+
+    Controlla ogni 15 minuti (dalle 21:00): quando tutte le partite del
+    giorno iniziate hanno il risultato, invia il riepilogo una volta sola.
+    Fallback notturno (23:50 UTC): se qualche partita non si chiude
+    (rinvio, dati lenti), invia comunque per non perdere la giornata.
+    """
+    from tracker import day_completed, is_notified, mark_notified
+    today = datetime.now().strftime("%Y-%m-%d")
+    if is_notified("EOD", today):
+        return
+    now = datetime.now()
+    forced = now.hour >= 23 and now.minute >= 50
+    if not forced and not day_completed(today):
+        return
+    text = format_daily_report(today, "OGGI — FINE GIORNATA")
+    await _send_report_to_recipients(context, text)
+    mark_notified("EOD", today)
+    logger.info("Riepilogo di fine giornata inviato (ultima partita chiusa).")
+
+
+async def report_morning_job(context: ContextTypes.DEFAULT_TYPE):
+    """Riepilogo del mattino (08:05 ITA): cosa è successo ieri."""
+    from datetime import timedelta
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    text = format_daily_report(yesterday, "IERI")
+    await _send_report_to_recipients(context, text)
+    logger.info("Riepilogo di ieri inviato agli iscritti.")
+
+
+async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
+    """08:50: piazza le puntate del giorno su Betfair (dry-run di default).
+
+    Segue la scansione (08:45) e l'analisi del mattino (08:00). In modalita'
+    LIVE piazza ordini reali: serve BETFAIR_DRY_RUN=0, BETFAIR_LIVE=1 e
+    nessun kill-switch. In dry-run logga tutto su data/orders.jsonl.
+    """
+    if not os.getenv("BETFAIR_APP_KEY"):
+        logger.info("auto_bet_job: BETFAIR_APP_KEY assente, salto")
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        placed = await loop.run_in_executor(_scan_executor, run_today_bets)
+    except Exception as e:
+        logger.error("auto_bet_job: %s", e)
+        return
+    if not placed:
+        return
+    mode = placed[0]["mode"]
+    total = sum(p["stake"] for p in placed)
+    rows = "\n".join(
+        f"• {p['home']} vs {p['away']} — {p['esito_key']} @ {p['price']:.2f} "
+        f"(€{p['stake']:.2f})" for p in placed)
+    text = (f"🎯 *PUNTATE AUTOMATICHE ({'LIVE' if mode == 'live' else 'DRY-RUN'})*\n"
+            f"{len(placed)} puntate, €{total:.2f} di stake\n\n{rows}\n\n"
+            f"📌 {'ORDINI REALI' if mode == 'live' else 'Simulazione: nessun ordine reale inviato.'}")
+    await _send_report_to_recipients(context, text)
+    logger.info("auto_bet_job: %d puntate (%s), €%.2f", len(placed), mode, total)
+
+
 async def betfair_scan_job(context: ContextTypes.DEFAULT_TYPE):
     """Job 8:45: scansione Betfair del giorno -> data/scan_<giorno>.json.
 
@@ -767,6 +1121,9 @@ async def betfair_scan_job(context: ContextTypes.DEFAULT_TYPE):
                            if is_premium(cid)]
             logger.info("surebet alert su dati reali: %d opportunita', %d iscritti premium",
                         len(alerts), len(subscribers))
+            # Sticker animato una volta per chat, prima dell'alert surebet.
+            for chat_id in subscribers:
+                await send_premium_sticker(context.bot, chat_id)
             for chat_id in subscribers:
                 try:
                     await context.bot.send_message(chat_id=chat_id, text=text,
@@ -875,6 +1232,8 @@ def main() -> None:
     application.add_handler(CommandHandler("backtest", cmd_backtest))
     application.add_handler(CommandHandler("sync", cmd_sync))
     application.add_handler(CommandHandler("quota", cmd_quota))
+    application.add_handler(CommandHandler("riepilogo", cmd_riepilogo))
+    application.add_handler(CommandHandler("myid", cmd_myid))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("start", cmd_help))
     if _AI_OK:
@@ -888,13 +1247,20 @@ def main() -> None:
         job_queue.run_daily(afternoon_job, time=time(hour=14, minute=0))
         job_queue.run_daily(evening_job, time=time(hour=20, minute=0))
         job_queue.run_daily(results_job, time=time(hour=21, minute=30))
+        # Riepilogo a fine ultima partita: check ogni 15' dalle 21:00 UTC
+        # (fallback notturno 23:50 se la giornata non si chiude da sola).
+        job_queue.run_repeating(end_of_day_report_job, interval=900,
+                                first=time(hour=21, minute=0))
+        job_queue.run_daily(report_morning_job, time=time(hour=6, minute=5))
         job_queue.run_daily(history_sync_job, time=time(hour=8, minute=30))
         job_queue.run_daily(betfair_scan_job, time=time(hour=8, minute=45))
+        job_queue.run_daily(auto_bet_job, time=time(hour=8, minute=50))
         job_queue.run_daily(backup_data_job, time=time(hour=3, minute=30))
         job_queue.run_once(backup_data_job, when=10)  # snapshot di base all'avvio
         # Piano free: riceve gli stessi segnali con 3 ore di ritardo.
         job_queue.run_daily(free_delayed_job, time=time(hour=17, minute=0))
-        logger.info("Job Pro schedulati: 03:30 backup / 06:00 / 08:30 / 08:45 / 14:00 / 17:00 free / 20:00 / 21:30 ITA")
+        logger.info("Job Pro schedulati: 03:30 backup / 06:00+05 riepilogo ieri / 08:30 / 08:45 / "
+                    "14:00 / 17:00 free / 20:00 / 21:30 risultati / 21:00-23:50 EOD (ogni 15') ITA")
     else: logger.warning("JobQueue non disponibile")
     logger.info("QuotaVerace Pro avviato.")
     application.run_polling()

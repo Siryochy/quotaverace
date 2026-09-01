@@ -89,6 +89,19 @@ def _dashboard_json(params=None):
     conn.close()
     roi = summary.get("roi", 0.0)
     closed = summary.get("closed", 0)
+    # Salda previsioni e cassa in modo idempotente prima di mostrare i numeri.
+    try:
+        from tracker import settle_predictions, settle_cassa
+        settle_predictions()
+        settle_cassa()
+    except Exception:
+        pass
+    per_mercato = {}
+    try:
+        from tracker import predictions_summary
+        per_mercato = predictions_summary()
+    except Exception:
+        pass
     return {
         "bankroll": _bankroll(),
         "roi_30gg": roi,
@@ -96,6 +109,7 @@ def _dashboard_json(params=None):
         "chiusi_30gg": closed,
         "hit_rate": summary.get("hit_rate", 0.0),
         "ultime_value": value,
+        "per_mercato": per_mercato,
     }
 
 
@@ -270,13 +284,19 @@ def _campionati_json(params=None):
 
 
 def _cassa_get(params=None):
-    from tracker import get_cassa, cassa_totals
+    """Cassa con saldo automatico: le scommesse chiuse sono aggiornate
+    coi risultati reali (idempotente, le pending restano pending)."""
+    from tracker import get_cassa, cassa_totals, settle_cassa
+    try:
+        settle_cassa()
+    except Exception as e:
+        logger.warning("settle_cassa al GET /api/cassa: %s", e)
     entries = get_cassa()
     return {"scommesse": entries, "totali": cassa_totals(entries)}
 
 
 def _cassa_post(params=None, body=None):
-    from tracker import save_cassa_entry, get_cassa, cassa_totals
+    from tracker import save_cassa_entry, get_cassa, cassa_totals, settle_cassa
     data = body or {}
     partita = (data.get("partita") or "").strip()
     esito = (data.get("esito") or "").strip()
@@ -286,15 +306,18 @@ def _cassa_post(params=None, body=None):
         return 400, {"error": "Campi mancanti o non validi: servono partita, esito, quota>1, importo>0"}
     ev = float(data.get("ev") or 0)
     save_cassa_entry(partita, esito, quota, importo, ev=ev, data=data.get("data"))
+    try:
+        settle_cassa()
+    except Exception:
+        pass
     entries = get_cassa()
     return {"ok": True, "scommesse": entries, "totali": cassa_totals(entries)}
 
 
 def _cassa_delete(params=None):
-    from tracker import clear_cassa
+    from tracker import clear_cassa, cassa_totals
     clear_cassa()
-    return {"ok": True, "scommesse": [], "totali": {"n": 0, "totale_speso": 0,
-                                                    "vincita_potenziale": 0, "profit_potenziale": 0}}
+    return {"ok": True, "scommesse": [], "totali": cassa_totals([])}
 
 
 def _analisi_json(params=None, body=None):

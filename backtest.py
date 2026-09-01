@@ -249,7 +249,19 @@ def backtest_stats(source: Optional[str] = None) -> Dict:
         "warn": stats["warn"],
         "beats_market": {"roi": round(beats[0], 2), "n": beats[1]} if beats else None,
         "no_beats_market": {"roi": round(no_beats[0], 2), "n": no_beats[1]} if no_beats else None,
+        # Telemetria per mercato (ledger previsioni): dove il modello batte
+        # davvero il mercato e dove invece sbaglia da correggere.
+        "per_mercato": _predictions_summary_safe(),
     }
+
+
+def _predictions_summary_safe() -> dict:
+    """predictions_summary() senza rompere il backtest se il ledger e' vuoto."""
+    try:
+        from tracker import predictions_summary
+        return predictions_summary()
+    except Exception:
+        return {}
 
 
 if __name__ == "__main__":

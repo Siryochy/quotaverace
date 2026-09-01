@@ -5,13 +5,13 @@ from typing import List, Dict, Optional
 
 from odds_api import fetch_odds, SPORTS_MAP
 from leagues_data import ALL_LEAGUES
-from poisson_engine import expected_goals, prob_1x2, prob_over_under
+from poisson_engine import expected_goals, prob_1x2, prob_over_under, ah_outcome_probs
 from value_filter import (compute_ev, kelly_fraction, kelly_euro, is_sane,
                            combined_quota, combined_probability, multipla_stake,
                            adjusted_probability)
 from market_calib import market_implied, MARKET_EDGE_STRONG
 from tracker import (save_match, get_today_matches, save_analysis, get_analysis_for_match,
-                      clear_old_matches, save_clv)
+                      clear_old_matches, save_clv, save_prediction)
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +180,39 @@ def _analyze_match(match_id, match, home_db, away_db, league):
                         if cur is None or float(price) > cur[0]:
                             total_prices[mkey] = (float(price), disp, bname)
 
+    # 1b. Asian Handicap (mercato 'spreads'): linee con entrambi i lati.
+    #     home_line e' la linea vista dal lato casa (negativa = la casa dà gol).
+    import re as _re
+    spread_prices: Dict[float, Dict[str, tuple]] = {}
+    for bm in match.get("bookmakers", []):
+        bname = bm.get("title") or bm.get("key") or "Sconosciuto"
+        for mkt in bm.get("markets", []):
+            if mkt.get("key") != "spreads":
+                continue
+            for out in mkt.get("outcomes", []):
+                name = (out.get("name") or "").strip()
+                price = out.get("price")
+                point = out.get("point")
+                if not name or point is None or not price or float(price) <= 1.0:
+                    continue
+                low = name.lower()
+                low_clean = _re.sub(r"[+\-]?\d+(\.\d+)?$", "", low).strip()
+                if low_clean == home_api or (home_api and home_api in low) or "home" in low_clean:
+                    side = "home"
+                elif (low_clean == away_api or (away_api and away_api in low)
+                      or "away" in low_clean or "guest" in low_clean):
+                    side = "away"
+                else:
+                    continue
+                pt = float(point)
+                home_line = pt if side == "home" else -pt
+                if abs(home_line) < 0.001 or abs(home_line) > 3.5:
+                    continue
+                slot = spread_prices.setdefault(home_line, {})
+                cur = slot.get(side)
+                if cur is None or float(price) > cur[0]:
+                    slot[side] = (float(price), name, bname)
+
     # 2. Probabilita' fair di mercato (devig power, corregge il longshot bias).
     market_h2h = market_implied({k: v[0] for k, v in h2h_prices.items()}) if len(h2h_prices) >= 2 else None
     market_tot = market_implied({k: v[0] for k, v in total_prices.items()}) if len(total_prices) >= 2 else None
@@ -210,7 +243,42 @@ def _analyze_match(match_id, match, home_db, away_db, league):
             "prob_model": model_prob,
             "market_prob": market_prob,
             "market_edge": (model_prob - market_prob) if market_prob is not None else None,
+            "mercato": "1X2" if mkey in ("1", "X", "2") else "OU",
         })
+
+    # 3b. Candidati Asian Handicap: modello vs mercato devig per linea.
+    # Serve solo al ledger previsioni (telemetria per mercato): il segnale
+    # principale della schedina resta il miglior 1X2/Over-Under qui sotto.
+    ah_candidates = []
+    for home_line, sides in sorted(spread_prices.items()):
+        if "home" not in sides or "away" not in sides:
+            continue
+        market_ah = market_implied({"home": sides["home"][0], "away": sides["away"][0]})
+        for side, entry in (("home", sides["home"]), ("away", sides["away"])):
+            price, disp, book = entry
+            if side == "home":
+                model_prob, _, _ = ah_outcome_probs(lam_h, lam_a, home_line, "home")
+                market_prob = market_ah.get("home") if market_ah else None
+                esito_disp = f"Home {home_line:+.2f}"
+            else:
+                away_line = -home_line
+                model_prob, _, _ = ah_outcome_probs(lam_h, lam_a, away_line, "away")
+                market_prob = market_ah.get("away") if market_ah else None
+                esito_disp = f"Away {away_line:+.2f}"
+            final_prob = adjusted_probability(model_prob, market_prob, price)
+            ev = compute_ev(final_prob, price)
+            ah_candidates.append({
+                "score": ev,
+                "ev": ev,
+                "esito": esito_disp,
+                "quota": price,
+                "bookmaker": book,
+                "prob": final_prob,
+                "prob_model": model_prob,
+                "market_prob": market_prob,
+                "market_edge": (model_prob - market_prob) if market_prob is not None else None,
+                "mercato": "AH",
+            })
 
     if not candidates:
         return "no_odds"
@@ -241,7 +309,36 @@ def _analyze_match(match_id, match, home_db, away_db, league):
     save_analysis(match_id, lam_h, lam_a, p1, px, p2, p_over, best["ev"], best["esito"],
                   best["quota"], best["bookmaker"], status,
                   market_prob=best["market_prob"], market_edge=best["market_edge"])
+
+    # Ledger previsioni: registra OGNI segnale proposto (1X2, Over/Under e
+    # Asian Handicap) col suo stato, per la verifica a fine partita e la
+    # calibrazione del modello per mercato.
+    try:
+        for cand in candidates + ah_candidates:
+            st = _candidate_status(cand)
+            if st == "rejected":
+                continue
+            save_prediction(match_id, cand["mercato"], cand["esito"],
+                            cand["quota"], cand["prob"], cand["ev"],
+                            market_prob=cand.get("market_prob"),
+                            market_edge=cand.get("market_edge"), status=st)
+    except Exception as e:
+        logger.warning(f"Ledger previsioni per {match_id}: {e}")
     return status
+
+
+def _candidate_status(cand: Dict) -> str:
+    """Classifica un candidato: strong_value / value / no_value / rejected."""
+    sane, _ = is_sane(cand["prob"], cand["quota"], cand["ev"],
+                      market_prob=cand.get("market_prob"))
+    if not sane:
+        return "rejected"
+    if cand["ev"] > 0.08 and (cand["market_edge"] is None
+                               or cand["market_edge"] >= MARKET_EDGE_STRONG):
+        return "strong_value"
+    if cand["ev"] > 0.03:
+        return "value"
+    return "no_value"
 
 def get_calendar_formatted() -> str:
     rows = get_today_matches()

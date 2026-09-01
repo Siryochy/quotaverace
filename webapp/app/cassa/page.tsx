@@ -15,6 +15,9 @@ type CassaRow = {
   importo: number
   ev: number
   prob: number
+  esito_finale?: string | null
+  profit?: number | null
+  settled_at?: string | null
 }
 
 type Team = { nome: string; campionato: string }
@@ -81,6 +84,9 @@ export default function Cassa() {
         const rows = (j.scommesse || []).map((s: any) => ({
           id: String(s.id), data: s.data, partita: s.partita, esito: s.esito,
           quota: Number(s.quota), importo: Number(s.importo), ev: Number(s.ev || 0), prob: 0,
+          esito_finale: s.esito_finale || null,
+          profit: s.profit != null ? Number(s.profit) : null,
+          settled_at: s.settled_at || null,
         }))
         if (rows.length) { setCassa(rows); persistLocal(rows) }
         setSyncState('ok')
@@ -168,6 +174,7 @@ export default function Cassa() {
       partita: `${home} vs ${away}`,
       esito, quota: quotaNum, importo: importoNum,
       ev: cand?.ev || 0, prob: cand?.prob || 0,
+      esito_finale: null, profit: null, settled_at: null,
     }
     const rows = [row, ...cassa]
     setCassa(rows); persistLocal(rows); backupServer(rows)
@@ -190,8 +197,13 @@ export default function Cassa() {
 
   const totali = useMemo(() => {
     const speso = cassa.reduce((s, r) => s + r.importo, 0)
-    const vinc = cassa.reduce((s, r) => s + r.importo * r.quota, 0)
-    return { n: cassa.length, speso, vincita: vinc, profit: vinc - speso }
+    const chiusi = cassa.filter(r => r.esito_finale)
+    const inGioco = cassa.filter(r => !r.esito_finale)
+    const vincPot = inGioco.reduce((s, r) => s + r.importo * r.quota, 0)
+    const profitReale = chiusi.reduce((s, r) => s + (r.profit ?? 0), 0)
+    const spesoChiuso = chiusi.reduce((s, r) => s + r.importo, 0)
+    const roi = spesoChiuso > 0 ? (profitReale / spesoChiuso) * 100 : 0
+    return { n: cassa.length, speso, vincita: vincPot, profit: profitReale, roi, chiusi: chiusi.length, inGioco: inGioco.length }
   }, [cassa])
 
   const esitoLabel = (key: string) => ESITI.find(e => e.key === key)?.label || key
@@ -302,8 +314,8 @@ export default function Cassa() {
             <thead className="bg-gray-700">
               <tr>
                 <th className="p-3">Data</th><th className="p-3">Partita</th><th className="p-3">Esito</th>
-                <th className="p-3">Quota</th><th className="p-3">Importo</th><th className="p-3">Vincita pot.</th>
-                <th className="p-3">EV</th><th className="p-3"></th>
+                <th className="p-3">Quota</th><th className="p-3">Importo</th><th className="p-3">Vinto / pot.</th>
+                <th className="p-3">Outcome</th><th className="p-3">EV</th><th className="p-3"></th>
               </tr>
             </thead>
             <tbody>
@@ -314,13 +326,24 @@ export default function Cassa() {
                   <td className="p-3">{esitoLabel(r.esito)}</td>
                   <td className="p-3">{r.quota.toFixed(2)}</td>
                   <td className="p-3">€{r.importo.toFixed(2)}</td>
-                  <td className="p-3 font-bold text-emerald-400">€{(r.importo * r.quota).toFixed(2)}</td>
+                  {r.esito_finale ? (
+                    <td className={`p-3 font-bold ${(r.profit ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      €{(r.profit ?? 0).toFixed(2)}
+                    </td>
+                  ) : (
+                    <td className="p-3 font-bold text-emerald-400">€{(r.importo * r.quota).toFixed(2)}</td>
+                  )}
+                  <td className="p-3">
+                    {r.esito_finale === 'won' ? <span title="Vinta">✅</span>
+                      : r.esito_finale === 'lost' ? <span title="Persa">❌</span>
+                      : <span title="In gioco">⏳</span>}
+                  </td>
                   <td className={`p-3 ${r.ev >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{(r.ev * 100).toFixed(1)}%</td>
                   <td className="p-3"><button onClick={() => removeRow(r.id)} className="text-red-400 hover:text-red-300">✖</button></td>
                 </tr>
               ))}
               {cassa.length === 0 && (
-                <tr><td colSpan={8} className="p-6 text-center text-gray-500">Cassa vuota. Aggiungi la prima scommessa sopra.</td></tr>
+                <tr><td colSpan={9} className="p-6 text-center text-gray-500">Cassa vuota. Aggiungi la prima scommessa sopra.</td></tr>
               )}
             </tbody>
             {totali.n > 0 && (
@@ -328,9 +351,11 @@ export default function Cassa() {
                 <tr>
                   <td colSpan={4} className="p-3 font-bold text-right">TOTALI</td>
                   <td className="p-3 font-bold">€{totali.speso.toFixed(2)}</td>
-                  <td className="p-3 font-bold text-emerald-400">€{totali.vincita.toFixed(2)}</td>
-                  <td colSpan={2} className={`p-3 font-bold ${totali.profit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    profit €{totali.profit.toFixed(2)}
+                  <td className={`p-3 font-bold ${totali.profit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    P/L reale €{totali.profit.toFixed(2)} <span className="text-gray-400 font-normal">(ROI {totali.roi.toFixed(1)}%)</span>
+                  </td>
+                  <td colSpan={3} className="p-3 text-gray-400 text-sm">
+                    {totali.chiusi} chiuse · {totali.inGioco} in gioco · vincita pot. in gioco €{totali.vincita.toFixed(2)}
                   </td>
                 </tr>
               </tfoot>

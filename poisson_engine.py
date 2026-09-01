@@ -60,6 +60,51 @@ def prob_btts(lam_h: float, lam_a: float, max_goals: int = 10) -> float:
     m = _probs_matrix(lam_h, lam_a, max_goals)
     return sum(p for (hg, ag), p in m.items() if hg >= 1 and ag >= 1)
 
+# --- Asian Handicap (mercato a 2 esiti, margini bookmaker piu' bassi) ---
+# Linee AH supportate: da -3 a +3 con passo 0.25 (intere, mezze, quarter).
+AH_LINES = [i / 4.0 for i in range(-12, 13)]
+
+
+def margin_distribution(lam_h: float, lam_a: float, max_goals: int = 10) -> Dict[int, float]:
+    """Distribuzione del margine di gol (home - away) secondo il modello."""
+    m = _probs_matrix(lam_h, lam_a, max_goals)
+    dist: Dict[int, float] = {}
+    for (hg, ag), p in m.items():
+        adv = hg - ag
+        dist[adv] = dist.get(adv, 0.0) + p
+    return dist
+
+
+def ah_outcome_probs(lam_h: float, lam_a: float, line: float, side: str = "home",
+                     max_goals: int = 10) -> Tuple[float, float, float]:
+    """Probabilita' (p_win, p_push, p_lose) a stake pieno per una linea AH.
+
+    `line` e' la linea del LATO scelto col suo segno (es. home -0.75 = la
+    squadra di casa dà 0.75 gol; away +0.25 = l'ospite riceve 0.25 gol).
+    Le quarter line (.25/.75) valgono come due mezze puntate: il push
+    di una meta' viene pesato mezzo.
+    """
+    dist = margin_distribution(lam_h, lam_a, max_goals)
+    if abs(line * 2) % 1 != 0:  # quarter line -> due mezze puntate
+        lo = math.floor(line * 2) / 2.0
+        halves = (lo, lo + 0.5)
+        share = 0.5
+    else:
+        halves = (line,)
+        share = 1.0
+    p_win = p_push = p_lose = 0.0
+    for hline in halves:
+        for adv, p in dist.items():
+            net = (adv + hline) if side == "home" else (-adv + hline)
+            if net > 0:
+                p_win += share * p
+            elif net == 0:
+                p_push += share * p
+            else:
+                p_lose += share * p
+    return p_win, p_push, p_lose
+
+
 def _find_team_league(team_name: str):
     for league, teams in ALL_LEAGUES.items():
         if team_name in teams:
