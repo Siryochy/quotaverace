@@ -77,8 +77,69 @@ class TestSchedina:
 class TestRoutes:
     def test_rotte_esistono(self):
         for route in ("/api/health", "/api/dashboard", "/api/storico", "/api/value",
-                      "/api/schedina", "/api/scan"):
+                      "/api/schedina", "/api/scan", "/api/test_notify"):
             assert route in web_api.ROUTES
+        # solo test_notify e' anche POST (invio con body/chiave)
+        assert "/api/test_notify" in web_api.POST_ROUTES
+
+
+class TestTestNotify:
+    def test_disabilitato_senza_chiave(self, monkeypatch):
+        monkeypatch.delenv("TEST_NOTIFY_KEY", raising=False)
+        code, payload = web_api._test_notify({})
+        assert code == 403
+        assert payload["error"] == "disabled"
+
+    def test_chiave_errata(self, monkeypatch):
+        monkeypatch.setenv("TEST_NOTIFY_KEY", "segreta")
+        code, _ = web_api._test_notify({"key": "sbagliata"})
+        assert code == 401
+
+    def test_invia_agli_admin(self, monkeypatch):
+        monkeypatch.setenv("TEST_NOTIFY_KEY", "segreta")
+        monkeypatch.setenv("ADMIN_CHAT_ID", "111, 222")
+        monkeypatch.setenv("QUOTAVERACE_BOT_TOKEN", "tok-test")
+        inviati = []
+
+        def fake_send(token, chat_id, text):
+            inviati.append((chat_id, text))
+            return {"ok": True}
+
+        monkeypatch.setattr(web_api, "_telegram_send_message", fake_send)
+        code, payload = web_api._test_notify({"key": "segreta"})
+        assert code == 200
+        assert payload["ok"] is True
+        assert payload["destinatari"] == [111, 222]
+        assert len(inviati) == 2
+        assert "Test notifica" in inviati[0][1]
+
+    def test_errore_invio_riportato(self, monkeypatch):
+        monkeypatch.setenv("TEST_NOTIFY_KEY", "segreta")
+        monkeypatch.setenv("ADMIN_CHAT_ID", "111")
+        monkeypatch.setenv("QUOTAVERACE_BOT_TOKEN", "tok-test")
+
+        def fake_send(token, chat_id, text):
+            raise RuntimeError("timeout telegram")
+
+        monkeypatch.setattr(web_api, "_telegram_send_message", fake_send)
+        code, payload = web_api._test_notify({"key": "segreta"})
+        assert code == 502
+        assert payload["results"][0]["ok"] is False
+
+    def test_chat_id_extra(self, monkeypatch):
+        monkeypatch.setenv("TEST_NOTIFY_KEY", "segreta")
+        monkeypatch.setenv("ADMIN_CHAT_ID", "111")
+        monkeypatch.setenv("QUOTAVERACE_BOT_TOKEN", "tok")
+        inviati = []
+
+        def fake_send(token, chat_id, text):
+            inviati.append(chat_id)
+            return {"ok": True}
+
+        monkeypatch.setattr(web_api, "_telegram_send_message", fake_send)
+        code, payload = web_api._test_notify({"key": "segreta", "chat_id": "333"})
+        assert code == 200
+        assert payload["destinatari"] == [111, 333]
 
 
 class TestScanEndpoint:

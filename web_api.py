@@ -389,6 +389,80 @@ def _ratings_json(params=None):
     return {"ratings": out}
 
 
+def _admin_chat_ids_from_env() -> list:
+    """Chat ID del proprietario (ADMIN_CHAT_ID, virgola-separati)."""
+    ids = []
+    for part in os.getenv("ADMIN_CHAT_ID", "").split(","):
+        part = part.strip()
+        if part.lstrip("-").isdigit():
+            ids.append(int(part))
+    return ids
+
+
+def _telegram_send_message(token: str, chat_id: int, text: str):
+    """Invio diretto a Telegram via API (stdlib, nessuna dipendenza)."""
+    import urllib.request
+    payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _test_notify(params=None, body=None):
+    """POST/GET /api/test_notify — invia una notifica di prova su Telegram
+    ai chat di ADMIN_CHAT_ID (+ opzionale ?chat_id= per test mirati).
+
+    Sicurezza: attivo SOLO se TEST_NOTIFY_KEY e' configurato; senza la
+    chiave giusta (parametro key) risponde 401. Disattivato = 403.
+    """
+    params = params or {}
+    body = body or {}
+    key = os.getenv("TEST_NOTIFY_KEY", "")
+    if not key:
+        return 403, {"error": "disabled",
+                     "message": "Endpoint disattivato: configura TEST_NOTIFY_KEY "
+                                 "nelle variabili di Railway."}
+    supplied = params.get("key") or body.get("key") or ""
+    if supplied != key:
+        return 401, {"error": "unauthorized",
+                     "message": "Chiave TEST_NOTIFY_KEY errata."}
+
+    chat_ids = _admin_chat_ids_from_env()
+    extra = params.get("chat_id") or body.get("chat_id")
+    if extra and str(extra).lstrip("-").isdigit():
+        chat_ids.append(int(extra))
+    if not chat_ids:
+        return 400, {"error": "no_recipients",
+                     "message": "Nessun destinatario: imposta ADMIN_CHAT_ID "
+                                 "nelle variabili di Railway."}
+
+    token = os.getenv("QUOTAVERACE_BOT_TOKEN", "")
+    if not token:
+        return 503, {"error": "no_bot_token",
+                     "message": "QUOTAVERACE_BOT_TOKEN mancante in questo "
+                                 "ambiente web_api."}
+
+    text = params.get("text") or body.get("text") \
+        or "🔔 *Test notifica* — QuotaVerace è online e funzionante ✅"
+    results = []
+    all_ok = True
+    for cid in chat_ids:
+        try:
+            resp = _telegram_send_message(token, cid, text)
+            results.append({"chat_id": cid, "ok": bool(resp.get("ok"))})
+            if not resp.get("ok"):
+                all_ok = False
+        except Exception as e:  # noqa: BLE001
+            results.append({"chat_id": cid, "ok": False, "error": str(e)})
+            all_ok = False
+    return (200 if all_ok else 502), {
+        "ok": all_ok, "inviata_a": len(results), "destinatari": chat_ids,
+        "results": results,
+    }
+
+
 def _scan_json(params=None):
     """Catalogo Betfair: cache del job giornaliero, o scan live con ?live=1.
 
@@ -431,11 +505,13 @@ ROUTES = {
     "/api/cassa": _cassa_get,
     "/api/db_stats": _db_stats_json,
     "/api/ratings": _ratings_json,
+    "/api/test_notify": _test_notify,
 }
 
 POST_ROUTES = {
     "/api/cassa": _cassa_post,
     "/api/analisi": _analisi_json,
+    "/api/test_notify": _test_notify,
 }
 
 DELETE_ROUTES = {
