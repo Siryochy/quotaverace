@@ -161,3 +161,84 @@ def test_sim_salta_vicino_all_inizio(monkeypatch, temp_db):
 def test_skips_without_betfair(monkeypatch, temp_db):
     monkeypatch.setattr(auto_bet, "get_client", lambda: None)
     assert auto_bet.run_today_bets(stake_eur=5.0) == []
+
+
+# --- Verifica incrociata runner: alias squadre + runner riconosciuto --------
+
+def _seed_alias_match(mid="m1", home="Milan", away="Inter", esito="1",
+                      quota=2.10, status="value"):
+    start = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+    tracker.save_match(mid, "Serie A", home, away, start)
+    best_esito = home if esito == "1" else (away if esito == "2" else "Draw")
+    tracker.save_analysis(mid, 1.7, 1.1, 0.52, 0.27, 0.21, 0.58, 0.08,
+                          best_esito, quota, "Pinnacle", status,
+                          market_prob=0.45, market_edge=0.07)
+
+
+def _scan_alias(price=2.20, start_offset_h=3):
+    """Catalogo Betfair con nomi squadra DIVERSI dal segnale (alias)."""
+    start = (datetime.now(timezone.utc) + timedelta(hours=start_offset_h)) \
+        .isoformat().replace("+00:00", "Z")
+    return {
+        "day": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "opportunities": [
+            {"event_id": "e1", "event_name": "AC Milan v Inter",
+             "market_id": "1.100", "market_type": "MATCH_ODDS",
+             "selection_id": 101, "selection_name": "AC Milan", "side": "BACK",
+             "price": price, "price_size": 200.0, "start_time": start},
+        ],
+    }
+
+
+def test_alias_team_matches_betfair_catalogue(monkeypatch, temp_db):
+    """'Milan' del segnale deve matchare 'AC Milan' del catalogo Betfair
+    (alias risolti via TEAM_MAP): la partita NON va persa."""
+    _seed_alias_match(home="Milan", away="Inter")
+    monkeypatch.setattr(auto_bet, "load_latest_scan", lambda: _scan_alias(price=2.20))
+    fc = FakeClient()
+    placed = auto_bet.run_today_bets(client=fc, stake_eur=5.0)
+    assert len(placed) == 1
+    p = placed[0]
+    assert p["esito_key"] == "1" and p["price"] == 2.20
+    # il runner corretto e' stato selezionato (AC Milan = esito 1)
+    assert fc.calls[0][0] == "1.100"
+    assert fc.calls[0][1][0]["selectionId"] == 101
+
+
+def test_unrecognized_runner_never_placed(monkeypatch, temp_db):
+    """Runner che NON corrisponde a nessuna squadra dell'evento: fail-closed,
+    nessun ordine (mai piazzare su un runner ambiguo)."""
+    _seed_alias_match(home="Milan", away="Inter")
+    scan = _scan_alias(price=2.20)
+    # runner "Genoa" non e' ne' AC Milan ne' Inter -> da saltare
+    scan["opportunities"][0]["selection_name"] = "Genoa"
+    monkeypatch.setattr(auto_bet, "load_latest_scan", lambda: scan)
+    fc = FakeClient()
+    placed = auto_bet.run_today_bets(client=fc, stake_eur=5.0)
+    assert placed == [] and fc.calls == []
+
+
+def test_runner_draw_esito_x(monkeypatch, temp_db):
+    """Runner 'The Draw' deve risolversi su esito X."""
+    _seed_alias_match(mid="m2", home="Milan", away="Inter", esito="X", quota=3.4)
+    scan = _scan_alias(price=3.60)
+    scan["opportunities"][0]["selection_name"] = "The Draw"
+    scan["opportunities"][0]["selection_id"] = 102
+    monkeypatch.setattr(auto_bet, "load_latest_scan", lambda: scan)
+    fc = FakeClient()
+    placed = auto_bet.run_today_bets(client=fc, stake_eur=5.0)
+    assert len(placed) == 1 and placed[0]["esito_key"] == "X"
+    assert fc.calls[0][1][0]["selectionId"] == 102
+
+
+def test_opponent_team_not_confused_with_home(monkeypatch, temp_db):
+    """Runner = squadra OSPITE non deve matchare un segnale sulla CASA
+    (e viceversa): l'esito deve essere univoco."""
+    _seed_alias_match(home="Milan", away="Inter")  # segnale: 1 (Milan)
+    scan = _scan_alias(price=2.20)
+    scan["opportunities"][0]["selection_name"] = "Inter"  # esito 2
+    scan["opportunities"][0]["selection_id"] = 103
+    monkeypatch.setattr(auto_bet, "load_latest_scan", lambda: scan)
+    fc = FakeClient()
+    placed = auto_bet.run_today_bets(client=fc, stake_eur=5.0)
+    assert placed == [] and fc.calls == []

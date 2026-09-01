@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 
 from betfair_client import get_client, normalize_stake
 from config import DATA_DIR
-from daily_scanner import _split_teams, _esito_from_selection
+from daily_scanner import _split_teams, _DRAW_NAMES
 from daily_scan_job import load_latest_scan
 
 logger = logging.getLogger("auto_bet")
@@ -45,6 +45,61 @@ PRICE_GUARD = 0.95  # accetta solo prezzi >= 95% della quota del segnale
 def _norm_team(name: str) -> str:
     from tracker import _norm_team as nt
     return nt(name)
+
+
+_TEAM_ALIAS_CACHE: dict[str, str] = {}
+
+
+def _resolve_team(name: str) -> str:
+    """Normalizza un nome squadra E risolve gli alias comuni (TEAM_MAP).
+
+    'AC Milan' -> 'milan', 'West Ham United' -> 'west ham': allinea i nomi
+    del catalogo Betfair con quelli del segnale. Fallback sicuro: se
+    TEAM_MAP non e' importabile, resta solo la normalizzazione base.
+    """
+    base = _norm_team(name)
+    if base in _TEAM_ALIAS_CACHE:
+        return _TEAM_ALIAS_CACHE[base]
+    resolved = base
+    try:
+        from fixture_engine import TEAM_MAP
+        resolved = _norm_team(TEAM_MAP.get(base, base))
+    except Exception:
+        pass
+    _TEAM_ALIAS_CACHE[base] = resolved
+    return resolved
+
+
+def _runner_esito(market_type: str, selection_name: str,
+                  event_teams: tuple) -> str | None:
+    """Esito canonico del runner Betfair, con alias squadre.
+
+    MATCH_ODDS: il runner deve essere il draw o UNA delle due squadre
+    dell'evento (confronto con alias) -> '1'/'2'/'X'. Se non e'
+    riconosciuto ritorna None: MAI piazzare su un runner ambiguo.
+    OVER_UNDER_25: il nome del runner e' gia' 'Over 2.5'/'Under 2.5'.
+    """
+    sel = (selection_name or "").strip()
+    if not sel:
+        return None
+    if market_type == "OVER_UNDER_25":
+        low = sel.lower()
+        if "over" in low:
+            return "Over 2.5"
+        if "under" in low:
+            return "Under 2.5"
+        return None
+    # MATCH_ODDS
+    low = sel.lower()
+    if low in _DRAW_NAMES:
+        return "X"
+    home, away = event_teams
+    sr = _resolve_team(sel)
+    if sr == _resolve_team(home):
+        return "1"
+    if sr == _resolve_team(away):
+        return "2"
+    return None
 
 
 def _canonical_esito(esito: str, home: str, away: str) -> dict | None:
@@ -60,7 +115,7 @@ def _canonical_esito(esito: str, home: str, away: str) -> dict | None:
         return {"mercato": "1X2", "esito_key": "1"}
     if el == "2":
         return {"mercato": "1X2", "esito_key": "2"}
-    hn, an, en = _norm_team(home), _norm_team(away), _norm_team(el)
+    hn, an, en = _resolve_team(home), _resolve_team(away), _resolve_team(el)
     if en == hn:
         return {"mercato": "1X2", "esito_key": "1"}
     if en == an:
@@ -92,9 +147,14 @@ def _today_value_picks() -> list[dict]:
 
 
 def _find_opportunity(opps: list[dict], pick: dict) -> dict | None:
-    """Trova il runner Betfair del segnale nel catalogo di scansione."""
+    """Trova il runner Betfair del segnale nel catalogo di scansione.
+
+    Verifica INCROCIATA: le squadre dell'evento (risolte con gli alias)
+    devono coincidere con quelle del segnale E il runner deve essere
+    riconosciuto (draw o una delle due squadre) — mai un runner ambiguo.
+    """
     mtype = "MATCH_ODDS" if pick["mercato"] == "1X2" else "OVER_UNDER_25"
-    target = (_norm_team(pick["home"]), _norm_team(pick["away"]))
+    target = (_resolve_team(pick["home"]), _resolve_team(pick["away"]))
     best = None
     for o in opps:
         if o.get("market_type") != mtype:
@@ -102,10 +162,9 @@ def _find_opportunity(opps: list[dict], pick: dict) -> dict | None:
         teams = _split_teams(o.get("event_name") or "")
         if not teams:
             continue
-        if (_norm_team(teams[0]), _norm_team(teams[1])) != target:
+        if (_resolve_team(teams[0]), _resolve_team(teams[1])) != target:
             continue
-        esito = _esito_from_selection(mtype, o.get("selection_name") or "",
-                                      o.get("event_name") or "")
+        esito = _runner_esito(mtype, o.get("selection_name") or "", teams)
         if esito != pick["esito_key"]:
             continue
         price = o.get("price")

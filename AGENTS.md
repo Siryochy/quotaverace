@@ -117,6 +117,14 @@ cd webapp && npm run build            # build Next.js
   match_results → righe con label_ml (1=vinta). CLI
   `venv/bin/python ml_dataset.py` (→ data/training_dataset.csv) e
   `GET /api/training` (JSON, limit; es. ?limit=500).
+- **Audit qualita' dataset ML** (`ml_audit.py`): un dataset sporco viene
+  IMPARATO dal modello come verita' — controllo automatico di ogni riga
+  (esito_finale valido, label_ml coerente, quota>1, prob in [0,1], profit
+  col segno giusto, esiti strutturati per OU/AH/BTTS, duplicati). CLI
+  `venv/bin/python ml_audit.py [--source predictions|bets]` (exit 0=ok,
+  1=problemi) e **integrato nel report giornaliero**: `format_daily_report`
+  audita le previsioni/puntate chiuse nel periodo e segnala i problemi
+  (per tipo + primi esempi) in `/riepilogo` e nei report automatici.
 - **Vault segreti**: attivo da locale (vault.bin Fernet/PBKDF2, 5 segreti
   cifrati, plaintext cancellati) — vedi sezione "Segreti".
 - **Cassa**: funziona con doppia persistenza (localStorage + backup server sul
@@ -141,8 +149,13 @@ cd webapp && npm run build            # build Next.js
   reali solo con `BETFAIR_DRY_RUN=0` + `BETFAIR_LIVE=1` e senza kill-switch
   (`data/kill_switch`). Guardie: salta partite a <15 min dall'inizio, prezzi
   Exchange <95% della quota segnale, doppie puntate (UNIQUE match_id+esito).
-  Registro in tabella `bets`, saldato a fine partita (`settle_bets`) e
-  incluso nel riepilogo.
+  **Verifica incrociata runner**: `_resolve_team` risolve gli alias squadre
+  (TEAM_MAP: 'AC Milan'→'milan', 'West Ham United'→'west ham') sia sul
+  matching dell'evento sia sull'esito; `_runner_esito` accetta SOLO runner
+  riconosciuti (draw o una delle due squadre) — mai un runner ambiguo
+  (fail-closed: la partita non si perde per un alias, ma un runner non
+  riconosciuto non viene mai piazzato). Registro in tabella `bets`, saldato
+  a fine partita (`settle_bets`) e incluso nel riepilogo.
 - **Report giornaliero**: `/riepilogo [oggi|ieri|YYYY-MM-DD]` + invio
   automatico all'alba (06:05, riepilogo di ieri) e **a fine ultima partita**
   (check ogni 15' dalle 21:00, fallback notturno 23:50): previsioni chiuse

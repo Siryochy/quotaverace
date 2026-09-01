@@ -798,6 +798,33 @@ def format_daily_report(since: str, label: str) -> str:
     except Exception:
         pass
 
+    # Audit qualita' dataset ML: un dataset sporco viene IMPARATO dal
+    # modello come verita'. Controlla solo le previsioni/puntate chiuse
+    # nel periodo e segnala i problemi (per tipo + primi esempi).
+    try:
+        from ml_dataset import build_training_rows
+        from ml_audit import audit_training_rows, summarize
+        period_rows = [r for r in build_training_rows()
+                       if (r.get("settled_at") or "") >= since]
+        problems = audit_training_rows(period_rows)
+        if problems:
+            by_type = summarize(problems)
+            dettaglio = ", ".join(f"{t}: {n}" for t, n in by_type.items())
+            lines.append(
+                f"🔎 *Audit dataset ML:* ⚠️ {len(problems)} problemi "
+                f"({dettaglio})"
+            )
+            for p in problems[:5]:
+                # caratteri sicuri per il Markdown di Telegram
+                msg = (p.get("msg") or "").replace("[", "(").replace("]", ")")
+                lines.append(f"   • {p['tipo']} [{p.get('match_id','?')}] "
+                             f"{p.get('mercato','?')} {p.get('esito','?')}: {msg}")
+            if len(problems) > 5:
+                lines.append(f"   … e altri {len(problems) - 5} problemi "
+                             "(vedi `venv/bin/python ml_audit.py`)")
+    except Exception as e:
+        logger.warning("audit ML nel report fallito: %s", e)
+
     missing = _missing_env_keys()
     if missing:
         lines.append("\n⚠️ *Job saltati per chiavi mancanti:*\n   " + "\n   ".join(missing))
