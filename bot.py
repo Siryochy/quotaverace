@@ -767,12 +767,18 @@ def format_daily_report(since: str, label: str) -> str:
 
     try:
         conn = _get_conn(); c = conn.cursor()
-        rows = c.execute("SELECT signal_quota, closing_quota FROM clv_history "
-                         "WHERE updated_at >= ?", (since,)).fetchall()
+        rows = c.execute("SELECT signal_quota, closing_quota, pinnacle_quota "
+                         "FROM clv_history WHERE updated_at >= ?", (since,)).fetchall()
         conn.close()
-        clvs = [(s / clos) - 1.0 for s, clos in rows if clos and clos > 0]
+        clvs = [(s / clos) - 1.0 for s, clos, _ in rows if clos and clos > 0]
         if clvs:
             lines.append(f"📈 *CLV medio:* {sum(clvs)/len(clvs)*100:+.2f}% (n {len(clvs)})")
+        # CLV vs Pinnacle: la closing line piu' sharp del mercato.
+        pin_clvs = [(s / pin) - 1.0 for s, _, pin in rows
+                    if pin and pin > 0]
+        if pin_clvs:
+            lines.append(f"🎯 *CLV vs Pinnacle:* {sum(pin_clvs)/len(pin_clvs)*100:+.2f}% "
+                         f"(n {len(pin_clvs)})")
     except Exception:
         pass
 

@@ -220,8 +220,10 @@ def _analyze_match(match_id, match, home_db, away_db, league):
     # 1. Line shopping: miglior prezzo (e book) per esito, su tutti i bookmaker.
     h2h_prices: Dict[str, tuple] = {}    # "1"/"X"/"2" -> (prezzo, bookmaker)
     total_prices: Dict[str, tuple] = {}  # "Over 2.5" -> (prezzo, bookmaker)
+    pinnacle_prices: Dict[str, float] = {}  # esito key -> prezzo Pinnacle (closing line sharp)
     for bm in match.get("bookmakers", []):
         bname = bm.get("title") or bm.get("key") or "Sconosciuto"
+        is_pinnacle = ("pinnacle" in bname.lower())
         for mkt in bm.get("markets", []):
             if mkt.get("key") == "h2h":
                 for out in mkt.get("outcomes", []):
@@ -241,6 +243,8 @@ def _analyze_match(match_id, match, home_db, away_db, league):
                     cur = h2h_prices.get(esito)
                     if cur is None or float(price) > cur[0]:
                         h2h_prices[esito] = (float(price), name, bname)
+                    if is_pinnacle:
+                        pinnacle_prices[esito] = float(price)
             elif mkt.get("key") == "totals":
                 for out in mkt.get("outcomes", []):
                     name = (out.get("name") or "").strip()
@@ -258,6 +262,8 @@ def _analyze_match(match_id, match, home_db, away_db, league):
                         cur = total_prices.get(mkey)
                         if cur is None or float(price) > cur[0]:
                             total_prices[mkey] = (float(price), disp, bname)
+                        if is_pinnacle:
+                            pinnacle_prices[mkey] = float(price)
 
     # 1b. Asian Handicap (mercato 'spreads'): linee con entrambi i lati.
     #     home_line e' la linea vista dal lato casa (negativa = la casa dà gol).
@@ -323,6 +329,7 @@ def _analyze_match(match_id, match, home_db, away_db, league):
             "market_prob": market_prob,
             "market_edge": (model_prob - market_prob) if market_prob is not None else None,
             "mercato": "1X2" if mkey in ("1", "X", "2") else "OU",
+            "esito_key": mkey,
         })
 
     # 3b. Candidati Asian Handicap: modello vs mercato devig per linea.
@@ -365,9 +372,12 @@ def _analyze_match(match_id, match, home_db, away_db, league):
 
     # CLV: la prima volta che vediamo il match il prezzo e' quello del segnale;
     # le letture successive convergono verso la quota di chiusura del mercato.
+    # La quota Pinnacle (se presente nel feed) e' la closing line sharp.
     signal_started = get_analysis_for_match(match_id) is None
     try:
-        save_clv(match_id, str(best["esito"]), best["quota"], signal_started=signal_started)
+        save_clv(match_id, str(best["esito"]), best["quota"],
+                 signal_started=signal_started,
+                 pinnacle_quota=pinnacle_prices.get(best.get("esito_key")))
     except Exception as e:
         logger.warning(f"Errore tracking CLV per {match_id}: {e}")
 

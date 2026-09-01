@@ -44,6 +44,31 @@ class TestSaveClv:
         assert stats.get("clv_tracked", 0) == 0
         assert stats.get("avg_clv", 0.0) == 0.0
 
+    def test_pinnacle_quota_salvata_e_aggiornata(self):
+        # prima analisi: segnale + quota Pinnacle iniziale
+        save_clv("mP", "Roma", 2.00, signal_started=True, pinnacle_quota=1.95)
+        # letture successive: Pinnacle converge alla closing line
+        save_clv("mP", "Roma", 2.00, signal_started=False, pinnacle_quota=1.88)
+        save_clv("mP", "Roma", 2.00, signal_started=False, pinnacle_quota=1.85)
+        conn = tracker._get_conn(); c = conn.cursor()
+        row = c.execute("SELECT signal_quota, closing_quota, pinnacle_quota "
+                        "FROM clv_history WHERE match_id='mP'").fetchone()
+        conn.close()
+        assert row is not None
+        sig, closing, pin = row
+        assert sig == pytest.approx(2.00)
+        assert closing == pytest.approx(2.00)
+        assert pin == pytest.approx(1.85)  # ultima lettura Pinnacle
+
+    def test_pinnacle_quota_scartata_se_non_valida(self):
+        # pinnacle_quota <= 0 o None: non deve sovrascrivere
+        save_clv("mN", "Roma", 2.00, signal_started=True, pinnacle_quota=1.90)
+        save_clv("mN", "Roma", 2.00, signal_started=False, pinnacle_quota=None)
+        conn = tracker._get_conn(); c = conn.cursor()
+        row = c.execute("SELECT pinnacle_quota FROM clv_history WHERE match_id='mN'").fetchone()
+        conn.close()
+        assert row[0] == pytest.approx(1.90)  # invariata
+
 
 class TestClvInResults:
     def test_clv_positivo_battiamo_la_chiusura(self):

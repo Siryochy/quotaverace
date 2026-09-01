@@ -50,7 +50,11 @@ def _get_conn():
     c.execute('''CREATE TABLE IF NOT EXISTS clv_history (
         match_id TEXT, esito TEXT,
         signal_quota REAL, closing_quota REAL, updated_at TEXT,
+        pinnacle_quota REAL,
         PRIMARY KEY (match_id, esito))''')
+    clv_cols = [r[1] for r in c.execute("PRAGMA table_info(clv_history)")]
+    if "pinnacle_quota" not in clv_cols:
+        c.execute("ALTER TABLE clv_history ADD COLUMN pinnacle_quota REAL")
     c.execute('''CREATE TABLE IF NOT EXISTS cassa (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         data TEXT, partita TEXT, esito TEXT, quota REAL,
@@ -770,24 +774,34 @@ def mark_notified(match_id, date_str):
     c.execute("INSERT OR IGNORE INTO notifications VALUES (?,?)", (match_id, date_str))
     conn.commit(); conn.close()
 
-def save_clv(match_id, esito, quota, signal_started=False):
+def save_clv(match_id, esito, quota, signal_started=False, pinnacle_quota=None):
     """Registra un campione CLV per una coppia match+esito.
 
     - Prima analisi del match (signal_started=True): la quota corrente diventa la
       quota del segnale, e viene usata anche come primo campione di chiusura.
     - Analisi successive (signal_started=False): aggiorna la quota di chiusura,
       che converge verso il prezzo di mercato finale (CLV).
+    - pinnacle_quota (opz.): prezzo Pinnacle per lo stesso esito, la closing
+      line piu' sharp. Se assente, si usa solo la chiusura del miglior bookmaker.
     """
     conn = _get_conn(); c = conn.cursor()
     now = datetime.now().isoformat()
-    c.execute("SELECT signal_quota, closing_quota FROM clv_history WHERE match_id=? AND esito=?", (match_id, esito))
+    c.execute("SELECT signal_quota, closing_quota, pinnacle_quota FROM clv_history "
+              "WHERE match_id=? AND esito=?", (match_id, esito))
     row = c.fetchone()
     if row is None or signal_started:
-        c.execute("INSERT OR REPLACE INTO clv_history VALUES (?,?,?,?,?)",
-                  (match_id, esito, quota, quota, now))
+        pin = pinnacle_quota if pinnacle_quota and pinnacle_quota > 0 else None
+        c.execute("INSERT OR REPLACE INTO clv_history VALUES (?,?,?,?,?,?)",
+                  (match_id, esito, quota, quota, now, pin))
     else:
-        c.execute("UPDATE clv_history SET closing_quota=?, updated_at=? WHERE match_id=? AND esito=?",
-                  (quota, now, match_id, esito))
+        if pinnacle_quota and pinnacle_quota > 0:
+            c.execute("UPDATE clv_history SET closing_quota=?, updated_at=?, pinnacle_quota=? "
+                      "WHERE match_id=? AND esito=?",
+                      (quota, now, pinnacle_quota, match_id, esito))
+        else:
+            c.execute("UPDATE clv_history SET closing_quota=?, updated_at=? "
+                      "WHERE match_id=? AND esito=?",
+                      (quota, now, match_id, esito))
     conn.commit(); conn.close()
 
 def clear_old_matches():

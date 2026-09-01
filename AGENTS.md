@@ -146,8 +146,9 @@ cd webapp && npm run build            # build Next.js
 - **Report giornaliero**: `/riepilogo [oggi|ieri|YYYY-MM-DD]` + invio
   automatico all'alba (06:05, riepilogo di ieri) e **a fine ultima partita**
   (check ogni 15' dalle 21:00, fallback notturno 23:50): previsioni chiuse
-  per mercato (ROI vs EV), cassa saldata, puntate auto (P/L), CLV medio e
-  alert delle chiavi mancanti (API_FOOTBALL_KEY/ODDS_API_KEY/BETFAIR_APP_KEY).
+  per mercato (ROI vs EV), cassa saldata, puntate auto (P/L), CLV medio,
+  CLV vs Pinnacle (closing line sharp dal feed the-odds-api) e alert delle
+  chiavi mancanti (API_FOOTBALL_KEY/ODDS_API_KEY/BETFAIR_APP_KEY).
   Destinatari: iscritti (`/subscribe`) **+ sempre** i chat in `ADMIN_CHAT_ID`
   (proprietario, virgola-separati). `/myid` mostra il proprio Chat ID.
 - **Sticker premium**: inviato prima dei messaggi premium (set pubblico
