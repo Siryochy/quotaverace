@@ -62,6 +62,29 @@ class TestFormatSchedina:
         msg = format_schedina([], 100.0)
         assert "Nessuna partita" in msg
 
+
+class TestFormatBetVerdicts:
+    """Verdetti puntate a fine partita: notifica Telegram vinta/persa/push."""
+
+    def test_formatta_verdetti(self):
+        from bot import format_bet_verdicts
+        sets = [
+            {"home": "Inter", "away": "Napoli", "league": "Serie A",
+             "mercato": "1X2", "esito": "1", "price": 2.10, "stake": 5.0,
+             "mode": "dry-run", "outcome": "won", "profit": 5.5},
+            {"home": "Milan", "away": "Juventus", "league": "Serie A",
+             "mercato": "OU", "esito": "Over 2.5", "price": 1.90, "stake": 5.0,
+             "mode": "dry-run", "outcome": "lost", "profit": -5.0},
+        ]
+        text = format_bet_verdicts(sets)
+        assert "ESITO PUNTATE AUTOMATICHE" in text and "DRY-RUN" in text
+        assert "✅ *VINTA*" in text and "Inter vs Napoli" in text and "+€5.50" in text
+        assert "❌ *PERSA*" in text and "Over 2.5" in text and "-€5.00" in text
+
+    def test_vuoto(self):
+        from bot import format_bet_verdicts
+        assert format_bet_verdicts([]) == ""
+
     def test_favorito_casa_con_lambda_maggiore(self):
         p1, px, p2 = prob_1x2(2.5, 0.8)
         assert p1 > p2

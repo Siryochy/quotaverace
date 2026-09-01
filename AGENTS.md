@@ -108,6 +108,15 @@ cd webapp && npm run build            # build Next.js
   Endpoint protetto da `TEST_NOTIFY_KEY` (variabile Railway, mai nel repo).
   Bug storico fixato nello stesso giro: `format_schedina` mancava
   di `get_pro_stake` import → la schedina delle 08:00 non partiva con picks.
+  **Verdetti puntate a fine partita**: `settle_bets(return_details=True)`
+  restituisce i verdetti appena emessi e i job (pomeriggio/sera/23:30 e
+  `/risultati`) inviano la notifica `🔔 ESITO PUNTATE AUTOMATICHE`
+  (✅ VINTA/❌ PERSA/⚪ PUSH con P/L) a iscritti+admin.
+- **Dataset ML** (`ml_dataset.py`): export CSV di addestramento da
+  predictions+bets JOIN match_analysis (lam_h/lam_a, prob 1/X/2/O) e
+  match_results → righe con label_ml (1=vinta). CLI
+  `venv/bin/python ml_dataset.py` (→ data/training_dataset.csv) e
+  `GET /api/training` (JSON, limit; es. ?limit=500).
 - **Vault segreti**: attivo da locale (vault.bin Fernet/PBKDF2, 5 segreti
   cifrati, plaintext cancellati) — vedi sezione "Segreti".
 - **Cassa**: funziona con doppia persistenza (localStorage + backup server sul

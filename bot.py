@@ -665,8 +665,10 @@ def _update_results():
             logger.info("Previsioni: saldate %d (di cui %d push).", settled, pushes)
     except Exception as e:
         logger.warning("settle_predictions fallita: %s", e)
+    bet_settlements = []
     try:
-        settled, pushes = settle_bets()
+        settled, pushes, details = settle_bets(return_details=True)
+        bet_settlements = details
         if settled:
             logger.info("Puntate auto: saldate %d (di cui %d push).", settled, pushes)
     except Exception as e:
@@ -691,7 +693,7 @@ def _update_results():
                         sh, sa, m.get("last_update", ""))
             updated += 1
     compute_ratings()
-    return updated, get_results_stats()
+    return updated, get_results_stats(), bet_settlements
 
 
 def _admin_chat_ids() -> list:
@@ -855,11 +857,47 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = run_sync()
     await update.message.reply_text(text, parse_mode="Markdown")
 
+def format_bet_verdicts(settlements: list) -> str:
+    """Formatta i verdetti delle puntate appena saldate (fine partita)."""
+    if not settlements:
+        return ""
+    mode_txt = "DRY-RUN" if settlements[0].get("mode") == "dry-run" else "LIVE"
+    lines = []
+    for s in settlements:
+        if s["outcome"] == "won":
+            icon = "✅"
+            verdict = "VINTA"
+        elif s["outcome"] == "push":
+            icon = "⚪"
+            verdict = "PUSH"
+        else:
+            icon = "❌"
+            verdict = "PERSA"
+        profit = s["profit"] or 0.0
+        pl = f"+€{profit:.2f}" if profit >= 0 else f"-€{abs(profit):.2f}"
+        lines.append(
+            f"{icon} *{verdict}* — {s.get('home', '?')} vs {s.get('away', '?')}"
+            f" ({s.get('league', '')})\n"
+            f"   🎯 {s['mercato']} {s['esito']} @ {s['price']:.2f} | "
+            f"stake €{s['stake']:.2f} | *P/L {pl}*"
+        )
+    return ("🔔 *ESITO PUNTATE AUTOMATICHE* "
+            f"({mode_txt})\n\n" + "\n\n".join(lines))
+
+
+async def _send_bet_settlements(context, settlements: list):
+    text = format_bet_verdicts(settlements)
+    if text:
+        await _send_report_to_recipients(context, text)
+
+
 async def cmd_risultati(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         from odds_api import SPORTS_MAP, fetch_scores
         from tracker import save_result, get_results_stats, get_leagues_with_signals
-        updated, stats = _update_results()
+        updated, stats, settlements = _update_results()
+        if settlements:
+            await _send_bet_settlements(context, settlements)
         if stats["total"] == 0:
             text = "📊 *RISULTATI TRACKING*\n\nNessuna scommessa chiusa ancora.\nI risultati si aggiornano da soli quando le partite finiscono."
         else:
@@ -991,7 +1029,9 @@ async def afternoon_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Job pomeridiano: ricontrollo Pro")
     fetch_and_analyze_today()
     try:
-        _update_results()
+        _, _, settlements = _update_results()
+        if settlements:
+            await _send_bet_settlements(context, settlements)
     except Exception as e:
         logger.error(f"Errore update risultati job: {e}")
     await notify_job(context)          # immediato per i premium
@@ -1005,7 +1045,9 @@ async def evening_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Job serale: ricontrollo Pro")
     fetch_and_analyze_today()
     try:
-        _update_results()
+        _, _, settlements = _update_results()
+        if settlements:
+            await _send_bet_settlements(context, settlements)
     except Exception as e:
         logger.error(f"Errore update risultati job: {e}")
     await notify_job(context)
@@ -1013,8 +1055,10 @@ async def evening_job(context: ContextTypes.DEFAULT_TYPE):
 async def results_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Job risultati serali (23:30 ITA)")
     try:
-        updated, stats = _update_results()
+        updated, stats, settlements = _update_results()
         logger.info(f"Risultati aggiornati: {updated} partite")
+        if settlements:
+            await _send_bet_settlements(context, settlements)
     except Exception as e:
         logger.error(f"Errore results_job: {e}")
 

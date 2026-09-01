@@ -463,6 +463,19 @@ def _test_notify(params=None, body=None):
     }
 
 
+def _training_json(params=None):
+    """GET /api/training — dataset di addestramento ML (righe chiuse)."""
+    params = params or {}
+    try:
+        from ml_dataset import build_training_rows
+        limit = params.get("limit") or "500"
+        rows = build_training_rows(limit=int(limit))
+    except Exception as e:
+        logger.exception("errore /api/training")
+        return {"error": str(e), "n": 0, "rows": []}
+    return {"n": len(rows), "rows": rows}
+
+
 def _scan_json(params=None):
     """Catalogo Betfair: cache del job giornaliero, o scan live con ?live=1.
 
@@ -506,6 +519,7 @@ ROUTES = {
     "/api/db_stats": _db_stats_json,
     "/api/ratings": _ratings_json,
     "/api/test_notify": _test_notify,
+    "/api/training": _training_json,
 }
 
 POST_ROUTES = {

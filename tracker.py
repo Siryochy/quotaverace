@@ -488,19 +488,23 @@ def get_bets(day=None, closed=None, limit=200):
     ]
 
 
-def settle_bets():
+def settle_bets(return_details: bool = False):
     """Salda le puntate automatiche aperte coi risultati reali (idempotente).
 
-    Ritorna (saldate, push). Il profitto e' in euro (stake * (quota-1)).
+    Ritorna (saldate, push); con `return_details=True` anche la lista dei
+    verdetti appena emessi: {match_id, league, home, away, mercato, esito,
+    price, stake, mode, outcome, profit} — serve alle notifiche Telegram.
     """
     conn = _get_conn()
     _create_results_table(conn)
     c = conn.cursor()
     try:
-        open_rows = c.execute("SELECT id, match_id, mercato, esito, price, stake "
+        open_rows = c.execute("SELECT id, match_id, mercato, esito, price, stake, mode "
                               "FROM bets WHERE esito_finale IS NULL").fetchall()
         results = c.execute("SELECT match_id, home_team, away_team, score_home, score_away "
                             "FROM match_results").fetchall()
+        leagues = {row[0]: row[1] for row in
+                   c.execute("SELECT id, league FROM matches").fetchall()}
     finally:
         conn.close()
     res_map = {r[0]: r[1:] for r in results}
@@ -508,7 +512,8 @@ def settle_bets():
     conn = _get_conn(); c = conn.cursor()
     now = datetime.now().isoformat()
     settled = pushes = 0
-    for bid, match_id, mercato, esito, price, stake in open_rows:
+    details = []
+    for bid, match_id, mercato, esito, price, stake, mode in open_rows:
         r = res_map.get(match_id)
         if not r:
             continue
@@ -526,7 +531,18 @@ def settle_bets():
         c.execute("UPDATE bets SET esito_finale=?, profit=?, settled_at=? WHERE id=?",
                   (outcome, profit, now, bid))
         settled += 1
+        details.append({
+            "match_id": match_id,
+            "league": leagues.get(match_id, ""),
+            "home": home, "away": away,
+            "mercato": mercato, "esito": esito,
+            "price": price, "stake": stake, "mode": mode,
+            "outcome": outcome, "profit": profit,
+        })
     conn.commit(); conn.close()
+
+    if return_details:
+        return settled, pushes, details
     return settled, pushes
 
 

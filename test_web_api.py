@@ -77,10 +77,22 @@ class TestSchedina:
 class TestRoutes:
     def test_rotte_esistono(self):
         for route in ("/api/health", "/api/dashboard", "/api/storico", "/api/value",
-                      "/api/schedina", "/api/scan", "/api/test_notify"):
+                      "/api/schedina", "/api/scan", "/api/test_notify",
+                      "/api/training"):
             assert route in web_api.ROUTES
         # solo test_notify e' anche POST (invio con body/chiave)
         assert "/api/test_notify" in web_api.POST_ROUTES
+
+
+class TestTraining:
+    def test_endpoint_risponde(self):
+        d = web_api._training_json({"limit": "10"})
+        assert "n" in d and "rows" in d
+        assert isinstance(d["rows"], list)
+
+    def test_limite_non_valido_non_crasha(self):
+        d = web_api._training_json({"limit": "abc"})
+        assert "error" in d or "rows" in d
 
 
 class TestTestNotify:

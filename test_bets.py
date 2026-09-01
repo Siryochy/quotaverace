@@ -64,6 +64,23 @@ def test_bet_exists_open(temp_db):
     assert tracker.bet_exists_open("m4", "2") is False
 
 
+def test_settle_bets_details(temp_db):
+    _result("m6", "Inter", "Napoli", 2, 1)
+    tracker.save_match("m6", "Serie A", "Inter", "Napoli", "2026-09-01T13:00:00Z")
+    tracker.save_bet("m6", "1X2", "1", "1.600", 106, 2.10, 10.0)
+    settled, pushes, details = tracker.settle_bets(return_details=True)
+    assert settled == 1 and pushes == 0 and len(details) == 1
+    d = details[0]
+    assert d["outcome"] == "won" and d["profit"] == 11.0
+    assert d["home"] == "Inter" and d["away"] == "Napoli"
+    assert d["league"] == "Serie A" and d["mode"] == "dry-run"
+    # idempotente: il secondo giro non emette nuovi verdetti
+    _, _, details2 = tracker.settle_bets(return_details=True)
+    assert details2 == []
+    # default: mantiene la vecchia firma (saldate, push)
+    assert tracker.settle_bets() == (0, 0)
+
+
 def test_bets_period(temp_db):
     _result("m5", "Inter", "Napoli", 2, 1)
     tracker.save_bet("m5", "1X2", "1", "1.500", 105, 2.0, 10.0)
