@@ -124,25 +124,34 @@ def _canonical_esito(esito: str, home: str, away: str) -> dict | None:
 
 
 def _today_value_picks() -> list[dict]:
-    """Partite del giorno con segnale value/strong_value (esito canonico)."""
+    """Partite del giorno con segnale value/strong_value (esito canonico).
+
+    Include market_edge, market_prob, best_ev e status per l'adaptive staking.
+    """
     from tracker import _get_conn
     conn = _get_conn()
     c = conn.cursor()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     rows = c.execute('''SELECT m.id, m.home_team, m.away_team, m.commence_time,
-                               a.best_esito, a.best_quota
+                               a.best_esito, a.best_quota, a.market_edge,
+                               a.market_prob, a.best_ev, a.status
                         FROM matches m JOIN match_analysis a ON m.id = a.match_id
                         WHERE m.commence_time LIKE ? AND a.status IN ('value','strong_value')
                         ORDER BY a.best_ev DESC''', (f"{today}%",)).fetchall()
     conn.close()
     out = []
-    for mid, home, away, commence, esito, quota in rows:
+    for mid, home, away, commence, esito, quota, m_edge, m_prob, ev, status in rows:
         canon = _canonical_esito(esito, home, away)
         if not canon:
             continue
         out.append({"match_id": mid, "home": home, "away": away,
                     "commence": commence, "esito_raw": esito,
-                    "quota": float(quota or 0), **canon})
+                    "quota": float(quota or 0),
+                    "market_edge": float(m_edge) if m_edge is not None else None,
+                    "market_prob": float(m_prob) if m_prob is not None else None,
+                    "best_ev": float(ev) if ev is not None else 0.0,
+                    "status": status or "value",
+                    **canon})
     return out
 
 
@@ -200,13 +209,36 @@ def run_today_bets(client=None, stake_eur: float | None = None,
     """
     if client is None:
         client = get_client()
-    stake_eur = stake_eur if stake_eur is not None else float(
+
+    # Default stake fisso (fallback se adaptive staking non disponibile)
+    stake_eur_default = stake_eur if stake_eur is not None else float(
         os.getenv("BET_STAKE_EUR", str(BET_STAKE_DEFAULT_EUR)))
-    stake = normalize_stake(stake_eur)
-    if stake <= 0:
-        logger.warning("auto_bet: stake %.2f sotto il minimo Exchange Italia (2.00), salto",
-                       stake_eur)
-        return []
+
+    # Carica adaptive staking (lazy)
+    try:
+        from adaptive_staking import adaptive_stake, bankroll_stats
+        _adaptive = True
+        _bankroll_stats = bankroll_stats()
+        _bankroll = _bankroll_stats.get("current", 100.0)
+        _peak = _bankroll_stats.get("peak", _bankroll)
+    except ImportError:
+        _adaptive = False
+        _bankroll = 100.0
+        _peak = 100.0
+        logger.info("auto_bet: adaptive_staking non disponibile, uso stake fisso")
+
+    # Carica CLV storico per la confidenza
+    try:
+        from tracker import _get_conn as _gc
+        _conn = _gc()
+        _clv_row = _conn.execute(
+            "SELECT AVG(CASE WHEN closing_quota > 0 "
+            "THEN signal_quota / closing_quota - 1.0 ELSE 0 END) "
+            "FROM clv_history").fetchone()
+        _conn.close()
+        _avg_clv = float(_clv_row[0]) if _clv_row and _clv_row[0] else 0.0
+    except Exception:
+        _avg_clv = 0.0
 
     scan = load_latest_scan() if client else None
     sim = False
@@ -247,7 +279,23 @@ def run_today_bets(client=None, stake_eur: float | None = None,
                 logger.info("auto_bet: quota segnale non valida per %s, salto",
                             pick["match_id"])
                 continue
-            record = {**pick, "price": price, "stake": stake,
+            # Adaptive staking: calcola stake dinamico per ogni puntata
+            if _adaptive:
+                as_result = adaptive_stake(
+                    bankroll=_bankroll, prob=pick.get("best_ev", 0.0) + 1.0 / price if price > 0 else 0.5,
+                    odds=price, market_edge=pick.get("market_edge"),
+                    status=pick.get("status", "value"),
+                    peak_bankroll=_peak)
+                pick_stake = as_result["stake"]
+                if pick_stake <= 0:
+                    logger.info("auto_bet: stake adaptive = 0 per %s (EV negativo), salto",
+                                pick["match_id"])
+                    continue
+                logger.info("auto_bet: stake adaptive €%.2f per %s (%s)",
+                            pick_stake, pick["match_id"], as_result["reason"])
+            else:
+                pick_stake = normalize_stake(stake_eur_default)
+            record = {**pick, "price": price, "stake": pick_stake,
                       "market_id": None, "selection_id": None,
                       "status": "SUCCESS", "bet_id": None, "mode": "sim"}
             placed.append(record)
@@ -255,7 +303,7 @@ def run_today_bets(client=None, stake_eur: float | None = None,
                 from tracker import save_bet
                 save_bet(match_id=pick["match_id"], mercato=pick["mercato"],
                          esito=pick["esito_key"], market_id=None, selection_id=None,
-                         price=price, stake=stake, mode="sim", status="SUCCESS")
+                         price=price, stake=pick_stake, mode="sim", status="SUCCESS")
             except Exception as e:
                 logger.warning("auto_bet: salvataggio sim %s: %s", pick["match_id"], e)
             continue
@@ -274,11 +322,25 @@ def run_today_bets(client=None, stake_eur: float | None = None,
             logger.info("auto_bet: prezzo Exchange %.2f sotto il %.0f%% della quota "
                         "segnale %.2f — salto %s", price, PRICE_GUARD * 100,
                         pick["quota"], pick["esito_key"])
-            continue
+            continue        # Adaptive staking per il percorso live Betfair
+        if _adaptive:
+            as_result = adaptive_stake(
+                bankroll=_bankroll, prob=pick.get("best_ev", 0.0) + 1.0 / price if price > 0 else 0.5,
+                odds=price, market_edge=pick.get("market_edge"),
+                status=pick.get("status", "value"),
+                peak_bankroll=_peak)
+            pick_stake = as_result["stake"]
+            if pick_stake <= 0:
+                logger.info("auto_bet: stake adaptive = 0 per %s, salto", pick["match_id"])
+                continue
+            logger.info("auto_bet: stake adaptive €%.2f per %s (%s)",
+                        pick_stake, pick["match_id"], as_result["reason"])
+        else:
+            pick_stake = normalize_stake(stake_eur_default)
 
         ins = {"selectionId": opp["selection_id"], "side": "BACK",
                "orderType": "LIMIT",
-               "limitOrder": {"size": stake, "price": price,
+               "limitOrder": {"size": pick_stake, "price": price,
                               "persistenceType": "LAPSE"}}
         try:
             result = client.place_orders(opp["market_id"], [ins],
@@ -289,16 +351,15 @@ def run_today_bets(client=None, stake_eur: float | None = None,
         status = (result or {}).get("status")
         bet_id = (result or {}).get("betId")
         mode = "live" if not client.dry_run else "dry-run"
-        record = {**pick, "price": price, "stake": stake,
+        record = {**pick, "price": price, "stake": pick_stake,
                   "market_id": opp["market_id"],
-                  "selection_id": opp["selection_id"],
-                  "status": status, "bet_id": bet_id, "mode": mode}
+                  "selection_id": opp["selection_id"], "status": status, "bet_id": bet_id, "mode": mode}
         placed.append(record)
         try:
             from tracker import save_bet
             save_bet(match_id=pick["match_id"], mercato=pick["mercato"],
                      esito=pick["esito_key"], market_id=opp["market_id"],
-                     selection_id=opp["selection_id"], price=price, stake=stake,
+                     selection_id=opp["selection_id"], price=price, stake=pick_stake,
                      mode=mode, status=status, bet_id=bet_id)
         except Exception as e:
             logger.warning("auto_bet: salvataggio ordine %s: %s", pick["match_id"], e)
