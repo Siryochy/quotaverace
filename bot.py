@@ -795,6 +795,34 @@ def format_daily_report(since: str, label: str) -> str:
     except Exception:
         pass
 
+    # RLM / Steam: movimenti di linea rilevati nel periodo.
+    try:
+        from line_movement import recent_signals_with_movement
+        movements = recent_signals_with_movement(since_minutes=1440)  # 24h
+        if movements:
+            rlm_count = sum(1 for m in movements
+                           if abs(m.get("price_move_pct", 0)) > 3.0)
+            steam_count = sum(1 for m in movements
+                             if abs(m.get("price_move_pct", 0)) > 6.0)
+            lines.append(f"")
+            lines.append(f"📊 *Line Movement (24h):* {len(movements)} segnali monitorati")
+            if rlm_count:
+                lines.append(f"   ⚠️ *RLM:* {rlm_count} movimenti significativi (>3%)")
+            if steam_count:
+                lines.append(f"   🔥 *Steam:* {steam_count} movimenti improvvisi (>6%)")
+            # Mostra i 3 movimenti piu' significativi
+            top = sorted(movements,
+                        key=lambda m: abs(m.get("price_move_pct", 0)),
+                        reverse=True)[:3]
+            for m in top:
+                move = m.get("price_move_pct", 0)
+                arrow = "↗" if move > 0 else "↙"
+                lines.append(
+                    f"   {arrow} {m.get('evento', '?')} — {m.get('esito', '?')} "
+                    f"{m.get('quota', 0):.2f} ({move:+.1f}%)")
+    except Exception:
+        pass
+
     try:
         from tracker import bets_period
         bp = bets_period(since)
