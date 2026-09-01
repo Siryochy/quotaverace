@@ -1,8 +1,10 @@
 import os
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 
+from config import DATA_DIR
 from odds_api import fetch_odds, SPORTS_MAP
 from leagues_data import ALL_LEAGUES
 from poisson_engine import expected_goals, prob_1x2, prob_over_under, ah_outcome_probs
@@ -78,16 +80,53 @@ def _match_team(api_name: str, league_name: str) -> Optional[str]:
             return team
     return None
 
+def _persist_skipped(skipped: List[dict]) -> None:
+    """Salva le partite saltate (squadre non coperte) per renderle visibili
+    nel report e nell'API invece di perderle in silenzio."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        (DATA_DIR / "saltate.json").write_text(json.dumps({
+            "ts": datetime.utcnow().isoformat(), "saltate": skipped[:50],
+            "n": len(skipped),
+        }, indent=2))
+    except Exception as e:
+        logger.warning("persist saltate.json fallita: %s", e)
+
+
+def get_skipped_matches() -> List[dict]:
+    """Ultime partite saltate per squadre non coperte (da saltate.json).
+    Ogni item riceve il timestamp dell'analisi per il filtro "ultime 24h"."""
+    try:
+        f = DATA_DIR / "saltate.json"
+        if not f.exists():
+            return []
+        data = json.loads(f.read_text()) or {}
+        ts = data.get("ts")
+        items = data.get("saltate", [])
+        for it in items:
+            it["ts"] = ts
+        return items
+    except Exception:
+        return []
+
+
 def fetch_and_analyze_today():
-    if not os.getenv("API_FOOTBALL_KEY"):
-        logger.warning("API_FOOTBALL_KEY mancante, skip calendario")
-        return 0, 0
+    """Analizza il calendario delle prossime 28h per tutte le leghe di SPORTS_MAP.
+
+    Ritorna (total_matches, value_count, skipped): skipped e' la lista delle
+    partite trovate ma NON analizzate perche' una o entrambe le squadre non
+    sono nel roster di ALL_LEAGUES (gap di copertura, non piu' silenziosi).
+    """
+    if not os.getenv("ODDS_API_KEY"):
+        logger.warning("ODDS_API_KEY mancante, skip calendario")
+        return 0, 0, []
     clear_old_matches()
     today = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     tomorrow = (datetime.utcnow() + timedelta(hours=28)).strftime("%Y-%m-%dT%H:%M:%SZ")
     total_matches = 0
     value_count = 0
     rejected_count = 0
+    skipped: List[dict] = []
     for league, sport_key in SPORTS_MAP.items():
         try:
             raw = fetch_odds(sport=sport_key, commence_time_from=today, commence_time_to=tomorrow)
@@ -98,6 +137,13 @@ def fetch_and_analyze_today():
                 home_db = _match_team(home_api, league)
                 away_db = _match_team(away_api, league)
                 if not home_db or not away_db:
+                    missing = [n for n, m in ((home_api, home_db), (away_api, away_db))
+                               if not m]
+                    skipped.append({
+                        "league": league, "home": home_api, "away": away_api,
+                        "non_coperte": missing,
+                        "commence": match.get("commence_time", ""),
+                    })
                     continue
                 save_match(mid, league, home_db, away_db, match.get("commence_time", ""))
                 total_matches += 1
@@ -108,8 +154,16 @@ def fetch_and_analyze_today():
                     rejected_count += 1
         except Exception as e:
             logger.warning(f"Errore calendario {league}: {e}")
-    logger.info(f"Calendario: {total_matches} partite | {value_count} value | {rejected_count} filtrate")
-    return total_matches, value_count
+    if skipped:
+        logger.warning("Partite saltate per squadre non coperte: %d (prime: %s)",
+                       len(skipped),
+                       [f"{s['home']} vs {s['away']} [{s['league']}]" for s in skipped[:5]])
+        _persist_skipped(skipped)
+    else:
+        _persist_skipped([])
+    logger.info(f"Calendario: {total_matches} partite | {value_count} value | "
+                f"{rejected_count} filtrate | {len(skipped)} saltate")
+    return total_matches, value_count, skipped
 
 def _analyze_match(match_id, match, home_db, away_db, league):
     """Analizza un match: modello Poisson vs mercato (devig).

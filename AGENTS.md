@@ -153,15 +153,20 @@ cd webapp && npm run build            # build Next.js
 - **Sticker premium**: inviato prima dei messaggi premium (set pubblico
   `PREMIUM_STICKER_SET`, default "Diamond") — workaround gratis alle custom
   emoji (che richiederebbero Fragment o Premium sull'account proprietario).
-- **Coppe attive**: SPORTS_MAP (odds_api.py) ora interroga anche Champions
-  League, Europa League, Conference League, Coppa Italia, Copa del Rey,
-  Coupe de France, DFB Pokal, FA Cup, EFL Cup, Copa Libertadores (chiavi
-  ufficiali the-odds-api, verificate sul sito) — **18 leghe totali**, con
-  cache 24h. Roster delle coppe in leagues_data.py: le coppe nazionali
-  copiano i campionati (es. Coppa Italia = Serie A), FA/EFL Cup = Premier +
-  Championship, Libertadores = Brasileirao + Argentina + Colombia + Cile
-  (le squadre non coperte saltano per design: si giocano solo i big match).
-  Test: test_odds_api.py.
+- **Copertura leghe (20)**: SPORTS_MAP (odds_api.py) interroga 20
+  competizioni con chiavi ufficiali the-odds-api (verificate sul sito): 8
+  campionati + Champions/Europa/Conference/Coppa Italia/Copa del Rey/
+  Coupe de France/DFB Pokal/FA Cup/EFL Cup/Copa Libertadores + **EFL
+  Championship** (soccer_efl_champ) + **Swiss Super League**
+  (soccer_switzerland_superleague). Roster in leagues_data.py: West Ham e
+  Wolves retrocesse sono in Championship (merge con Premier), Svizzera con
+  alias FC Zurich/Zürich per l'umlaut. Coppa Italia = Serie A + Serie B
+  (fix Parma-Cremonese).
+- **Partite saltate MAI silenziose**: fetch_and_analyze_today traccia le
+  partite trovate ma non analizzate (squadre fuori roster) → saltate.json
+  + ritorno API `/api/analisi` (campo `saltate`) + sezione nel report
+  giornaliero "⚠️ Partite non coperte (fuori roster)". Test:
+  test_odds_api.py.
 - **Webapp**: 8 sezioni live (Dashboard, Calcola, Schedina, Storico, Cassa,
   Calendario, Backtest, Value).
 - **Test**: 327/327 verdi (la suite completa richiede ~4 min: PBKDF2 del

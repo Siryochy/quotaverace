@@ -394,7 +394,7 @@ async def cmd_calendario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def cmd_analisi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("🔄 Aggiornamento calendario e analisi in corso...", parse_mode="Markdown")
-    total, _ = fetch_and_analyze_today()
+    total, _, _ = fetch_and_analyze_today()
     text = get_calendar_formatted()
     await update.message.reply_text(f"✅ Analizzate {total} partite.\n\n{text}", parse_mode="Markdown")
 
@@ -797,6 +797,30 @@ def format_daily_report(since: str, label: str) -> str:
         lines.append("\n⚠️ *Job saltati per chiavi mancanti:*\n   " + "\n   ".join(missing))
     else:
         lines.append("\n✅ Tutti i job attivi (chiavi presenti).")
+
+    # Partite trovate ma non analizzate per squadre fuori roster: gap di
+    # copertura reso visibile (mai piu' silenzioso). Solo quelle delle
+    # ultime 24h, cosi' il riepilogo del mattino segnala il giorno prima.
+    try:
+        from datetime import datetime as _dt
+        from fixture_engine import get_skipped_matches
+        def _recent(s):
+            try:
+                return (_dt.utcnow() - _dt.fromisoformat(s["ts"])).total_seconds() < 86400
+            except Exception:
+                return False
+        skipped = [s for s in get_skipped_matches() if _recent(s)]
+    except Exception:
+        skipped = []
+    if skipped:
+        rows = "\n   ".join(
+            f"• {s.get('home','?')} vs {s.get('away','?')} "
+            f"[{s.get('league','?')}] — squadre non coperte: "
+            f"{', '.join(s.get('non_coperte', []) or ['?'])}"
+            for s in skipped[:5]
+        )
+        extra = f" (+{len(skipped)-5} altre)" if len(skipped) > 5 else ""
+        lines.append(f"\n⚠️ *Partite non coperte (fuori roster):*\n   {rows}{extra}")
     return "\n".join(lines)
 
 

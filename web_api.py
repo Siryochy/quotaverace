@@ -335,8 +335,9 @@ def _analisi_json(params=None, body=None):
             compute_ratings()
         except Exception as e:
             logger.warning("ricalcolo rating fallito: %s", e)
-        total, value = fetch_and_analyze_today()
-        return {"ok": True, "partite": total, "value": value}
+        total, value, skipped = fetch_and_analyze_today()
+        return {"ok": True, "partite": total, "value": value,
+                "saltate": skipped}
     except Exception as e:
         logger.exception("errore analisi")
         return 500, {"error": str(e)}

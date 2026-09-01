@@ -138,6 +138,10 @@ EFL_CHAMPIONSHIP = {
     "Portsmouth": {"attack_home": 0.95, "attack_away": 0.85, "defense_home": 1.05, "defense_away": 1.10},
     "Sheffield Wednesday": {"attack_home": 1.00, "attack_away": 0.90, "defense_home": 0.95, "defense_away": 1.00},
     "Cardiff": {"attack_home": 1.00, "attack_away": 0.85, "defense_home": 1.00, "defense_away": 1.05},
+    # Retrocesse dalla Premier League 2025-26: dal 2026-27 giocano in
+    # Championship (es. West Ham vs Wolves il 1/9/2026 veniva persa).
+    "West Ham": {"attack_home": 1.15, "attack_away": 1.00, "defense_home": 0.90, "defense_away": 0.95},
+    "Wolves": {"attack_home": 1.00, "attack_away": 0.90, "defense_home": 1.00, "defense_away": 1.05},
 }
 
 SERIE_B = {
@@ -641,6 +645,25 @@ EGYPTIAN_PREMIER_LEAGUE = {
     "Al Mokawloon": {"attack_home": 0.85, "attack_away": 0.75, "defense_home": 1.10, "defense_away": 1.15},
 }
 
+# === SUPER LEAGUE SVIZZERA ===
+# the-odds-api usa nomi senza prefissi coerenti; per Zurigo teniamo anche
+# l'alias con l'umlaut per coprire entrambe le grafie dell'API.
+SWISS_SUPER_LEAGUE = {
+    "Young Boys": {"attack_home": 1.35, "attack_away": 1.20, "defense_home": 0.70, "defense_away": 0.75},
+    "FC Zurich": {"attack_home": 1.25, "attack_away": 1.10, "defense_home": 0.75, "defense_away": 0.80},
+    "Zürich": {"attack_home": 1.25, "attack_away": 1.10, "defense_home": 0.75, "defense_away": 0.80},
+    "Basel": {"attack_home": 1.20, "attack_away": 1.05, "defense_home": 0.80, "defense_away": 0.85},
+    "Servette": {"attack_home": 1.15, "attack_away": 1.00, "defense_home": 0.85, "defense_away": 0.90},
+    "Lugano": {"attack_home": 1.15, "attack_away": 1.00, "defense_home": 0.85, "defense_away": 0.90},
+    "St. Gallen": {"attack_home": 1.05, "attack_away": 0.90, "defense_home": 0.90, "defense_away": 0.95},
+    "Lausanne Sports": {"attack_home": 1.00, "attack_away": 0.85, "defense_home": 0.95, "defense_away": 1.00},
+    "Sion": {"attack_home": 1.00, "attack_away": 0.85, "defense_home": 0.95, "defense_away": 1.00},
+    "Grasshopper": {"attack_home": 0.95, "attack_away": 0.85, "defense_home": 1.00, "defense_away": 1.05},
+    "Luzern": {"attack_home": 1.00, "attack_away": 0.85, "defense_home": 0.95, "defense_away": 1.00},
+    "Winterthur": {"attack_home": 0.90, "attack_away": 0.80, "defense_home": 1.05, "defense_away": 1.10},
+    "Yverdon Sport": {"attack_home": 0.85, "attack_away": 0.75, "defense_home": 1.10, "defense_away": 1.15},
+}
+
 # === COPPE INTERNAZIONALI (roster = merge dei campionati da cui attingono) ===
 # Le squadre di League One/Two o dei campionati sudamericani non coperti
 # non hanno rating: le partite che le coinvolgono vengono saltate da
@@ -660,6 +683,7 @@ ALL_LEAGUES = {
     "Bundesliga": BUNDESLIGA_2025_26,
     "Ligue 1": LIGUE_1_2025_26,
     "EFL Championship": EFL_CHAMPIONSHIP,
+    "Swiss Super League": SWISS_SUPER_LEAGUE,
     "Serie B": SERIE_B,
     "Eredivisie": EREDIVISIE,
     "Primeira Liga": PRIMEIRA_LIGA,

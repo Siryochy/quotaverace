@@ -26,6 +26,8 @@ SPORTS_MAP = {
     "FA Cup": "soccer_fa_cup",
     "EFL Cup": "soccer_england_efl_cup",
     "Copa Libertadores": "soccer_conmebol_copa_libertadores",
+    "EFL Championship": "soccer_efl_champ",
+    "Swiss Super League": "soccer_switzerland_superleague",
 }
 
 def _env(name):
