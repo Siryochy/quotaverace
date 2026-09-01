@@ -1130,29 +1130,32 @@ async def report_morning_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
-    """08:50: piazza le puntate del giorno su Betfair (dry-run di default).
+    """08:50: piazza le puntate del giorno (paper test).
 
-    Segue la scansione (08:45) e l'analisi del mattino (08:00). In modalita'
-    LIVE piazza ordini reali: serve BETFAIR_DRY_RUN=0, BETFAIR_LIVE=1 e
-    nessun kill-switch. In dry-run logga tutto su data/orders.jsonl.
+    Segue la scansione (08:45) e l'analisi del mattino (08:00). Se Betfair e'
+    configurato usa il catalogo Exchange (dry-run di default; LIVE solo con
+    BETFAIR_DRY_RUN=0, BETFAIR_LIVE=1 e nessun kill-switch). Se Betfair manca
+    (o il catalogo non c'e'), ripiega automaticamente sulla modalita' SIM
+    (paper senza Exchange, quota del segnale) cosi' ledger e ML si addestrano
+    comunque ogni giorno.
     """
-    if not os.getenv("BETFAIR_APP_KEY"):
-        logger.info("auto_bet_job: BETFAIR_APP_KEY assente, salto")
-        return
     loop = asyncio.get_running_loop()
     try:
-        placed = await loop.run_in_executor(_scan_executor, run_today_bets)
+        placed = await loop.run_in_executor(_scan_executor, run_today_bets,
+                                            None, None, True)
     except Exception as e:
         logger.error("auto_bet_job: %s", e)
         return
     if not placed:
         return
     mode = placed[0]["mode"]
+    mode_label = {"live": "LIVE", "sim": "SIMULAZIONE",
+                  "dry-run": "DRY-RUN"}.get(mode, mode)
     total = sum(p["stake"] for p in placed)
     rows = "\n".join(
         f"• {p['home']} vs {p['away']} — {p['esito_key']} @ {p['price']:.2f} "
         f"(€{p['stake']:.2f})" for p in placed)
-    text = (f"🎯 *PUNTATE AUTOMATICHE ({'LIVE' if mode == 'live' else 'DRY-RUN'})*\n"
+    text = (f"🎯 *PUNTATE AUTOMATICHE ({mode_label})*\n"
             f"{len(placed)} puntate, €{total:.2f} di stake\n\n{rows}\n\n"
             f"📌 {'ORDINI REALI' if mode == 'live' else 'Simulazione: nessun ordine reale inviato.'}")
     await _send_report_to_recipients(context, text)
