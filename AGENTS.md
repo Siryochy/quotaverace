@@ -74,9 +74,11 @@ cd webapp && npm run build            # build Next.js
 5. **Python**: usare sempre `venv/bin/python`, mai `python` nudo.
 6. **DB**: migrazioni schema con ALTER TABLE idempotente in `tracker.py`
    (già fatto per market_prob/market_edge) — verificare sul volume dopo il deploy.
-7. **Token**: i due token (GitHub `ghp_…`, Telegram `AAE…`) sono stati esposti
-   in chat — da ruotare appena possibile; se ruotati, aggiornare
-   `QUOTAVERACE_BOT_TOKEN` su Railway.
+7. **Token**: rotazione completata e verificata il **01/09** — GitHub con nuovo
+   PAT fine-grained nel vault, Telegram con nuovo token su `api`/`production` e nel
+   vault. Da ora in poi qualunque token finito in un canale pubblico va considerato
+   compromesso e rotato subito (GitHub: nuovo PAT fine-grained → vault; Telegram:
+   @BotFather → nuovo token → `railway variable set QUOTAVERACE_BOT_TOKEN`).
 
 ## Segreti: vault cifrato (`secrets/`)
 
@@ -190,11 +192,13 @@ cd webapp && npm run build            # build Next.js
   Calendario, Backtest, Value).
 - **Test**: 327/327 verdi (la suite completa richiede ~4 min: PBKDF2 del
   vault a ogni import + Poisson — non è un blocco).
-- **Sicurezza**: token da ruotare (vedi regola 7).
+- **Sicurezza**: rotazione token completata e verificata il 01/09 — nuovo GitHub
+  PAT nel vault, nuovo token Telegram (`@Calcifrrbot`, ID 8372645521) attivo su
+  `api`/`production`: `getMe` 200 nel deployment 2bf814fb, test notifica
+  consegnato al Chat ID proprietario 7718157436.
 
 ## Prossimi passi possibili (non urgenti)
 
-- Ruotare i token esposti in chat.
 - Quando il ledger avrà 100+ previsioni chiuse: leggere `predictions_summary`
   per mercato → se un mercato ha CLV/ROI sistematicamente negativo, mettere a
   punto il modello su quel mercato (peso blend, soglia EV, devig method).
