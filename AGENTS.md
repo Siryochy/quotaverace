@@ -78,17 +78,32 @@ cd webapp && npm run build            # build Next.js
    in chat — da ruotare appena possibile; se ruotati, aggiornare
    `QUOTAVERACE_BOT_TOKEN` su Railway.
 
+## Segreti: vault cifrato (`secrets/`)
+
+- Tutti i segreti locali vivono in `secrets/vault.bin` (Fernet + PBKDF2,
+  `SECRETS_MASTER_KEY` nel `.env` gitignored, chmod 600). Mai plaintext nel
+  repo, mai loggati, caricati solo in memoria da `secrets_store.py` al
+  bootstrap (`config.py` → `load_secrets_dir`).
+- CLI: `venv/bin/python secrets_store.py vault|check|get NOME`. Per aggiungere
+  un segreto: file plaintext in `secrets/` → `vault --commit` (cancella il
+  plaintext). Se perdi `SECRETS_MASTER_KEY` senza plaintext, i segreti sono
+  persi.
+- Su Railway i segreti restano nelle env vars del progetto (cassaforte vera).
+
 ## Push automatico (credenziali GitHub)
 
 - Il deploy è automatico: Railway ridistribuisce da solo a ogni push su `main`.
 - Il push lo fa l'agente a fine lavoro con `GIT_ASKPASS=$(pwd)/.askpass_github.sh`
-  (script gitignored che legge `GITHUB_TOKEN` dal `.env` senza stamparlo mai).
+  (script gitignored che apre il VAULT e passa `GITHUB_TOKEN` a git senza mai
+  stamparlo: env | .env → chiave maestra → `secrets_store.get_secret`).
 - Il token va rinnovato quando scade o dopo l'esposizione in chat (flusso:
-  fine-grained PAT → Contents RW → `.env` → `/myid` non serve qui).
+  fine-grained PAT → Contents RW → va nel VAULT, non più nel `.env`).
 
 ## Stato attuale (ultimo aggiornamento)
 
 - **Deploy Railway**: Online, volume montato, bot in polling, health 200.
+- **Vault segreti**: attivo da locale (vault.bin Fernet/PBKDF2, 5 segreti
+  cifrati, plaintext cancellati) — vedi sezione "Segreti".
 - **Cassa**: funziona con doppia persistenza (localStorage + backup server sul
   volume). Endpoint: `GET/POST/DELETE /api/cassa`. **Ora si SALDA da sola**
   (`settle_cassa` in tracker.py): esito_finale/profit/settled_at, P/L reale e
