@@ -411,6 +411,46 @@ def _telegram_send_message(token: str, chat_id: int, text: str):
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _auto_bet(params=None, body=None):
+    """POST /api/auto_bet — esegue SUBITO le puntate del giorno (dry-run
+    di default), come il job delle 08:50, e notifica su Telegram gli admin.
+
+    Utile per anticipare l'addestramento del ledger/ML senza aspettare
+    il job: le puntate finiscono in tabella `bets` e vengono saldate a fine
+    partita come sempre.
+    """
+    try:
+        from auto_bet import run_today_bets
+        placed = run_today_bets()
+    except Exception as e:
+        logger.exception("auto_bet endpoint")
+        return 500, {"error": str(e)}
+    if not placed:
+        return {"ok": True, "piazzate": 0, "puntate": [],
+                "nota": "Nessuna puntata: nessun segnale, catalogo Betfair "
+                         "assente o guardie attive (vedi log)."}
+    mode = placed[0]["mode"]
+    total = sum(p["stake"] for p in placed)
+    rows = "\n".join(
+        f"• {p['home']} vs {p['away']} — {p['esito_key']} @ {p['price']:.2f} "
+        f"(€{p['stake']:.2f})" for p in placed)
+    text = (f"🎯 *PUNTATE AUTOMATICHE ({'LIVE' if mode == 'live' else 'DRY-RUN'})*\n"
+            f"{len(placed)} puntate, €{total:.2f} di stake\n\n{rows}\n\n"
+            f"📌 {'ORDINI REALI' if mode == 'live' else 'Simulazione: nessun ordine reale inviato.'}")
+    token = os.getenv("QUOTAVERACE_BOT_TOKEN", "")
+    results = []
+    for chat_id in _admin_chat_ids_from_env():
+        if not token:
+            break
+        try:
+            _telegram_send_message(token, chat_id, text)
+            results.append({"chat_id": chat_id, "ok": True})
+        except Exception as e:
+            results.append({"chat_id": chat_id, "ok": False, "error": str(e)})
+    return {"ok": True, "piazzate": len(placed), "puntate": placed,
+            "notifiche": results}
+
+
 def _test_notify(params=None, body=None):
     """POST/GET /api/test_notify — invia una notifica di prova su Telegram
     ai chat di ADMIN_CHAT_ID (+ opzionale ?chat_id= per test mirati).
@@ -527,6 +567,7 @@ POST_ROUTES = {
     "/api/cassa": _cassa_post,
     "/api/analisi": _analisi_json,
     "/api/test_notify": _test_notify,
+    "/api/auto_bet": _auto_bet,
 }
 
 DELETE_ROUTES = {

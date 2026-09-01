@@ -80,8 +80,38 @@ class TestRoutes:
                       "/api/schedina", "/api/scan", "/api/test_notify",
                       "/api/training"):
             assert route in web_api.ROUTES
-        # solo test_notify e' anche POST (invio con body/chiave)
         assert "/api/test_notify" in web_api.POST_ROUTES
+        assert "/api/auto_bet" in web_api.POST_ROUTES
+
+
+class TestAutoBet:
+    def test_nessuna_puntata(self, monkeypatch):
+        monkeypatch.setattr("auto_bet.run_today_bets", lambda: [])
+        d = web_api._auto_bet()
+        assert d["ok"] is True and d["piazzate"] == 0
+
+    def test_piazza_e_notifica_agli_admin(self, monkeypatch):
+        fake = [{"home": "Birmingham City", "away": "Southampton",
+                 "esito_key": "1", "price": 2.68, "stake": 5.0,
+                 "mode": "dry-run"}]
+        monkeypatch.setattr("auto_bet.run_today_bets", lambda: fake)
+        monkeypatch.setenv("ADMIN_CHAT_ID", "111")
+        monkeypatch.setenv("QUOTAVERACE_BOT_TOKEN", "tok")
+        inviati = []
+        monkeypatch.setattr("web_api._telegram_send_message",
+                            lambda t, c, text: inviati.append((c, text)))
+        d = web_api._auto_bet()
+        assert d["piazzate"] == 1
+        assert len(inviati) == 1
+        assert "PUNTATE AUTOMATICHE" in inviati[0][1]
+        assert "DRY-RUN" in inviati[0][1]
+
+    def test_errore_run_restituisce_500(self, monkeypatch):
+        def boom():
+            raise RuntimeError("Betfair giu'")
+        monkeypatch.setattr("auto_bet.run_today_bets", boom)
+        code, payload = web_api._auto_bet()
+        assert code == 500
 
 
 class TestTraining:
