@@ -1411,9 +1411,17 @@ def main() -> None:
         job_queue.run_once(backup_data_job, when=10)  # snapshot di base all'avvio
         # Piano free: riceve gli stessi segnali con 3 ore di ritardo.
         job_queue.run_daily(free_delayed_job, time=time(hour=17 - IT_OFFSET, minute=0))
+        # Alert RLM real-time: ogni 5 minuti dalle 14:00 alle 23:50 ITA
+        try:
+            from rlm_alert import rlm_alert_job
+            job_queue.run_repeating(rlm_alert_job, interval=300,
+                                    first=time(hour=14 - IT_OFFSET, minute=0))
+        except ImportError:
+            logger.warning("rlm_alert non disponibile, alert RLM disabilitato")
         logger.info("Job Pro schedulati (ora italiana): 03:30 backup / 06:05 riepilogo ieri / "
                     "08:30 sync / 08:45 scan / 08:50 auto-bet / 14:00 pomeriggio / "
-                    "17:00 free / 20:00 sera / 21:30 risultati / 21:00-23:50 EOD (ogni 15')")
+                    "14:00-23:50 RLM alert (5') / 17:00 free / 20:00 sera / "
+                    "21:30 risultati / 21:00-23:50 EOD (ogni 15')")
     else: logger.warning("JobQueue non disponibile")
     logger.info("QuotaVerace Pro avviato.")
     application.run_polling()
