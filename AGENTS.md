@@ -78,6 +78,14 @@ cd webapp && npm run build            # build Next.js
    in chat — da ruotare appena possibile; se ruotati, aggiornare
    `QUOTAVERACE_BOT_TOKEN` su Railway.
 
+## Push automatico (credenziali GitHub)
+
+- Il deploy è automatico: Railway ridistribuisce da solo a ogni push su `main`.
+- Il push lo fa l'agente a fine lavoro con `GIT_ASKPASS=$(pwd)/.askpass_github.sh`
+  (script gitignored che legge `GITHUB_TOKEN` dal `.env` senza stamparlo mai).
+- Il token va rinnovato quando scade o dopo l'esposizione in chat (flusso:
+  fine-grained PAT → Contents RW → `.env` → `/myid` non serve qui).
+
 ## Stato attuale (ultimo aggiornamento)
 
 - **Deploy Railway**: Online, volume montato, bot in polling, health 200.
