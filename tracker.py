@@ -621,7 +621,12 @@ def clear_cassa():
     conn.commit(); conn.close()
 
 def init_db():
-    _get_conn().close()
+    conn = _get_conn(); c = conn.cursor()
+    # Pulizia idempotente: una sola analisi per match (i doppioni di
+    # match_analysis duplicavano i pick nella schedina via JOIN).
+    c.execute("DELETE FROM match_analysis WHERE id NOT IN "
+              "(SELECT MAX(id) FROM match_analysis GROUP BY match_id)")
+    conn.commit(); conn.close()
 
 def log_signal(chat_id, evento, esito, quota, probabilita, ev):
     conn = _get_conn(); c = conn.cursor()
@@ -733,10 +738,15 @@ def save_analysis(match_id, lam_h, lam_a, p1, px, p2, p_over, best_ev, best_esit
                   market_prob=None, market_edge=None):
     """Salva l'analisi di un match, incluso il confronto col mercato.
 
+    Idempotente per match_id: ogni nuova analisi SOSTITUISCE la precedente
+    (prima con piu' righe per match la schedina mostrava doppioni nel JOIN
+    matches x match_analysis).
+
     market_prob: probabilita' implicita del mercato (devig) per l'esito scelto.
     market_edge: model_prob - market_prob (quanto il modello batte il mercato).
     """
     conn = _get_conn(); c = conn.cursor()
+    c.execute("DELETE FROM match_analysis WHERE match_id=?", (match_id,))
     c.execute('''INSERT INTO match_analysis (match_id,lam_h,lam_a,prob_1,prob_X,prob_2,prob_over,best_ev,best_esito,best_quota,best_bookmaker,status,timestamp,market_prob,market_edge)
                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
               (match_id, lam_h, lam_a, p1, px, p2, p_over, best_ev, best_esito, best_quota, best_bookmaker, status,

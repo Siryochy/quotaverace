@@ -1,4 +1,4 @@
-"""Test puntate automatiche (tabella `bets`)."""
+"""Test puntate automatiche (tabella `bets`) e idempotenza analisi."""
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -6,6 +6,47 @@ from pathlib import Path
 import pytest
 
 import tracker
+
+
+def test_save_analysis_idempotente(temp_db):
+    """Due analisi dello stesso match NON creano doppioni: la schedina
+    (JOIN matches x match_analysis) non deve mostrare pick duplicati."""
+    tracker.save_match("dup1", "Serie A", "Inter", "Napoli",
+                       "2026-09-01T13:00:00Z")
+    tracker.save_analysis("dup1", 1.7, 1.0, 0.5, 0.27, 0.23, 0.55,
+                          0.10, "1", 2.10, "Pinnacle", "value",
+                          market_prob=0.45, market_edge=0.10)
+    tracker.save_analysis("dup1", 1.7, 1.0, 0.5, 0.27, 0.23, 0.55,
+                          0.12, "1", 2.20, "Pinnacle", "strong_value",
+                          market_prob=0.45, market_edge=0.12)
+    rows = tracker.get_analysis_for_match("dup1")
+    assert rows is not None and len(rows) == 16  # una sola riga (id + 15 campi)
+    # l'ultima analisi vince (status strong_value)
+    assert rows[12] == "strong_value"
+
+
+def test_init_db_elimina_doppioni_analisi(temp_db):
+    """I doppioni gia' presenti (da analisi ripetute pre-fix) vengono
+    ripuliti da init_db: resta solo l'analisi piu' recente per match."""
+    tracker.save_match("dup2", "Serie A", "Inter", "Napoli",
+                       "2026-09-01T13:00:00Z")
+    tracker.save_analysis("dup2", 1.7, 1.0, 0.5, 0.27, 0.23, 0.55,
+                          0.10, "1", 2.10, "Pinnacle", "value")
+    # riga duplicata simulata (INSERT diretto, come accadeva prima del fix)
+    conn = tracker._get_conn(); c = conn.cursor()
+    c.execute('''INSERT INTO match_analysis
+                 (match_id,lam_h,lam_a,prob_1,prob_X,prob_2,prob_over,best_ev,
+                  best_esito,best_quota,best_bookmaker,status,timestamp)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))''',
+              ("dup2", 1.7, 1.0, 0.5, 0.27, 0.23, 0.55, 0.12, "1", 2.20,
+               "Pinnacle", "strong_value"))
+    conn.commit(); conn.close()
+    tracker.init_db()  # ripulisce
+    conn = tracker._get_conn(); c = conn.cursor()
+    n = c.execute("SELECT COUNT(*) FROM match_analysis WHERE match_id=?",
+                  ("dup2",)).fetchone()[0]
+    conn.close()
+    assert n == 1
 
 
 @pytest.fixture()
