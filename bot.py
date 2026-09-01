@@ -713,7 +713,7 @@ def _missing_env_keys() -> list:
     """Chiavi mancanti: i job corrispondenti saltano in silenzio."""
     missing = []
     for key, what in (("API_FOOTBALL_KEY", "calendario/analisi"),
-                      ("ODDS_API_KEY", "quote live e notifiche value"),
+                      ("ODDS_API_KEY", "quote live + risultati + settlement bet"),
                       ("BETFAIR_APP_KEY", "scansione Betfair e surebet")):
         if not os.getenv(key):
             missing.append(f"{key} ({what})")
@@ -755,6 +755,29 @@ def format_daily_report(since: str, label: str) -> str:
         )
     else:
         lines.append("🎯 *Nessuna previsione chiusa nel periodo.*")
+        # Diagnostica: ci sono bet aperte ma senza risultati?
+        try:
+            from tracker import _get_conn
+            conn = _get_conn(); c = conn.cursor()
+            open_bets = c.execute(
+                "SELECT COUNT(*) FROM bets WHERE esito_finale IS NULL"
+            ).fetchone()[0]
+            open_preds = c.execute(
+                "SELECT COUNT(*) FROM predictions WHERE esito_finale IS NULL"
+            ).fetchone()[0]
+            conn.close()
+            if open_bets or open_preds:
+                if not os.getenv("ODDS_API_KEY"):
+                    lines.append(
+                        "   ⚠️ *Possibile causa:* `ODDS_API_KEY` non configurata "
+                        "→ i risultati non vengono scaricati e le bet "
+                        "restano aperte. Impostala su Railway.")
+                else:
+                    lines.append(
+                        f"   ℹ️ {open_bets} bet + {open_preds} previsioni "
+                        "ancora aperte (risultati in attesa)")
+        except Exception:
+            pass
 
     if ct["chiusi"]:
         lines.append(
