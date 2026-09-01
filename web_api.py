@@ -162,15 +162,27 @@ def _health_json(params=None):
     except Exception:
         quota = None
     creds = {"remaining": quota[0], "cache": quota[1]} if quota else None
-    # Diagnostica Betfair SENZA valori (solo stato ok/MANCANTE/non_trovato).
+    # Diagnostica Betfair SENZA valori: distingue assente/vuota/presente
+    # (mostra solo la lunghezza, mai il segreto) per capire perche' le
+    # shared variables BETFAIR non risultano configurate.
     betfair = None
     try:
         from betfair_client import check_setup
         betfair = check_setup()
     except Exception:
         betfair = None
+    betfair_raw = {}
+    for v in ("BETFAIR_APP_KEY", "BETFAIR_USERNAME", "BETFAIR_PASSWORD",
+              "BETFAIR_CERT_PATH", "BETFAIR_CERT_KEY_PATH"):
+        val = os.getenv(v)
+        if val is None:
+            betfair_raw[v] = "assente"
+        elif val == "":
+            betfair_raw[v] = "vuota"
+        else:
+            betfair_raw[v] = f"presente (len {len(val)})"
     return {"status": "ok", "api_football_key": bool(os.getenv("API_FOOTBALL_KEY")),
-            "quota": creds, "betfair": betfair}
+            "quota": creds, "betfair": betfair, "betfair_raw": betfair_raw}
 
 
 def _segnali_json(params=None):
