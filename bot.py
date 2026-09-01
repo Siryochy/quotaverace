@@ -1153,11 +1153,13 @@ async def end_of_day_report_job(context: ContextTypes.DEFAULT_TYPE):
     (rinvio, dati lenti), invia comunque per non perdere la giornata.
     """
     from tracker import day_completed, is_notified, mark_notified
-    today = datetime.now().strftime("%Y-%m-%d")
+    from datetime import timezone as _tz, timedelta as _td
+    # Ora italiana (UTC+2 estive)
+    now_it = datetime.now(_tz.utc) + _td(hours=2)
+    today = now_it.strftime("%Y-%m-%d")
     if is_notified("EOD", today):
         return
-    now = datetime.now()
-    forced = now.hour >= 23 and now.minute >= 50
+    forced = now_it.hour >= 23 and now_it.minute >= 50
     if not forced and not day_completed(today):
         return
     text = format_daily_report(today, "OGGI — FINE GIORNATA")
@@ -1360,24 +1362,30 @@ def main() -> None:
         logger.warning("AI Commander non-aktif: %s", _AI_ERR)
     job_queue = application.job_queue
     if job_queue:
-        job_queue.run_daily(morning_job, time=time(hour=6, minute=0))
-        job_queue.run_daily(afternoon_job, time=time(hour=14, minute=0))
-        job_queue.run_daily(evening_job, time=time(hour=20, minute=0))
-        job_queue.run_daily(results_job, time=time(hour=21, minute=30))
-        # Riepilogo a fine ultima partita: check ogni 15' dalle 21:00 UTC
-        # (fallback notturno 23:50 se la giornata non si chiude da sola).
+        # I job usano UTC (timezone del container Railway).
+        # Per avere gli orari italiani (UTC+2 estive / UTC+1 invernali),
+        # soutraiamo 2h (estive) o 1h (invernali). Usa -2 per semplicita'
+        # (cambia a -1 a fine ottobre se necessario).
+        IT_OFFSET = 2  # UTC+2 (ora legale estiva italiana)
+        job_queue.run_daily(morning_job, time=time(hour=6 - IT_OFFSET, minute=0))
+        job_queue.run_daily(afternoon_job, time=time(hour=14 - IT_OFFSET, minute=0))
+        job_queue.run_daily(evening_job, time=time(hour=20 - IT_OFFSET, minute=0))
+        job_queue.run_daily(results_job, time=time(hour=21, minute=30 - IT_OFFSET))
+        # Riepilogo a fine ultima partita: check ogni 15' dalle 21:00 ITA
+        # (fallback notturno 23:50 ITA se la giornata non si chiude da sola).
         job_queue.run_repeating(end_of_day_report_job, interval=900,
-                                first=time(hour=21, minute=0))
-        job_queue.run_daily(report_morning_job, time=time(hour=6, minute=5))
-        job_queue.run_daily(history_sync_job, time=time(hour=8, minute=30))
-        job_queue.run_daily(betfair_scan_job, time=time(hour=8, minute=45))
-        job_queue.run_daily(auto_bet_job, time=time(hour=8, minute=50))
+                                first=time(hour=21 - IT_OFFSET, minute=0))
+        job_queue.run_daily(report_morning_job, time=time(hour=6, minute=5 - IT_OFFSET))
+        job_queue.run_daily(history_sync_job, time=time(hour=8, minute=30 - IT_OFFSET))
+        job_queue.run_daily(betfair_scan_job, time=time(hour=8, minute=45 - IT_OFFSET))
+        job_queue.run_daily(auto_bet_job, time=time(hour=8, minute=50 - IT_OFFSET))
         job_queue.run_daily(backup_data_job, time=time(hour=3, minute=30))
         job_queue.run_once(backup_data_job, when=10)  # snapshot di base all'avvio
         # Piano free: riceve gli stessi segnali con 3 ore di ritardo.
-        job_queue.run_daily(free_delayed_job, time=time(hour=17, minute=0))
-        logger.info("Job Pro schedulati: 03:30 backup / 06:00+05 riepilogo ieri / 08:30 / 08:45 / "
-                    "14:00 / 17:00 free / 20:00 / 21:30 risultati / 21:00-23:50 EOD (ogni 15') ITA")
+        job_queue.run_daily(free_delayed_job, time=time(hour=17 - IT_OFFSET, minute=0))
+        logger.info("Job Pro schedulati (ora italiana): 03:30 backup / 06:05 riepilogo ieri / "
+                    "08:30 sync / 08:45 scan / 08:50 auto-bet / 14:00 pomeriggio / "
+                    "17:00 free / 20:00 sera / 21:30 risultati / 21:00-23:50 EOD (ogni 15')")
     else: logger.warning("JobQueue non disponibile")
     logger.info("QuotaVerace Pro avviato.")
     application.run_polling()

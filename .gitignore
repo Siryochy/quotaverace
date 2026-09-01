@@ -16,3 +16,4 @@ _archivio/
 .askpass_github.sh
 secrets/
 secrets/README.md
+data/ensemble_model.json

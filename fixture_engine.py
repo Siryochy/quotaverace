@@ -19,6 +19,14 @@ from line_movement import record_snapshot, detect_rlm, detect_steam
 
 logger = logging.getLogger(__name__)
 
+# ML Ensemble: caricato lazy, addestrato quando il dataset matura
+def _get_ensemble():
+    try:
+        from ml_ensemble import get_ensemble
+        return get_ensemble()
+    except ImportError:
+        return None
+
 DERIV_BIAS = 0.01  # bonus EV ai mercati derivati (Over/Under): soft book meno efficienti
 
 TEAM_MAP = {
@@ -304,6 +312,9 @@ def _analyze_match(match_id, match, home_db, away_db, league):
     market_tot = market_implied({k: v[0] for k, v in total_prices.items()}) if len(total_prices) >= 2 else None
 
     # 3. Candidati: esito (chiave mercato) -> modello + mercato.
+    # ML Ensemble: caricato una volta per l'analisi
+    ensemble = _get_ensemble()
+
     candidates = []
     for mkey, model_prob, market, prices in (
         ("1", p1, market_h2h, h2h_prices),
@@ -320,6 +331,25 @@ def _analyze_match(match_id, match, home_db, away_db, league):
         final_prob = adjusted_probability(model_prob, market_prob, price,
                                           league=league)
         ev = compute_ev(final_prob, price)
+
+        # ML Ensemble: se addestrato, calcola probabilità ensemble
+        ensemble_prob = None
+        if ensemble and ensemble.trained:
+            ens_row = {
+                "prob_1": p1, "prob_X": px, "prob_2": p2,
+                "prob_over": p_over, "lam_h": lam_h, "lam_a": lam_a,
+                "quota": price, "market_prob": market_prob,
+                "market_edge": (model_prob - market_prob) if market_prob else None,
+                "ev": ev, "prob": final_prob,
+            }
+            ens = ensemble.predict(ens_row)
+            ensemble_prob = ens.get("ensemble_prob")
+            # Se l'ensemble è confident, usa la sua probabilità per il blend
+            if ens.get("confidence", 0) > 0.3:
+                # Sostituisci il final_prob con l'ensemble (più calibrato)
+                final_prob = ensemble_prob
+                ev = compute_ev(final_prob, price)
+
         candidates.append({
             "score": ev + bias,
             "ev": ev,
@@ -328,6 +358,7 @@ def _analyze_match(match_id, match, home_db, away_db, league):
             "bookmaker": bookmaker,
             "prob": final_prob,
             "prob_model": model_prob,
+            "prob_ensemble": ensemble_prob,
             "market_prob": market_prob,
             "market_edge": (model_prob - market_prob) if market_prob is not None else None,
             "mercato": "1X2" if mkey in ("1", "X", "2") else "OU",

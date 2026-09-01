@@ -580,7 +580,7 @@ def day_completed(day: str | None = None) -> bool:
                      (f"{day}%",)).fetchall()
     conn.close()
     if not rows:
-        return False  # nessuna partita in calendario per quel giorno
+        return True  # nessuna partita -> giornata "completata" (niente da aspettare)
     now_utc = datetime.now(timezone.utc)
     result_conn = _get_conn()
     _create_results_table(result_conn)
