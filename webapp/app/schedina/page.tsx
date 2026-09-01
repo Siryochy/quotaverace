@@ -49,16 +49,27 @@ export default function Schedina() {
   const multipla = d.multipla
   const bankroll = Number(d.bankroll || 100)
 
-  // Kelly 1/4 + cap 3% (sama seperti bot)
-  const proStake = (prob: number, quota: number) => {
+  // Stake adattivo dal backend (con fallback client-side)
+  const getStake = (p: any) => {
+    if (p.stake !== undefined && p.stake !== null) {
+      return {
+        stake: Number(p.stake),
+        pct: (Number(p.stake) / bankroll) * 100,
+        kelly: Number(p.stake_kelly || 0.25),
+        reason: p.stake_reason || '',
+      }
+    }
+    // Fallback client-side: 1/4 Kelly cap 3%
+    const prob = Number(p.prob)
+    const quota = Number(p.quota)
     const kellyFull = (prob * quota - 1) / (quota - 1)
     const kelly = Math.max(0, kellyFull) / 4
     const cap = bankroll * 0.03
     const stake = Math.min(kelly * bankroll, cap)
-    return { stake, pct: (stake / bankroll) * 100 }
+    return { stake, pct: (stake / bankroll) * 100, kelly: 0.25, reason: 'fallback' }
   }
 
-  const totalStake = picks.reduce((s, p) => s + proStake(Number(p.prob), Number(p.quota)).stake, 0)
+  const totalStake = picks.reduce((s, p) => s + getStake(p).stake, 0)
 
   return (
     <main className="p-6 max-w-5xl mx-auto">
@@ -92,17 +103,19 @@ export default function Schedina() {
                     {ev >= 8 ? '🔥 Nilai Kuat' : '🟡 Nilai Positif'}
                   </span>
                 </div>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
                   <div><span className="text-gray-400 block">🎯 Pilihan</span><b>{p.esito} @ {Number(p.quota).toFixed(2)}</b></div>
                   <div><span className="text-gray-400 block">🏦 Bandar</span>{p.bookmaker}</div>
                   <div><span className="text-gray-400 block">📈 EV</span><b className={ev >= 0 ? 'text-emerald-400' : 'text-red-400'}>+{ev.toFixed(1)}%</b></div>
-                  <div><span className="text-gray-400 block">💵 Stake</span><b>€{pro.stake.toFixed(2)}</b> <span className="text-gray-500">({pro.pct.toFixed(1)}%)</span></div>
+                  <div><span className="text-gray-400 block">💵 Stake</span><b className="text-emerald-300">€{getStake(p).stake.toFixed(2)}</b> <span className="text-gray-500">({getStake(p).pct.toFixed(1)}%)</span></div>
+                  <div><span className="text-gray-400 block">📊 Kelly</span><b>{(getStake(p).kelly * 100).toFixed(0)}%</b> <span className="text-gray-500 text-xs">{getStake(p).reason}</span></div>
                 </div>
               </div>
             )
           })}
-          <div className="bg-gray-900 rounded-xl p-4 text-sm">
-            💵 Total investasi: <b className="text-emerald-400">€{totalStake.toFixed(2)}</b> ({((totalStake / bankroll) * 100).toFixed(1)}% bankroll)
+          <div className="bg-gray-900 rounded-xl p-4 text-sm flex items-center justify-between">
+            <span>💵 Total investasi: <b className="text-emerald-400">€{totalStake.toFixed(2)}</b> ({((totalStake / bankroll) * 100).toFixed(1)}% bankroll)</span>
+            <span className="text-gray-500 text-xs">🎯 Stake adattivo (confidence-weighted Kelly)</span>
           </div>
         </div>
       )}

@@ -21,18 +21,23 @@ bot.py              → bot Telegram (comandi, job schedulati, segnali)
 web_api.py          → API JSON (senza framework, threading.HTTPServer)
 tracker.py          → DB SQLite (schema + helper): segnali, analisi, cassa, ratings
 fixture_engine.py   → analisi partite: modello vs mercato (CUORE STRATEGICO)
-market_calib.py     → devigging + blend modello/mercato + longshot bias (STRATEGIA)
+market_calib.py     → devigging + blend dinamico + CLV vig-free + longshot bias
+ml_ensemble.py      → ensemble Poisson + Logistic Regression (numpy-only)
+line_movement.py    → price snapshots, RLM detection, steam moves
+bookmaker_advantage.py → soft book lag detection vs Pinnacle
+adaptive_staking.py → Kelly frazionato dinamico + drawdown protection
 rating_engine.py    → rating squadre time-decay (shrink usa COUNT reale `n`, NON `wsum`!)
 poisson_engine.py   → modello Poisson/Dixon-Coles
 value_filter.py     → gate EV + mercato, is_sane()
 backtest.py         → calibrazione EV vs ROI, split "batte il mercato"
+market_diagnose.py  → diagnosi calibrazione per mercato (ROI vs EV)
 odds_ingest.py      → ingestione quote da odds API (cache in data/)
 odds_api.py         → client API-Football (rate limit, quota giornaliera)
 surebet_*.py        → scanner arbitraggio (Betfair ecc.)
 daily_scanner.py    → job mattutino: partite del giorno + analisi
 football_hist.py    → storico risultati (2022-2024) per le ratings
-data/               → cache JSON scan + DB sqlite
-webapp/             → Next.js (Vercel): dashboard, cassa, calendario, backtest, value...
+data/               → cache JSON scan + DB sqlite + modello ensemble
+webapp/             → Next.js (Vercel): dashboard, cassa, schedina, calendario, backtest, value...
 ```
 
 **Backend e bot stanno nello STESSO container Railway** (volume unico su
@@ -144,13 +149,17 @@ cd webapp && npm run build            # build Next.js
   il segnale della schedina resta 1X2/OU.
 - **Quote**: fix fallback `load_odds(path)` (prima non funzionava mai) e nota
   di freschezza in `/segnale` quando le quote sono da cache vecchia.
-- **Puntate automatiche** (`auto_bet.py`, job 08:50): piazza su Betfair
+- **Puntate automatiche** (`auto_bet.py`, job 08:50 ITA): piazza su Betfair
   Exchange i segnali value/strong_value del giorno (MATCH_ODDS e
-  OVER_UNDER_25 dal catalogo di scansione), stake FISSO `BET_STAKE_EUR`
-  (default 5.00, minimo Italia 2.00/step 0.50). **DRY-RUN di default**: ordini
-  reali solo con `BETFAIR_DRY_RUN=0` + `BETFAIR_LIVE=1` e senza kill-switch
-  (`data/kill_switch`). Guardie: salta partite a <15 min dall'inizio, prezzi
-  Exchange <95% della quota segnale, doppie puntate (UNIQUE match_id+esito).
+  OVER_UNDER_25 dal catalogo di scansione), stake **ADATTIVO** (`adaptive_staking.py`):
+  Kelly frazionato dinamico (0.10-0.35 vs 0.25 fisso prima) con drawdown
+  protection (>10% drawdown → riduzione stakes) e confidence weighting
+  (market_edge alto + strong_value → stake più alto). Cap: 3% value, 5%
+  strong_value. Fallback: stake fisso `BET_STAKE_EUR` se modulo assente.
+  **DRY-RUN di default**: ordini reali solo con `BETFAIR_DRY_RUN=0` +
+  `BETFAIR_LIVE=1` e senza kill-switch (`data/kill_switch`). Guardie:
+  salta partite a <15 min dall'inizio, prezzi Exchange <95% della quota
+  segnale, doppie puntate (UNIQUE match_id+esito).
   **Verifica incrociata runner**: `_resolve_team` risolve gli alias squadre
   (TEAM_MAP: 'AC Milan'→'milan', 'West Ham United'→'west ham') sia sul
   matching dell'evento sia sull'esito; `_runner_esito` accetta SOLO runner
@@ -159,11 +168,13 @@ cd webapp && npm run build            # build Next.js
   riconosciuto non viene mai piazzato). Registro in tabella `bets`, saldato
   a fine partita (`settle_bets`) e incluso nel riepilogo.
 - **Report giornaliero**: `/riepilogo [oggi|ieri|YYYY-MM-DD]` + invio
-  automatico all'alba (06:05, riepilogo di ieri) e **a fine ultima partita**
-  (check ogni 15' dalle 21:00, fallback notturno 23:50): previsioni chiuse
-  per mercato (ROI vs EV), cassa saldata, puntate auto (P/L), CLV medio,
-  CLV vs Pinnacle (closing line sharp dal feed the-odds-api) e alert delle
-  chiavi mancanti (API_FOOTBALL_KEY/ODDS_API_KEY/BETFAIR_APP_KEY).
+  automatico all'alba (06:05 ITA, riepilogo di ieri) e **a fine ultima
+  partita** (check ogni 15' dalle 21:00 ITA, fallback notturno 23:50 ITA):
+  previsioni chiuse per mercato (ROI vs EV), cassa saldata, puntate auto
+  (P/L), CLV raw + **CLV vig-free** (devigato, piu' accurato) + CLV vs
+  Pinnacle (closing line sharp), e alert chiavi mancanti.
+  **Timezone**: i job usano UTC; `IT_OFFSET=2` converte gli orari in italiani
+  (cambiare a 1 a fine ottobre per ora legale invernale).
   Destinatari: iscritti (`/subscribe`) **+ sempre** i chat in `ADMIN_CHAT_ID`
   (proprietario, virgola-separati). `/myid` mostra il proprio Chat ID.
 - **Sticker premium**: inviato prima dei messaggi premium (set pubblico
@@ -190,8 +201,43 @@ cd webapp && npm run build            # build Next.js
   vuoto per design (ogni partita e' analizzata).
 - **Webapp**: 8 sezioni live (Dashboard, Calcola, Schedina, Storico, Cassa,
   Calendario, Backtest, Value).
-- **Test**: 327/327 verdi (la suite completa richiede ~4 min: PBKDF2 del
-  vault a ogni import + Poisson — non è un blocco).
+- **Test**: 327+ test verdi (la suite completa richiede ~4 min).
+
+## Moduli avanzati (Settembre 2026)
+
+- **ML Ensemble** (`ml_ensemble.py`): Logistic Regression numpy-only che
+  combina le probabilità Poisson con un classificatore addestrato sul
+  dataset storico. Peso dinamico basato sul Brier score. Save/load in
+  `data/ensemble_model.json`. Integrato in `fixture_engine._analyze_match`.
+- **Line Movement Tracking** (`line_movement.py`): tabella `price_snapshots`
+  registra i prezzi ad ogni analisi. RLM detection (reverse line movement =
+  segnale sharp money quando il prezzo si muove contro il pubblico) e steam
+  move detection (movimento > 6% in < 30 min). CLI per analisi.
+- **Bookmaker Advantage** (`bookmaker_advantage.py`): confronta quote Pinnacle
+  (sharp) con i soft book. Rileva lag (soft book non aggiornato) e calcola
+  l'edge aggiuntivo dal lag. Integra in `fixture_engine`.
+- **Adaptive Staking** (`adaptive_staking.py`): Kelly frazionato dinamico
+  (0.10-0.35) con confidence weighting (market_edge, ML confidence, CLV,
+  status) e drawdown protection (>10% → riduzione stakes). Integrato in
+  `auto_bet.py` (ogni puntata ha stake diverso).
+- **Dynamic Blend** (`market_calib.py`): `blend_probability()` ora accetta
+  `league`, `odds`, `model_samples` per calcolare il peso dinamico.
+  `LEAGUE_EFFICIENCY` con score per 30+ leghe (Premier League 0.85 →
+  Indian Super League 0.35). Mercato efficiente → peso modello basso.
+- **CLV Vig-Free** (`market_calib.py`): `clv_vig_free()` calcola CLV sulla
+  closing line devigata (non la quota grezza). Corregge la sovrastima del
+  CLV tradizionale. Il report mostra CLV raw, vig-free e vs Pinnacle.
+- **Market Diagnose** (`market_diagnose.py`): diagnosi calibrazione per
+  mercato. Confronta ROI realizzato vs EV atteso, identifica mercati
+  critici (gap >= 3pp) e suggerisce tuning (blend, devig, soglia EV).
+- **Fix Timezone Job**: tutti i job Telegram ora usano `IT_OFFSET=2` per
+  convertire UTC → ora italiana. Prima il report delle 23:50 partiva
+  alle 01:50 italiane!
+- **Test**: 327+ test verdi (la suite completa richiede ~4 min).
+- **Sicurezza**: rotazione token completata e verificata il 01/09 — nuovo GitHub
+  PAT nel vault, nuovo token Telegram (`@Calcifrrbot`, ID 8372645521) attivo su
+  `api`/`production`: `getMe` 200 nel deployment 2bf814fb, test notifica
+  consegnato al Chat ID proprietario 7718157436.
 - **Sicurezza**: rotazione token completata e verificata il 01/09 — nuovo GitHub
   PAT nel vault, nuovo token Telegram (`@Calcifrrbot`, ID 8372645521) attivo su
   `api`/`production`: `getMe` 200 nel deployment 2bf814fb, test notifica
@@ -199,7 +245,9 @@ cd webapp && npm run build            # build Next.js
 
 ## Prossimi passi possibili (non urgenti)
 
-- Quando il ledger avrà 100+ previsioni chiuse: leggere `predictions_summary`
-  per mercato → se un mercato ha CLV/ROI sistematicamente negativo, mettere a
-  punto il modello su quel mercato (peso blend, soglia EV, devig method).
-- Mostrare la telemetria `per_mercato` anche nella webapp (pagina Backtest).
+- Quando il ledger avrà 100+ previsioni chiuse: usare `market_diagnose.py`
+  per identificare mercati critici e ajustare blend/devig/soglie.
+- Mostrare RLM/steam nel report Telegram e nella webapp.
+- Integrazione XGBoost quando il dataset ML raggiunge 500+ campioni
+  (attualmente Logistic Regression numpy-only per evitare deps pesanti).
+- Cambiare `IT_OFFSET` da 2 a 1 a fine ottobre (ora legale invernale).

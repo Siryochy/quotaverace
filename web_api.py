@@ -114,18 +114,34 @@ def _dashboard_json(params=None):
 
 
 def _schedina_json(params=None):
-    """Schedina del giorno: picks con valore + multipla prolungata."""
+    """Schedina del giorno: picks con valore + multipla prolungata.
+
+    Include stake adattivo (adaptive_staking) per ogni pick, con confidence
+    weighting e drawdown protection.
+    """
     try:
         from fixture_engine import get_value_picks_for_schedina, build_multipla
     except Exception as e:
         logger.warning("fixture_engine non disponibile: %s", e)
         return {"picks": [], "multipla": None, "bankroll": _bankroll()}
 
+    # Carica adaptive staking
+    try:
+        from adaptive_staking import adaptive_stake, bankroll_stats
+        _bs = bankroll_stats()
+        _bankroll = _bs.get("current", _bankroll())
+        _peak = _bs.get("peak", _bankroll)
+        _adaptive = True
+    except ImportError:
+        _adaptive = False
+        _bankroll = _bankroll()
+        _peak = _bankroll
+
     picks = get_value_picks_for_schedina()
     out = []
     for p in picks:
         prob = p["ev"] + (1.0 / p["quota"]) if p["quota"] else 0.0
-        out.append({
+        pick_data = {
             "league": p["league"],
             "home": p["home"],
             "away": p["away"],
@@ -135,7 +151,27 @@ def _schedina_json(params=None):
             "bookmaker": p["bookmaker"],
             "ev": p["ev"],
             "prob": prob,
-        })
+            "market_edge": p.get("market_edge"),
+            "status": p.get("status", "value"),
+        }
+        # Stake adattivo per ogni pick
+        if _adaptive and p["quota"] and p["quota"] > 1.0:
+            as_result = adaptive_stake(
+                bankroll=_bankroll, prob=prob, odds=p["quota"],
+                market_edge=p.get("market_edge"),
+                status=p.get("status", "value"),
+                peak_bankroll=_peak)
+            pick_data["stake"] = as_result["stake"]
+            pick_data["stake_kelly"] = as_result["kelly_fraction"]
+            pick_data["stake_reason"] = as_result["reason"]
+        else:
+            # Fallback: 1/4 Kelly cap 3%
+            kelly_full = (prob * p["quota"] - 1) / (p["quota"] - 1) if p["quota"] > 1 else 0
+            stake = max(0, kelly_full * 0.25 * _bankroll)
+            pick_data["stake"] = round(min(stake, _bankroll * 0.03), 2)
+            pick_data["stake_kelly"] = 0.25
+            pick_data["stake_reason"] = "fallback (1/4 Kelly)"
+        out.append(pick_data)
 
     mp = build_multipla(picks)
     multipla = None
@@ -151,7 +187,7 @@ def _schedina_json(params=None):
             ],
         }
 
-    return {"picks": out, "multipla": multipla, "bankroll": _bankroll()}
+    return {"picks": out, "multipla": multipla, "bankroll": _bankroll}
 
 
 def _health_json(params=None):
