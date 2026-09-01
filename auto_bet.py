@@ -126,17 +126,21 @@ def _too_close_to_start(start_time: str | None) -> bool:
     return start <= datetime.now(timezone.utc) + timedelta(minutes=MIN_MINUTES_TO_START)
 
 
-def run_today_bets(client=None, stake_eur: float | None = None) -> list[dict]:
-    """Piazza le puntate del giorno (dry-run di default). Ritorna il riepilogo.
+def run_today_bets(client=None, stake_eur: float | None = None,
+                    allow_sim: bool = False) -> list[dict]:
+    """Piazza le puntate del giorno. Ritorna il riepilogo.
+
+    - Betfair configurato: dry-run di default (ordini reali solo con
+      BETFAIR_DRY_RUN=0 + BETFAIR_LIVE=1), prezzi dal catalogo Exchange.
+    - allow_sim=True: se Betfair non e' disponibile (o manca il catalogo),
+      piazza puntate SIMULATE con la quota del segnale (mode='sim') — paper
+      test senza Exchange, per addestrare ledger/ML anche senza credenziali.
 
     Non lancia mai eccezioni verso il chiamante: ogni passo fallito viene
     loggato e saltato (fail-closed, come betfair_client).
     """
     if client is None:
         client = get_client()
-    if client is None:
-        logger.info("auto_bet: Betfair non configurato (BETFAIR_APP_KEY assente), salto")
-        return []
     stake_eur = stake_eur if stake_eur is not None else float(
         os.getenv("BET_STAKE_EUR", str(BET_STAKE_DEFAULT_EUR)))
     stake = normalize_stake(stake_eur)
@@ -145,13 +149,26 @@ def run_today_bets(client=None, stake_eur: float | None = None) -> list[dict]:
                        stake_eur)
         return []
 
-    scan = load_latest_scan()
-    if not scan or not scan.get("opportunities"):
-        logger.info("auto_bet: nessun catalogo Betfair in cache, salto")
-        return []
-    if scan.get("day") != datetime.now(timezone.utc).strftime("%Y-%m-%d"):
-        logger.info("auto_bet: catalogo del %s non di oggi, salto", scan.get("day"))
-        return []
+    scan = load_latest_scan() if client else None
+    sim = False
+    if client is None:
+        if not allow_sim:
+            logger.info("auto_bet: Betfair non configurato (BETFAIR_APP_KEY assente), salto")
+            return []
+        sim = True
+        logger.info("auto_bet: Betfair assente, modalita' SIM (paper senza Exchange)")
+    elif not scan or not scan.get("opportunities"):
+        if not allow_sim:
+            logger.info("auto_bet: nessun catalogo Betfair in cache, salto")
+            return []
+        sim = True
+        logger.info("auto_bet: catalogo Betfair assente, modalita' SIM")
+    elif scan.get("day") != datetime.now(timezone.utc).strftime("%Y-%m-%d"):
+        if not allow_sim:
+            logger.info("auto_bet: catalogo del %s non di oggi, salto", scan.get("day"))
+            return []
+        sim = True
+        logger.info("auto_bet: catalogo del %s non di oggi, modalita' SIM", scan.get("day"))
 
     from tracker import bet_exists_open
     placed: list[dict] = []
@@ -160,6 +177,30 @@ def run_today_bets(client=None, stake_eur: float | None = None) -> list[dict]:
             logger.info("auto_bet: puntata gia' aperta per %s (%s), salto",
                         pick["match_id"], pick["esito_key"])
             continue
+        if sim:
+            # Paper senza Exchange: quota del segnale, nessun catalogo.
+            if _too_close_to_start(pick.get("commence")):
+                logger.info("auto_bet: %s vs %s a meno di %d min dall'inizio, salto",
+                            pick["home"], pick["away"], MIN_MINUTES_TO_START)
+                continue
+            price = float(pick["quota"] or 0)
+            if price <= 1.0:
+                logger.info("auto_bet: quota segnale non valida per %s, salto",
+                            pick["match_id"])
+                continue
+            record = {**pick, "price": price, "stake": stake,
+                      "market_id": None, "selection_id": None,
+                      "status": "SUCCESS", "bet_id": None, "mode": "sim"}
+            placed.append(record)
+            try:
+                from tracker import save_bet
+                save_bet(match_id=pick["match_id"], mercato=pick["mercato"],
+                         esito=pick["esito_key"], market_id=None, selection_id=None,
+                         price=price, stake=stake, mode="sim", status="SUCCESS")
+            except Exception as e:
+                logger.warning("auto_bet: salvataggio sim %s: %s", pick["match_id"], e)
+            continue
+
         opp = _find_opportunity(scan["opportunities"], pick)
         if not opp:
             logger.info("auto_bet: nessun mercato Betfair per %s vs %s (%s)",

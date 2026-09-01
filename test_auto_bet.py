@@ -34,8 +34,8 @@ class FakeClient:
 
 
 def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
-                      quota=2.10, status="value"):
-    start = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+                      quota=2.10, status="value", commence=None):
+    start = commence or (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
     tracker.save_match(mid, "Serie A", home, away, start)
     # esito "1" -> best_esito = nome squadra di casa (come da API bookmaker)
     best_esito = home if esito == "1" else (away if esito == "2" else "Draw")
@@ -123,6 +123,39 @@ def test_normalizes_stake_below_minimum(monkeypatch, temp_db):
     # stake 1.00 -> sotto il minimo Exchange Italia: nessun ordine
     placed = auto_bet.run_today_bets(client=fc, stake_eur=1.0)
     assert placed == [] and fc.calls == []
+
+
+def test_sim_senza_betfair(monkeypatch, temp_db):
+    """allow_sim=True senza Betfair: puntate SIM con la quota del segnale
+    (paper test per il ML anche senza credenziali Exchange)."""
+    _seed_value_match(quota=2.20)
+    monkeypatch.setattr(auto_bet, "get_client", lambda: None)
+    placed = auto_bet.run_today_bets(allow_sim=True, stake_eur=5.0)
+    assert len(placed) == 1
+    p = placed[0]
+    assert p["mode"] == "sim"
+    assert p["price"] == 2.20  # quota del segnale
+    assert p["stake"] == 5.0
+    bets = tracker.get_bets()
+    assert len(bets) == 1 and bets[0]["mode"] == "sim"
+
+
+def test_senza_betfair_senza_sim_resta_fail_closed(monkeypatch, temp_db):
+    """Senza allow_sim il comportamento resta invariato: nessuna puntata."""
+    _seed_value_match()
+    monkeypatch.setattr(auto_bet, "get_client", lambda: None)
+    placed = auto_bet.run_today_bets(allow_sim=False, stake_eur=5.0)
+    assert placed == []
+    assert tracker.get_bets() == []
+
+
+def test_sim_salta_vicino_all_inizio(monkeypatch, temp_db):
+    """La guardia dei 15 min vale anche in modalita' SIM."""
+    iniziata = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    _seed_value_match(quota=2.20, commence=iniziata)
+    monkeypatch.setattr(auto_bet, "get_client", lambda: None)
+    placed = auto_bet.run_today_bets(allow_sim=True, stake_eur=5.0)
+    assert placed == []
 
 
 def test_skips_without_betfair(monkeypatch, temp_db):

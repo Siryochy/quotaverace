@@ -420,29 +420,30 @@ def _telegram_send_message(token: str, chat_id: int, text: str):
 
 
 def _auto_bet(params=None, body=None):
-    """POST /api/auto_bet — esegue SUBITO le puntate del giorno (dry-run
-    di default), come il job delle 08:50, e notifica su Telegram gli admin.
+    """POST /api/auto_bet — esegue SUBITO le puntate del giorno (paper test),
+    come il job delle 08:50, e notifica su Telegram gli admin.
 
-    Utile per anticipare l'addestramento del ledger/ML senza aspettare
-    il job: le puntate finiscono in tabella `bets` e vengono saldate a fine
-    partita come sempre.
+    Con allow_sim=True: se Betfair non e' configurato o manca il catalogo,
+    piazza puntate SIMULATE con la quota del segnale (mode='sim') cosi' il
+    ledger/ML si addestra comunque. Le puntate finiscono in tabella `bets`
+    e vengono saldate a fine partita come sempre.
     """
     try:
         from auto_bet import run_today_bets
-        placed = run_today_bets()
+        placed = run_today_bets(allow_sim=True)
     except Exception as e:
         logger.exception("auto_bet endpoint")
         return 500, {"error": str(e)}
     if not placed:
         return {"ok": True, "piazzate": 0, "puntate": [],
-                "nota": "Nessuna puntata: nessun segnale, catalogo Betfair "
-                         "assente o guardie attive (vedi log)."}
+                "nota": "Nessuna puntata: nessun segnale o guardie attive (vedi log)."}
     mode = placed[0]["mode"]
+    mode_label = {"live": "LIVE", "sim": "SIMULAZIONE", "dry-run": "DRY-RUN"}.get(mode, mode)
     total = sum(p["stake"] for p in placed)
     rows = "\n".join(
         f"• {p['home']} vs {p['away']} — {p['esito_key']} @ {p['price']:.2f} "
         f"(€{p['stake']:.2f})" for p in placed)
-    text = (f"🎯 *PUNTATE AUTOMATICHE ({'LIVE' if mode == 'live' else 'DRY-RUN'})*\n"
+    text = (f"🎯 *PUNTATE AUTOMATICHE ({mode_label})*\n"
             f"{len(placed)} puntate, €{total:.2f} di stake\n\n{rows}\n\n"
             f"📌 {'ORDINI REALI' if mode == 'live' else 'Simulazione: nessun ordine reale inviato.'}")
     token = os.getenv("QUOTAVERACE_BOT_TOKEN", "")
