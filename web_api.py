@@ -162,7 +162,15 @@ def _health_json(params=None):
     except Exception:
         quota = None
     creds = {"remaining": quota[0], "cache": quota[1]} if quota else None
-    return {"status": "ok", "api_football_key": bool(os.getenv("API_FOOTBALL_KEY")), "quota": creds}
+    # Diagnostica Betfair SENZA valori (solo stato ok/MANCANTE/non_trovato).
+    betfair = None
+    try:
+        from betfair_client import check_setup
+        betfair = check_setup()
+    except Exception:
+        betfair = None
+    return {"status": "ok", "api_football_key": bool(os.getenv("API_FOOTBALL_KEY")),
+            "quota": creds, "betfair": betfair}
 
 
 def _segnali_json(params=None):
