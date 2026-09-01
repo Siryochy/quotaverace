@@ -13,6 +13,9 @@ OFFICIAL_CUP_KEYS = {
     "Copa del Rey": "soccer_spain_copa_del_rey",
     "Coupe de France": "soccer_france_coupe_de_france",
     "DFB Pokal": "soccer_germany_dfb_pokal",
+    "FA Cup": "soccer_fa_cup",
+    "EFL Cup": "soccer_england_efl_cup",
+    "Copa Libertadores": "soccer_conmebol_copa_libertadores",
 }
 
 
@@ -42,3 +45,8 @@ def test_roster_coppe_coprono_le_top():
     assert "Paris Saint-Germain" in ALL_LEAGUES["Coupe de France"]
     assert "Bayern Munich" in ALL_LEAGUES["DFB Pokal"]
     assert "Inter" in ALL_LEAGUES["Champions League"]
+    # coppe internazionali: roster = merge dei campionati d'origine
+    assert "Manchester City" in ALL_LEAGUES["FA Cup"]
+    assert "Leeds United" in ALL_LEAGUES["EFL Cup"]
+    assert "Flamengo" in ALL_LEAGUES["Copa Libertadores"]
+    assert "River Plate" in ALL_LEAGUES["Copa Libertadores"]

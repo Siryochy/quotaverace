@@ -638,6 +638,15 @@ EGYPTIAN_PREMIER_LEAGUE = {
     "Al Mokawloon": {"attack_home": 0.85, "attack_away": 0.75, "defense_home": 1.10, "defense_away": 1.15},
 }
 
+# === COPPE INTERNAZIONALI (roster = merge dei campionati da cui attingono) ===
+# Le squadre di League One/Two o dei campionati sudamericani non coperti
+# non hanno rating: le partite che le coinvolgono vengono saltate da
+# _match_team (comportamento voluto: si giocano solo i big match).
+FA_CUP = {**PREMIER_LEAGUE_2025_26, **EFL_CHAMPIONSHIP}
+EFL_CUP = {**PREMIER_LEAGUE_2025_26, **EFL_CHAMPIONSHIP}
+COPA_LIBERTADORES = {**BRASILEIRAO, **ARGENTINA_PRIMERA,
+                     **COLOMBIA_PRIMERA, **CHILE_PRIMERA}
+
 # ============================================
 # DICTIONARY FINALE — TUTTE LE COMPETIZIONI
 # ============================================
@@ -658,6 +667,9 @@ ALL_LEAGUES = {
     "Copa del Rey": COPPA_DEL_REY,
     "Coupe de France": COUPE_DE_FRANCE,
     "DFB Pokal": DFB_POKAL,
+    "FA Cup": FA_CUP,
+    "EFL Cup": EFL_CUP,
+    "Copa Libertadores": COPA_LIBERTADORES,
     "Liga MX": LIGA_MX,
     "MLS": MLS,
     "Brasileirao": BRASILEIRAO,

@@ -155,9 +155,13 @@ cd webapp && npm run build            # build Next.js
   emoji (che richiederebbero Fragment o Premium sull'account proprietario).
 - **Coppe attive**: SPORTS_MAP (odds_api.py) ora interroga anche Champions
   League, Europa League, Conference League, Coppa Italia, Copa del Rey,
-  Coupe de France, DFB Pokal (chiavi ufficiali the-odds-api, verificate sul
-  sito) — 15 leghe totali, +7 chiamate/giorno con cache 24h. I dati Poisson
-  delle coppe erano già in leagues_data.py. Test: test_odds_api.py.
+  Coupe de France, DFB Pokal, FA Cup, EFL Cup, Copa Libertadores (chiavi
+  ufficiali the-odds-api, verificate sul sito) — **18 leghe totali**, con
+  cache 24h. Roster delle coppe in leagues_data.py: le coppe nazionali
+  copiano i campionati (es. Coppa Italia = Serie A), FA/EFL Cup = Premier +
+  Championship, Libertadores = Brasileirao + Argentina + Colombia + Cile
+  (le squadre non coperte saltano per design: si giocano solo i big match).
+  Test: test_odds_api.py.
 - **Webapp**: 8 sezioni live (Dashboard, Calcola, Schedina, Storico, Cassa,
   Calendario, Backtest, Value).
 - **Test**: 327/327 verdi (la suite completa richiede ~4 min: PBKDF2 del

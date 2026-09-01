@@ -23,6 +23,9 @@ SPORTS_MAP = {
     "Copa del Rey": "soccer_spain_copa_del_rey",
     "Coupe de France": "soccer_france_coupe_de_france",
     "DFB Pokal": "soccer_germany_dfb_pokal",
+    "FA Cup": "soccer_fa_cup",
+    "EFL Cup": "soccer_england_efl_cup",
+    "Copa Libertadores": "soccer_conmebol_copa_libertadores",
 }
 
 def _env(name):
