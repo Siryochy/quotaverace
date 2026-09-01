@@ -66,47 +66,80 @@ SPORTS_MAP = {
     "UEFA Nations League": "soccer_uefa_nations_league",
 }
 
-# Rotazione interrogazioni (giorni) per rispettare i 500 crediti/mese del
-# piano free (1 chiamata/lega/giorno): le leghe core ogni giorno, le altre
-# a rotazione. Il TTL di cache effettivo diventa interval*24h.
+# Finestra di ricerca delle partite: 7 giorni. Con la rotazione dei crediti
+# una lega puo' essere interrogata 1 volta a settimana: la finestra ampia
+# garantisce che NESSUNA partita sfugga (una chiamata copre l'intera
+# settimana di calendario).
+QUERY_WINDOW_DAYS = 7
+
+# Rotazione interrogazioni (giorni) calibrata sul piano free the-odds-api:
+# 500 crediti/mese (reset il 1°). Costo totale ~407/mese (13,6/giorno):
+#   ogni 2gg (15/mese): 10 leghe = 150   | ogni 3gg (10/mese): 12 = 120
+#   ogni 7gg (~4/mese): 24 leghe = 103   | ogni 14gg (~2/mese): 12 = 26
+#   ogni 30gg (1/mese): 8 leghe = 8      | TOTALE ~407
+# Con la finestra a 7 giorni, anche le leghe interrogate 1 volta a settimana
+# non perdono partite: vedono tutto il calendario della settimana.
 SPORTS_INTERVAL_DAYS = {
-    # ogni giorno (le leghe con roster + i mercati principali)
-    "Serie A": 1, "Premier League": 1, "La Liga": 1, "Bundesliga": 1,
-    "Ligue 1": 1, "Eredivisie": 1, "Champions League": 1,
-    "Europa League": 1, "Conference League": 1, "Coppa Italia": 1,
-    "Copa del Rey": 1, "Coupe de France": 1, "DFB Pokal": 1,
-    "FA Cup": 1, "EFL Cup": 1, "EFL Championship": 1, "Serie B": 1,
-    "Swiss Super League": 1, "MLS": 1, "Brasileirao": 1,
-    "Liga MX": 1, "Saudi Pro League": 1,
-    # ogni 2 giorni
-    "Primeira Liga": 2, "Allsvenskan": 2, "Eliteserien": 2,
-    "Superliga Danimarca": 2, "Veikkausliiga": 2, "J1 League": 2,
-    "K League 1": 2, "A-League": 2, "Argentina Primera": 2,
-    "Copa Libertadores": 2, "Copa Sudamericana": 2, "Ligue 2": 2,
-    # ogni 3 giorni
-    "Bundesliga 2": 3, "La Liga 2": 3, "League One": 3, "League Two": 3,
-    "3. Liga": 3, "Scottish Premiership": 3, "Austrian Bundesliga": 3,
-    "Belgian First Div": 3, "Greek Super League": 3, "Polish Ekstraklasa": 3,
-    "Russian Premier League": 3, "Turkey Super Lig": 3,
-    # ogni 4 giorni
-    "Brazil Serie B": 4, "Sweden Superettan": 4, "China Super League": 4,
-    "League of Ireland": 4, "Frauen-Bundesliga": 4, "FIFA Club World Cup": 4,
-    "UCL Qualification": 4, "UEFA Women's Champions League": 4,
-    # settimanali (nazionali e tornei rari)
-    "FIFA World Cup": 7, "FIFA World Cup Qualifiers Europe": 7,
-    "FIFA World Cup Qualifiers S.America": 7, "FIFA Women's World Cup": 7,
-    "UEFA Euro": 7, "UEFA Euro Qualifiers": 7, "UEFA Nations League": 7,
-    "Copa America": 7, "CONCACAF Gold Cup": 7, "CONCACAF Leagues Cup": 7,
-    "Africa Cup of Nations": 7,
+    # ogni 2 giorni: i mercati principali (freschezza quote vicino al calcio
+    # d'inizio, meglio per il CLV)
+    "Serie A": 2, "Premier League": 2, "La Liga": 2, "Bundesliga": 2,
+    "Ligue 1": 2, "Eredivisie": 2, "EFL Championship": 2, "Serie B": 2,
+    "Champions League": 2, "Europa League": 2,
+    # ogni 3 giorni: coppe + mercati maggiori
+    "Conference League": 3, "Coppa Italia": 3, "Copa del Rey": 3,
+    "Coupe de France": 3, "DFB Pokal": 3, "FA Cup": 3, "EFL Cup": 3,
+    "Swiss Super League": 3, "MLS": 3, "Brasileirao": 3,
+    "Liga MX": 3, "Saudi Pro League": 3,
+    # ogni 7 giorni: campionati secondari e resto del mondo
+    "Primeira Liga": 7, "Allsvenskan": 7, "Eliteserien": 7,
+    "Superliga Danimarca": 7, "Veikkausliiga": 7, "J1 League": 7,
+    "K League 1": 7, "A-League": 7, "Argentina Primera": 7,
+    "Chile Primera": 7, "Copa Libertadores": 7, "Copa Sudamericana": 7,
+    "Ligue 2": 7, "Bundesliga 2": 7, "La Liga 2": 7, "League One": 7,
+    "League Two": 7, "Scottish Premiership": 7, "Austrian Bundesliga": 7,
+    "Belgian First Div": 7, "Greek Super League": 7, "Polish Ekstraklasa": 7,
+    "Turkey Super Lig": 7, "Russian Premier League": 7,
+    # ogni 14 giorni: tornei con calendario rado
+    "3. Liga": 14, "Brazil Serie B": 14, "Sweden Superettan": 14,
+    "China Super League": 14, "League of Ireland": 14, "Frauen-Bundesliga": 14,
+    "FIFA Club World Cup": 14, "UCL Qualification": 14,
+    "UEFA Women's Champions League": 14, "UEFA Nations League": 14,
+    "Copa America": 14, "CONCACAF Leagues Cup": 14,
+    # ogni 30 giorni: nazionali e tornei rari
+    "FIFA World Cup": 30, "FIFA World Cup Qualifiers Europe": 30,
+    "FIFA World Cup Qualifiers S.America": 30, "FIFA Women's World Cup": 30,
+    "UEFA Euro": 30, "UEFA Euro Qualifiers": 30,
+    "CONCACAF Gold Cup": 30, "Africa Cup of Nations": 30,
 }
+
+# Cap giornaliero di chiamate odds (piano free 500/mese -> ~16/giorno).
+# Le leghe in eccedenza vengono rinviate al giorno dopo (elasticita' degli
+# intervalli: niente partite perse, la finestra a 7 giorni copre).
+DAILY_QUERY_BUDGET = int(os.getenv("ODDS_DAILY_BUDGET", "12"))
 
 
 def interval_for_sport(sport_key: str) -> int:
-    """Giorni tra un'interrogazione e l'altra per una sport key."""
+    """Giorni tra un'interrogazione e l'altra per una sport key.
+    Default 7 (settimanale): se una lega manca dalla tabella, meglio
+    interrogarla poco che tutti i giorni (protezione crediti)."""
     for lg, key in SPORTS_MAP.items():
         if key == sport_key:
-            return SPORTS_INTERVAL_DAYS.get(lg, 1)
-    return 1
+            return SPORTS_INTERVAL_DAYS.get(lg, 7)
+    return 7
+
+
+def is_sport_due(sport_key: str) -> bool:
+    """True se la cache della lega e' scaduta rispetto al suo intervallo
+    (quindi oggi va interrogata l'API, costo 1 credito)."""
+    cache_file = CACHE_DIR / f"toa_{sport_key}.json"
+    if not cache_file.exists():
+        return True
+    try:
+        data = json.loads(cache_file.read_text())
+        ttl = interval_for_sport(sport_key) * 86400
+        return time.time() - data.get("ts", 0) >= ttl
+    except Exception:
+        return True
 
 def _env(name):
     exact = os.getenv(name)

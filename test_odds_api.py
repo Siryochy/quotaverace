@@ -47,13 +47,25 @@ def test_lega_con_roster_ha_dati():
 
 
 def test_rotazione_crediti():
-    """Ogni lega ha un intervallo di interrogazione (rotazione crediti)."""
+    """Ogni lega ha un intervallo esplicito e il costo mensile sta nel
+    piano free the-odds-api (500 crediti/mese)."""
+    from odds_api import interval_for_sport, SPORTS_INTERVAL_DAYS
+    assert interval_for_sport("soccer_epl") == 2
+    assert interval_for_sport("soccer_turkey_super_league") == 7
+    assert interval_for_sport("soccer_uefa_nations_league") == 14
+    # ogni lega in SPORTS_MAP deve avere un intervallo ESPLICITO
+    # (niente default silenziosi: prima "Chile Primera" finiva a 1 = 30/mese)
+    for league, key in SPORTS_MAP.items():
+        assert league in SPORTS_INTERVAL_DAYS, f"{league} senza intervallo"
+        assert interval_for_sport(key) == SPORTS_INTERVAL_DAYS[league]
+
+
+def test_budget_mensile_piano_free():
+    """Costo mensile totale della rotazione <= 460 crediti (500 del piano
+    free, con margine per /scores e trigger manuali)."""
     from odds_api import interval_for_sport
-    assert interval_for_sport("soccer_epl") == 1
-    assert interval_for_sport("soccer_turkey_super_league") == 3
-    assert interval_for_sport("soccer_uefa_nations_league") == 7
-    for league in SPORTS_MAP:
-        assert interval_for_sport(SPORTS_MAP[league]) >= 1
+    cost = sum(30.0 / interval_for_sport(key) for key in SPORTS_MAP.values())
+    assert cost <= 460, f"costo mensile {cost:.0f} oltre il budget free"
 
 
 def test_roster_coppe_coprono_le_top():
@@ -125,9 +137,11 @@ def test_fetch_analizza_anche_squadre_sconosciute(monkeypatch, tmp_path):
     anche le squadre fuori roster vengono analizzate (profilo di default)."""
     import tracker
     import fixture_engine
+    import odds_api
     monkeypatch.setattr(tracker, "DB_PATH", tmp_path / "t.db")
     tracker.init_db()
     monkeypatch.setattr(fixture_engine, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)  # cache vuota -> tutte dovute
     monkeypatch.setenv("ODDS_API_KEY", "test-key")
 
     payload = [
@@ -150,3 +164,28 @@ def test_fetch_analizza_anche_squadre_sconosciute(monkeypatch, tmp_path):
     total, value, skipped = fixture_engine.fetch_and_analyze_today()
     assert total == 2          # ENTRAMBE analizzate (anche le sconosciute)
     assert skipped == []       # niente partite perse in silenzio
+
+
+def test_budget_giornaliero_cap(monkeypatch, tmp_path):
+    """Il tetto giornaliero limita le chiamate API: con budget 1 viene
+    interrogata solo la lega piu' prioritaria (Serie A, intervallo minore)."""
+    import tracker
+    import fixture_engine
+    import odds_api
+    monkeypatch.setattr(tracker, "DB_PATH", tmp_path / "t.db")
+    tracker.init_db()
+    monkeypatch.setattr(fixture_engine, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(fixture_engine, "DAILY_QUERY_BUDGET", 1)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+
+    calls = []
+
+    def fake_fetch(sport=None, **kw):
+        calls.append(sport)
+        return []
+    monkeypatch.setattr(fixture_engine, "fetch_odds", fake_fetch)
+
+    fixture_engine.fetch_and_analyze_today()
+    assert len(calls) == 1
+    assert calls[0] == "soccer_italy_serie_a"  # prima per priorita'

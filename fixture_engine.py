@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 
 from config import DATA_DIR
-from odds_api import fetch_odds, SPORTS_MAP
+from odds_api import (fetch_odds, SPORTS_MAP, QUERY_WINDOW_DAYS,
+                      interval_for_sport, is_sport_due, DAILY_QUERY_BUDGET)
 from leagues_data import ALL_LEAGUES
 from poisson_engine import expected_goals, prob_1x2, prob_over_under, ah_outcome_probs
 from value_filter import (compute_ev, kelly_fraction, kelly_euro, is_sane,
@@ -119,25 +120,41 @@ def get_skipped_matches() -> List[dict]:
 
 
 def fetch_and_analyze_today():
-    """Analizza il calendario delle prossime 28h per tutte le leghe di SPORTS_MAP.
+    """Analizza il calendario delle prossime settimane (QUERY_WINDOW_DAYS,
+    default 7gg) per le leghe di SPORTS_MAP dovute oggi.
+
+    Gestione crediti piano free (500/mese): vengono interrogate SOLO le leghe
+    la cui cache e' scaduta rispetto a SPORTS_INTERVAL_DAYS, in ordine di
+    priorita' (intervallo minore = piu' importante) e con un tetto giornaliero
+    DAILY_QUERY_BUDGET. Le leghe in eccedenza sono rinviate al giorno dopo
+    (la finestra a 7gg copre: niente partite perse).
 
     Ritorna (total_matches, value_count, skipped): skipped e' la lista delle
     partite trovate ma NON analizzate perche' una o entrambe le squadre non
-    sono nel roster di ALL_LEAGUES (gap di copertura, non piu' silenziosi).
+    sono nel roster di ALL_LEAGUES (con la copertura mondiale e' vuota).
     """
     if not os.getenv("ODDS_API_KEY"):
         logger.warning("ODDS_API_KEY mancante, skip calendario")
         return 0, 0, []
     clear_old_matches()
     today = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    tomorrow = (datetime.utcnow() + timedelta(hours=28)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    window_end = (datetime.utcnow() + timedelta(days=QUERY_WINDOW_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     total_matches = 0
     value_count = 0
     rejected_count = 0
     skipped: List[dict] = []
-    for league, sport_key in SPORTS_MAP.items():
+    # Leghe dovute oggi (cache scaduta), in ordine di priorita' (le core prima).
+    due = sorted(((lg, key) for lg, key in SPORTS_MAP.items() if is_sport_due(key)),
+                 key=lambda x: interval_for_sport(x[1]))
+    if len(due) > DAILY_QUERY_BUDGET:
+        rinviate = due[DAILY_QUERY_BUDGET:]
+        logger.warning("Budget giornaliero %d: %d leghe rinviate a domani (%s)",
+                       DAILY_QUERY_BUDGET, len(rinviate),
+                       ", ".join(lg for lg, _ in rinviate[:8]))
+        due = due[:DAILY_QUERY_BUDGET]
+    for league, sport_key in due:
         try:
-            raw = fetch_odds(sport=sport_key, commence_time_from=today, commence_time_to=tomorrow)
+            raw = fetch_odds(sport=sport_key, commence_time_from=today, commence_time_to=window_end)
             for match in raw:
                 mid = match.get("id", "")
                 home_api = match.get("home_team", "")

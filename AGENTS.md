@@ -156,13 +156,18 @@ cd webapp && npm run build            # build Next.js
 - **Copertura MONDIALE (66 competizioni)**: SPORTS_MAP (odds_api.py)
   interroga TUTTE le competizioni di calcio the-odds-api (chiavi ufficiali
   verificate sul sito): top campionati + serie B + coppe europee/internaz.
-  + nazionali. **Rotazione crediti** SPORTS_INTERVAL_DAYS (piano free = 500
-  crediti/mese, reset il 1°): leghe core ogni giorno, altre ogni 2-7 giorni
-  (TTL cache effettivo = interval*24h). **Squadre fuori roster NON vengono
-  piu' saltate**: `_match_team` ritorna il nome API e `expected_goals` usa
-  il profilo di lega di default (i rating reali arrivano coi risultati).
-  Chiave Brasileirao corretta: `soccer_brazil_campeonato` (prima
-  `soccer_brazil_serie_a`, non piu' valida). Test: test_odds_api.py.
+  + nazionali.  **Rotazione crediti piano free** (500 crediti/mese, reset il 1°):
+  SPORTS_INTERVAL_DAYS calibrato su ~407/mese (top leghe ogni 2gg, coppe
+  ogni 3gg, resto ogni 7/14/30gg) + **finestra QUERY_WINDOW_DAYS=7** (una
+  chiamata copre l'intera settimana: nessuna partita persa anche con
+  rotazioni rade) + **cap giornaliero DAILY_QUERY_BUDGET** (default 12,
+  env `ODDS_DAILY_BUDGET`): le leghe in eccedenza sono rinviate al giorno
+  dopo (log warning). Costo mensile verificato dal test
+  test_budget_mensile_piano_free (<= 460). **Squadre fuori roster NON
+  vengono piu' saltate**: `_match_team` ritorna il nome API e
+  `expected_goals` usa il profilo di lega di default (i rating reali
+  arrivano coi risultati). Chiave Brasileirao corretta:
+  `soccer_brazil_campeonato`. Test: test_odds_api.py.
 - **Partite saltate MAI silenziose**: fetch_and_analyze_today traccia le
   partite trovate ma non analizzate → saltate.json + `/api/analisi` (campo
   `saltate`) + sezione nel report. Con la copertura mondiale il campo e'
