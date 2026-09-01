@@ -40,6 +40,15 @@ def _get_env(name: str, default: str = "") -> str:
 # moduli (ODDS_API_KEY, API_FOOTBALL_KEY, ...) sono disponibili ovunque.
 load_dotenv()
 
+# Poi (con precedenza MINORE) la cartella protetta secrets/: i valori qui
+# riempiono solo le variabili ancora mancanti. Su Railway le variabili
+# d'ambiente del progetto hanno la precedenza massima.
+try:
+    from secrets_store import load_secrets_dir
+    load_secrets_dir()
+except Exception:
+    pass  # mai far fallire il bootstrap per una cartella segreti mancante
+
 
 TOKEN = _get_env("QUOTAVERACE_BOT_TOKEN", "")
 BANKROLL_DEFAULT = 100.0
