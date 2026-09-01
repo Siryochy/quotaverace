@@ -111,19 +111,26 @@ def _find_team_league(team_name: str):
             return league
     return None
 
+# Profilo neutro di lega per le squadre fuori roster: con la copertura
+# mondiale ogni partita deve essere analizzabile (le medie di lega fanno da
+# prior, i rating reali arrivano con i risultati accumulati).
+_DEFAULT_TEAM = {"attack_home": 1.0, "attack_away": 1.0,
+                  "defense_home": 1.0, "defense_away": 1.0}
+
+def _team_profile(team_name: str, league):
+    if league is not None:
+        return ALL_LEAGUES[league][team_name]
+    return _DEFAULT_TEAM
+
 def expected_goals(home_team: str, away_team: str):
     home_league = _find_team_league(home_team)
     away_league = _find_team_league(away_team)
-    if home_league is None:
-        raise ValueError(f"Squadra non trovata: {home_team}")
-    if away_league is None:
-        raise ValueError(f"Squadra non trovata: {away_team}")
-    
-    if home_league != away_league:
-        avg_hg, avg_ag = 1.50, 1.30
-    else:
+
+    if home_league == away_league and home_league is not None:
         avg_hg, avg_ag = LEAGUE_AVGS.get(home_league, (1.50, 1.30))
-    
+    else:
+        avg_hg, avg_ag = 1.50, 1.30
+
     try:
         from rating_engine import get_rating
         _rh = get_rating(home_team) or {}
@@ -133,8 +140,8 @@ def expected_goals(home_team: str, away_team: str):
     if _rh and _ra:
         home_data, away_data = _rh, _ra
     else:
-        home_data = ALL_LEAGUES[home_league][home_team]
-        away_data = ALL_LEAGUES[away_league][away_team]
+        home_data = _team_profile(home_team, home_league)
+        away_data = _team_profile(away_team, away_league)
     lam_h = avg_hg * home_data["attack_home"] * away_data["defense_away"]
     lam_a = avg_ag * away_data["attack_away"] * home_data["defense_home"]
     return lam_h, lam_a

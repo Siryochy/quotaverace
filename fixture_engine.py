@@ -73,6 +73,8 @@ TEAM_MAP = {
 def _match_team(api_name: str, league_name: str) -> Optional[str]:
     league_teams = ALL_LEAGUES.get(league_name, {})
     alower = api_name.lower().strip()
+    if not alower:
+        return None
     if alower in TEAM_MAP:
         mapped = TEAM_MAP[alower]
         if mapped in league_teams:
@@ -81,7 +83,10 @@ def _match_team(api_name: str, league_name: str) -> Optional[str]:
         tlower = team.lower()
         if tlower == alower or tlower in alower or alower in tlower:
             return team
-    return None
+    # Copertura mondiale: squadra fuori roster -> si usa il nome API cosi'
+    # com'e'. expected_goals applica il profilo di lega di default e i rating
+    # reali arriveranno coi risultati accumulati: la partita NON sparisce.
+    return api_name
 
 def _persist_skipped(skipped: List[dict]) -> None:
     """Salva le partite saltate (squadre non coperte) per renderle visibili

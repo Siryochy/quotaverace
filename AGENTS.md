@@ -153,20 +153,20 @@ cd webapp && npm run build            # build Next.js
 - **Sticker premium**: inviato prima dei messaggi premium (set pubblico
   `PREMIUM_STICKER_SET`, default "Diamond") — workaround gratis alle custom
   emoji (che richiederebbero Fragment o Premium sull'account proprietario).
-- **Copertura leghe (20)**: SPORTS_MAP (odds_api.py) interroga 20
-  competizioni con chiavi ufficiali the-odds-api (verificate sul sito): 8
-  campionati + Champions/Europa/Conference/Coppa Italia/Copa del Rey/
-  Coupe de France/DFB Pokal/FA Cup/EFL Cup/Copa Libertadores + **EFL
-  Championship** (soccer_efl_champ) + **Swiss Super League**
-  (soccer_switzerland_superleague). Roster in leagues_data.py: West Ham e
-  Wolves retrocesse sono in Championship (merge con Premier), Svizzera con
-  alias FC Zurich/Zürich per l'umlaut. Coppa Italia = Serie A + Serie B
-  (fix Parma-Cremonese).
+- **Copertura MONDIALE (66 competizioni)**: SPORTS_MAP (odds_api.py)
+  interroga TUTTE le competizioni di calcio the-odds-api (chiavi ufficiali
+  verificate sul sito): top campionati + serie B + coppe europee/internaz.
+  + nazionali. **Rotazione crediti** SPORTS_INTERVAL_DAYS (piano free = 500
+  crediti/mese, reset il 1°): leghe core ogni giorno, altre ogni 2-7 giorni
+  (TTL cache effettivo = interval*24h). **Squadre fuori roster NON vengono
+  piu' saltate**: `_match_team` ritorna il nome API e `expected_goals` usa
+  il profilo di lega di default (i rating reali arrivano coi risultati).
+  Chiave Brasileirao corretta: `soccer_brazil_campeonato` (prima
+  `soccer_brazil_serie_a`, non piu' valida). Test: test_odds_api.py.
 - **Partite saltate MAI silenziose**: fetch_and_analyze_today traccia le
-  partite trovate ma non analizzate (squadre fuori roster) → saltate.json
-  + ritorno API `/api/analisi` (campo `saltate`) + sezione nel report
-  giornaliero "⚠️ Partite non coperte (fuori roster)". Test:
-  test_odds_api.py.
+  partite trovate ma non analizzate → saltate.json + `/api/analisi` (campo
+  `saltate`) + sezione nel report. Con la copertura mondiale il campo e'
+  vuoto per design (ogni partita e' analizzata).
 - **Webapp**: 8 sezioni live (Dashboard, Calcola, Schedina, Storico, Cassa,
   Calendario, Backtest, Value).
 - **Test**: 327/327 verdi (la suite completa richiede ~4 min: PBKDF2 del
