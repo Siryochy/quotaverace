@@ -71,6 +71,14 @@ def test_match_team_copre_nuove_leghe():
     from fixture_engine import _match_team
     assert _match_team("West Ham", "EFL Championship") == "West Ham"
     assert _match_team("Wolves", "EFL Championship") == "Wolves"
+    # l'API the-odds-api usa i nomi completi: alias obbligatori
+    assert _match_team("West Ham United", "EFL Championship") == "West Ham"
+    assert _match_team("Wolverhampton Wanderers", "EFL Championship") == "Wolves"
+    assert _match_team("Blackburn Rovers", "EFL Championship") == "Blackburn"
+    assert _match_team("Southampton", "EFL Championship") == "Southampton"
+    assert _match_team("Bolton Wanderers", "EFL Championship") == "Bolton Wanderers"
+    assert _match_team("Lincoln City", "EFL Championship") == "Lincoln City"
+    assert _match_team("Birmingham City", "EFL Championship") == "Birmingham City"
     assert _match_team("Young Boys", "Swiss Super League") == "Young Boys"
     assert _match_team("FC Zurich", "Swiss Super League") == "FC Zurich"
     # l'API puo' usare l'umlaut o la forma corta: entrambe devono matchare

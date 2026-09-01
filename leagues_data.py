@@ -142,6 +142,10 @@ EFL_CHAMPIONSHIP = {
     # Championship (es. West Ham vs Wolves il 1/9/2026 veniva persa).
     "West Ham": {"attack_home": 1.15, "attack_away": 1.00, "defense_home": 0.90, "defense_away": 0.95},
     "Wolves": {"attack_home": 1.00, "attack_away": 0.90, "defense_home": 1.00, "defense_away": 1.05},
+    "Southampton": {"attack_home": 0.95, "attack_away": 0.80, "defense_home": 1.10, "defense_away": 1.15},
+    "Birmingham City": {"attack_home": 0.95, "attack_away": 0.85, "defense_home": 1.05, "defense_away": 1.10},
+    "Lincoln City": {"attack_home": 0.85, "attack_away": 0.75, "defense_home": 1.10, "defense_away": 1.15},
+    "Bolton Wanderers": {"attack_home": 0.90, "attack_away": 0.80, "defense_home": 1.05, "defense_away": 1.10},
 }
 
 SERIE_B = {
