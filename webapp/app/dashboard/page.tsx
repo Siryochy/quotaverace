@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
+import SeverityBadge, { ALERT_TYPE_META } from '../../components/SeverityBadge'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || ''
 
@@ -26,12 +27,6 @@ const DEMO = {
 }
 
 type Signal = { match_id: string; evento: string; esito: string; quota: number; ev?: number; alert_type: string; severity: string; total_move_pct: number; first_price?: number; last_price?: number; n_snapshots?: number; league?: string }
-
-const TYPE_META: Record<string, { label: string; cls: string; desc: string }> = {
-  steam: { label: '🔥 STEAM', cls: 'bg-orange-900 text-orange-300', desc: 'Sharp money in entrata: movimento improvviso del mercato.' },
-  crash: { label: '🚨 CROLLO QUOTA', cls: 'bg-red-900 text-red-300', desc: 'Edge in erosione: esegui subito o scarta il segnale.' },
-  rlm: { label: '⚠️ RLM', cls: 'bg-yellow-900 text-yellow-300', desc: 'Il prezzo si muove contro il pubblico: possibile money sharp.' },
-}
 
 export default function Dashboard() {
   const [data, setData] = useState<any>(null)
@@ -118,12 +113,10 @@ export default function Dashboard() {
                 const ev = Number(v.ev) * 100
                 const strong = ev >= 8
                 return (
-                  <div key={i} className="bg-gray-900 rounded-lg p-4">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="font-medium">{v.evento}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded ${strong ? 'bg-emerald-900 text-emerald-300' : 'bg-yellow-900 text-yellow-300'}`}>
-                        {strong ? '🔥 Strong value' : '🟡 Value'}
-                      </span>
+                  <div key={i} className={`bg-gray-900 rounded-lg p-4 border-l-4 ${strong ? 'border-orange-500' : 'border-emerald-500'}`}>
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <span className="font-medium truncate">{v.evento}</span>
+                      <SeverityBadge type={strong ? 'strong' : 'value'} />
                     </div>
                     <div className="text-sm text-gray-400">
                       {v.esito} @ <b className="text-gray-200">{Number(v.quota).toFixed(2)}</b>
@@ -169,14 +162,17 @@ export default function Dashboard() {
           ) : (
             <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
               {alerts.slice(0, 5).map((a, i) => {
-                const meta = TYPE_META[a.alert_type] || TYPE_META.rlm
+                const meta = ALERT_TYPE_META[a.alert_type] || ALERT_TYPE_META.rlm
                 const move = Number(a.total_move_pct)
                 return (
-                  <div key={i} className="bg-gray-900 rounded-lg p-4">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="font-medium text-sm">{a.evento}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded ${meta.cls}`}>
-                        {meta.label}{a.severity === 'urgent' ? ' · URGENTE' : ''}
+                  <div key={i} className={`bg-gray-900 rounded-lg p-4 border-l-4 ${meta.border}`}>
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <span className="font-medium text-sm truncate">{a.evento}</span>
+                      <span className="flex items-center gap-1.5 shrink-0">
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded bg-gray-700 text-gray-200`}>
+                          {meta.emoji} {meta.label}
+                        </span>
+                        <SeverityBadge type={a.severity === 'urgent' ? 'urgent' : 'warning'} />
                       </span>
                     </div>
                     <div className="text-sm text-gray-400">

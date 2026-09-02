@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
+import SeverityBadge, { ALERT_TYPE_META } from '../../components/SeverityBadge'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || ''
 
@@ -41,12 +42,6 @@ type Alert = {
   first_price?: number
   last_price?: number
   n_snapshots?: number
-}
-
-const TYPE_META: Record<string, { label: string; cls: string; desc: string }> = {
-  steam: { label: '🔥 STEAM', cls: 'bg-orange-900 text-orange-300', desc: 'Sharp money in entrata: movimento improvviso del mercato.' },
-  crash: { label: '🚨 CROLLO QUOTA', cls: 'bg-red-900 text-red-300', desc: 'Edge in erosione: esegui subito o scarta il segnale.' },
-  rlm: { label: '⚠️ RLM', cls: 'bg-yellow-900 text-yellow-300', desc: 'Il prezzo si muove contro il pubblico: possibile money sharp.' },
 }
 
 export default function Movimenti() {
@@ -107,14 +102,17 @@ export default function Movimenti() {
       ) : (
         <div className="space-y-4">
           {signals.map((a) => {
-            const meta = TYPE_META[a.alert_type] || TYPE_META.rlm
+            const meta = ALERT_TYPE_META[a.alert_type] || ALERT_TYPE_META.rlm
             const move = Number(a.total_move_pct)
             return (
-              <div key={a.match_id + a.esito} className="bg-gray-800 rounded-xl p-5">
-                <div className="flex items-center justify-between mb-2">
+              <div key={a.match_id + a.esito} className={`bg-gray-800 rounded-xl p-5 border-l-4 ${meta.border}`}>
+                <div className="flex items-center justify-between gap-2 mb-2">
                   <h3 className="font-bold">{a.evento} <span className="text-gray-500 text-sm">[{a.league}]</span></h3>
-                  <span className={`text-xs px-2 py-1 rounded ${meta.cls}`}>
-                    {meta.label} {a.severity === 'urgent' ? '· URGENTE' : ''}
+                  <span className="flex items-center gap-1.5 shrink-0">
+                    <span className={`text-xs font-bold px-2 py-1 rounded ${meta.badge === 'urgent' ? 'bg-red-900 text-red-200' : 'bg-yellow-900 text-yellow-200'}`}>
+                      {meta.emoji} {meta.label}
+                    </span>
+                    <SeverityBadge type={a.severity === 'urgent' ? 'urgent' : 'warning'} />
                   </span>
                 </div>
                 <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">

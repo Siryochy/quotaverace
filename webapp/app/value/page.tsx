@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
+import SeverityBadge from '../../components/SeverityBadge'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || ''
 
@@ -45,13 +46,12 @@ export default function Value() {
         <div className="space-y-4">
           {signals.slice(0, 10).map((s, i) => {
             const ev = Number(s.ev) * 100
+            const strong = ev >= 8
             return (
-              <div key={i} className="bg-gray-800 rounded-xl p-5">
-                <div className="flex items-center justify-between mb-2">
+              <div key={i} className={`bg-gray-800 rounded-xl p-5 border-l-4 ${strong ? 'border-orange-500' : 'border-emerald-500'}`}>
+                <div className="flex items-center justify-between gap-2 mb-2">
                   <h3 className="font-bold">{s.evento}</h3>
-                  <span className={`text-xs px-2 py-1 rounded ${ev >= 8 ? 'bg-emerald-900 text-emerald-300' : 'bg-yellow-900 text-yellow-300'}`}>
-                    {ev >= 8 ? '🔥 Valore forte' : '🟡 Valore positivo'}
-                  </span>
+                  <SeverityBadge type={strong ? 'strong' : 'value'} />
                 </div>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                   <div><span className="text-gray-400 block">🎯 Esito</span><b>{s.esito} @ {Number(s.quota).toFixed(2)}</b></div>
