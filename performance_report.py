@@ -245,12 +245,14 @@ def _bankroll_stats(conn) -> Dict:
     """Statistiche bankroll e drawdown."""
     c = conn.cursor()
     try:
-        row = c.execute("SELECT COALESCE(SUM(amount), 0) FROM cassa").fetchone()
+        # Colonna reale della cassa: importo (prima 'amount' non esisteva →
+        # bankroll sempre 0/fallback: bug che nascondeva il bankroll reale).
+        row = c.execute("SELECT COALESCE(SUM(importo), 0) FROM cassa").fetchone()
         current = float(row[0]) if row else 0.0
 
         peak_row = c.execute(
             "SELECT COALESCE(MAX(running_total), 0) FROM ("
-            "  SELECT SUM(amount) OVER (ORDER BY id) as running_total FROM cassa"
+            "  SELECT SUM(importo) OVER (ORDER BY id) as running_total FROM cassa"
             ")").fetchone()
         peak = float(peak_row[0]) if peak_row else current
 

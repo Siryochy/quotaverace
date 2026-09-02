@@ -120,8 +120,30 @@ cd webapp && npm run build            # build Next.js
 - Il token va rinnovato quando scade o dopo l'esposizione in chat (flusso:
   fine-grained PAT → Contents RW → va nel VAULT, non più nel `.env`).
 
-## Stato attuale (aggiornato al 02/09/2026)
+## Stato attuale (aggiornato al 03/09/2026)
 
+- **Sanity check settlement** (03/09): tripwire anti-contraddizione nei tre
+  settle (bets/predictions/cassa): gol negativi/non numerici/`result`
+  incoerente → la riga NON si chiude (resta aperta + log); verdetto 'won'
+  impossibile coi gol (es. esito 2 con vittoria casa) → bloccato. Inoltre
+  `settlement_sanity_check()` + `heal_settled_contradictions()` nel job di
+  settlement (`_update_results`, watchdog 2h + job serali): se una riga già
+  chiusa ha un verdetto che contraddice i gol CORRENTI (caso Machida: bet
+  marcata won dopo correzione punteggio), viene riaperta e ri-saldata
+  automaticamente, con alert Telegram `🔔 SANITY CHECK SETTLEMENT`.
+  `settle_cassa` ora aggancia le coppie squadre con prefissi club loose
+  (CA Osasuna=Osasuna) e preferisce il match PIÙ RECENTE della coppia.
+- **Fix bankroll reale** (03/09): `bankroll_stats`/`get_peak_bankroll`/
+  `_bankroll_stats` usavano `SUM(cassa.amount)` ma la colonna è `importo`
+  → bankroll sempre 0/fallback (auto_bet usava €100 fisso). Corretto;
+  dashboard e schedina ora mostrano il bankroll reale (default solo se
+  cassa vuota).
+- **Dashboard webapp estesa** (03/09): nuove sezioni Calibrazione per
+  mercato (ROI vs EV atteso), Puntate automatiche, CLV (raw/vig-free/
+  vs Pinnacle) e streak — dati reali da `/api/dashboard` (performance_report).
+  Layout con evidenziazione della pagina attiva.
+- **Report giornaliero**: nuova sezione `📊 Stato` con streak attuale
+  (vittorie/perse di fila + max) e bankroll reale con peak/drawdown.
 - **Deploy Railway**: Online, volume montato, bot in polling, health 200.
   **Consegna notifiche Telegram VERIFICATA** (test end-to-end 01/09):
   `POST /api/test_notify` con la chiave giusta ha consegnato il messaggio al

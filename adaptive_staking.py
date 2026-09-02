@@ -227,8 +227,8 @@ def get_peak_bankroll(chat_id: int = None) -> float:
     try:
         # Ultimo bankroll dal ledger cassa
         row = conn.execute(
-            "SELECT MAX(amount) FROM ("
-            "  SELECT SUM(amount) as amount FROM cassa"
+            "SELECT MAX(importo) FROM ("
+            "  SELECT SUM(importo) as importo FROM cassa"
             ")").fetchone()
         if row and row[0]:
             return float(row[0])
@@ -243,15 +243,15 @@ def bankroll_stats() -> Dict:
     """Statistiche del bankroll per il report."""
     conn = _get_conn()
     try:
-        # Bankroll attuale
+        # Bankroll attuale (colonna reale della cassa: importo, non amount)
         row = conn.execute(
-            "SELECT COALESCE(SUM(amount), 0) FROM cassa").fetchone()
+            "SELECT COALESCE(SUM(importo), 0) FROM cassa").fetchone()
         current = float(row[0]) if row else 0.0
 
         # Peak
         peak_row = conn.execute(
             "SELECT COALESCE(MAX(running_total), 0) FROM ("
-            "  SELECT SUM(amount) OVER (ORDER BY id) as running_total"
+            "  SELECT SUM(importo) OVER (ORDER BY id) as running_total"
             "  FROM cassa"
             ")").fetchone()
         peak = float(peak_row[0]) if peak_row else current
@@ -259,7 +259,7 @@ def bankroll_stats() -> Dict:
         # Puntate recenti (ultime 24h)
         yesterday = (datetime.now() - timedelta(days=1)).isoformat()
         bets_row = conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(amount), 0) "
+            "SELECT COUNT(*), COALESCE(SUM(importo), 0) "
             "FROM cassa WHERE data >= ?", (yesterday,)).fetchone()
         bets_24h = bets_row[0] if bets_row else 0
         spent_24h = float(bets_row[1]) if bets_row else 0.0

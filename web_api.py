@@ -102,14 +102,41 @@ def _dashboard_json(params=None):
         per_mercato = predictions_summary()
     except Exception:
         pass
+    # Dati reali dal DB: bankroll (colonna importo), streak, CLV, puntate
+    # automatiche, drawdown — stessi numeri del report Telegram/backtest.
+    extra = {}
+    try:
+        from performance_report import get_performance
+        perf = get_performance(days=30)
+        extra = {
+            "streaks": perf.get("streaks", {}),
+            "clv": perf.get("clv", {}),
+            "auto_bets": perf.get("bets", {}),
+            "bankroll_stats": perf.get("bankroll", {}),
+            "predictions": perf.get("predictions", {}),
+        }
+    except Exception:
+        pass
+    # Bankroll REALE (SUM cassa.importo) invece del default env: si usa il
+    # valore reale SOLO se c'e' del movimento in cassa, altrimenti resta il
+    # bankroll di riferimento (BANKROLL_DEFAULT).
+    bankroll = _bankroll()
+    try:
+        from adaptive_staking import bankroll_stats
+        _bs = bankroll_stats()
+        if _bs.get("current"):
+            bankroll = _bs["current"]
+    except Exception:
+        pass
     return {
-        "bankroll": _bankroll(),
+        "bankroll": bankroll,
         "roi_30gg": roi,
         "segnali_oggi": today_count,
         "chiusi_30gg": closed,
         "hit_rate": summary.get("hit_rate", 0.0),
         "ultime_value": value,
         "per_mercato": per_mercato,
+        **extra,
     }
 
 
@@ -129,8 +156,9 @@ def _schedina_json(params=None):
     try:
         from adaptive_staking import adaptive_stake, bankroll_stats
         _bs = bankroll_stats()
-        bankroll = _bs.get("current", _bankroll())
-        _peak = _bs.get("peak", bankroll)
+        # Bankroll reale solo se la cassa ha movimento, altrimenti default
+        bankroll = _bs.get("current") or _bankroll()
+        _peak = _bs.get("peak") or bankroll
         _adaptive = True
     except ImportError:
         _adaptive = False

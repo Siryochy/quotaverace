@@ -52,6 +52,23 @@ class TestDashboard:
         # il segnale pendente appare tra le ultime value bet
         assert len(d["ultime_value"]) >= 1
 
+    def test_dashboard_bankroll_reale_da_cassa(self):
+        """Con movimento in cassa, il bankroll mostrato è il SUM reale
+        (colonna importo) e non il default env — bug amount/importo fixato."""
+        tracker.save_cassa_entry("Inter vs Napoli", "1", 2.1, 10.0)
+        tracker.save_cassa_entry("Roma vs Milan", "2", 3.0, 20.0)
+        d = web_api._dashboard_json()
+        assert d["bankroll"] == pytest.approx(30.0)
+
+    def test_dashboard_include_nuove_sezioni(self):
+        """La dashboard espone streak, CLV, auto_bets e per_mercato."""
+        d = web_api._dashboard_json()
+        assert "streaks" in d
+        assert "clv" in d
+        assert "auto_bets" in d
+        assert "per_mercato" in d
+        assert "bankroll_stats" in d
+
 
 class TestStorico:
     def test_storico_vuoto(self, monkeypatch):

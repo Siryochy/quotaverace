@@ -917,6 +917,30 @@ def format_daily_report(since: str, label: str) -> str:
     except Exception as e:
         logger.warning("audit ML nel report fallito: %s", e)
 
+    # Streak + bankroll/drawdown: il polso del periodo (stessi numeri del
+    # backtest). Streak dalle previsioni chiuse, bankroll dalla cassa reale.
+    try:
+        from performance_report import _calc_streaks, _bankroll_stats
+        conn = _get_conn(); c = conn.cursor()
+        end = datetime.now().strftime("%Y-%m-%d")
+        streaks = _calc_streaks(conn, since, end)
+        br = _bankroll_stats(conn)
+        conn.close()
+        parts = []
+        if streaks["current_streak"]:
+            if streaks["current_type"] == "won":
+                parts.append(f"🔥 {streaks['current_streak']} vittorie di fila")
+            else:
+                parts.append(f"📉 {streaks['current_streak']} perse di fila")
+            parts.append(f"max {streaks['max_win_streak']}V/{streaks['max_loss_streak']}P")
+        if br.get("current") is not None:
+            parts.append(f"bankroll €{br['current']:.2f} "
+                         f"(peak €{br['peak']:.2f}, dd {br['drawdown_pct']:.1f}%)")
+        if parts:
+            lines.append("📊 *Stato:* " + " | ".join(parts))
+    except Exception as e:
+        logger.warning("streak/bankroll nel report falliti: %s", e)
+
     missing = _missing_env_keys()
     if missing:
         lines.append("\n⚠️ *Job saltati per chiavi mancanti:*\n   " + "\n   ".join(missing))
