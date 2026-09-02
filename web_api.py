@@ -583,6 +583,23 @@ def _training_json(params=None):
     return {"n": len(rows), "rows": rows}
 
 
+def _market_signals_json(params=None):
+    """GET /api/market_signals — RLM/steam/crollo quota sui segnali attivi.
+
+    Stessi rilevatori dell'alert Telegram (rlm_alert): steam >6% in <30min,
+    crollo >=5% dal primo snapshot, RLM (movimento contro il pubblico).
+    """
+    try:
+        from market_signals import collect_market_signals, summarize_market_signals
+        signals = collect_market_signals()
+    except Exception as e:
+        logger.exception("errore /api/market_signals")
+        return {"summary": {"total": 0, "urgent": 0,
+                            "by_type": {"steam": 0, "crash": 0, "rlm": 0}},
+                "signals": [], "error": str(e)}
+    return {"summary": summarize_market_signals(signals), "signals": signals}
+
+
 def _scan_json(params=None):
     """Catalogo Betfair: cache del job giornaliero, o scan live con ?live=1.
 
@@ -637,6 +654,7 @@ ROUTES = {
     "/api/ratings": _ratings_json,
     "/api/test_notify": _test_notify,
     "/api/training": _training_json,
+    "/api/market_signals": _market_signals_json,
 }
 
 POST_ROUTES = {

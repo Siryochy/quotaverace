@@ -839,33 +839,14 @@ def format_daily_report(since: str, label: str) -> str:
     except Exception:
         pass
 
-    # RLM / Steam: movimenti di linea rilevati nel periodo.
+    # RLM / Steam / Crollo quota: movimenti di linea sui segnali attivi,
+    # classificati dai VERI rilevatori (line_movement + rlm_alert) tramite
+    # l'aggregatore condiviso con la webapp (/api/market_signals).
     try:
-        from line_movement import recent_signals_with_movement
-        movements = recent_signals_with_movement(since_minutes=1440)  # 24h
-        if movements:
-            rlm_count = sum(1 for m in movements
-                           if abs(m.get("price_move_pct", 0)) > 3.0)
-            steam_count = sum(1 for m in movements
-                             if abs(m.get("price_move_pct", 0)) > 6.0)
-            lines.append(f"")
-            lines.append(f"📊 *Line Movement (24h):* {len(movements)} segnali monitorati")
-            if rlm_count:
-                lines.append(f"   ⚠️ *RLM:* {rlm_count} movimenti significativi (>3%)")
-            if steam_count:
-                lines.append(f"   🔥 *Steam:* {steam_count} movimenti improvvisi (>6%)")
-            # Mostra i 3 movimenti piu' significativi
-            top = sorted(movements,
-                        key=lambda m: abs(m.get("price_move_pct", 0)),
-                        reverse=True)[:3]
-            for m in top:
-                move = m.get("price_move_pct", 0)
-                arrow = "↗" if move > 0 else "↙"
-                lines.append(
-                    f"   {arrow} {m.get('evento', '?')} — {m.get('esito', '?')} "
-                    f"{m.get('quota', 0):.2f} ({move:+.1f}%)")
-    except Exception:
-        pass
+        from market_signals import collect_market_signals, format_market_signals_report
+        lines.extend(format_market_signals_report(collect_market_signals()))
+    except Exception as e:
+        logger.warning("segnali mercato nel report falliti: %s", e)
 
     try:
         from tracker import bets_period

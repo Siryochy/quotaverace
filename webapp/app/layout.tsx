@@ -9,6 +9,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <a href="/cassa" className="hover:text-emerald-400 transition whitespace-nowrap font-medium text-emerald-300">💰 Cassa</a>
           <a href="/calendario" className="hover:text-emerald-400 transition whitespace-nowrap">Calendario</a>
           <a href="/value" className="hover:text-emerald-400 transition whitespace-nowrap">Value</a>
+          <a href="/movimenti" className="hover:text-emerald-400 transition whitespace-nowrap">Movimenti</a>
           <a href="/schedina" className="hover:text-emerald-400 transition whitespace-nowrap">Schedina</a>
           <a href="/calcola" className="hover:text-emerald-400 transition whitespace-nowrap">Calcola</a>
           <a href="/backtest" className="hover:text-emerald-400 transition whitespace-nowrap">Backtest</a>

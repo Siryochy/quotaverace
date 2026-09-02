@@ -283,6 +283,14 @@ cd webapp && npm run build            # build Next.js
   trigger URGENTE "CROLLO QUOTA" (calo ≥5% dal primo snapshot, basta 1
   aggiornamento = 2 snapshot per la velocità). Job già attivo ogni 5'
   14:00–23:50 ITA; destinatari: admin + iscritti, cooldown 60'/match.
+- **Segnali mercato nel report + webapp** (market_signals.py, 02/09):
+  aggregatore condiviso che classifica i segnali value attivi con i VERI
+  rilevatori (line_movement + rlm_alert: steam/crollo/RLM, niente più proxy
+  euristici). Esposto in: sezione "Line Movement" di `format_daily_report`,
+  `GET /api/market_signals` (summary + signals ordinati per severità) e
+  pagina webapp `/movimenti` (badge per tipo + card per segnale). CLI
+  `venv/bin/python market_signals.py [--json]`. Fix build webapp: rimossa
+  chiamata morta `proStake` in schedina/page.tsx (rompeva `npm run build`).
 - **Backup centralizzato** (`backup_manager.py`, 02/09): snapshot
   data/backups/<ts>/ con DB (SQLite backup API) + INTEGRITY CHECK
   (PRAGMA quick_check) + dataset ML RIGENERATO (csv+json, sempre fresco e
@@ -290,7 +298,7 @@ cd webapp && npm run build            # build Next.js
   timestamp con microsecondi. Usato da backup_data_job (03:30 UTC + avvio)
   e comando `/backup` (solo admin). VERIFICATO IN PRODUZIONE: integrity ok,
   56 CLV, dataset ML, 78 file data/.
-- **Test**: 519 test verdi (la suite completa richiede ~10 min).
+- **Test**: 536 test verdi (la suite completa richiede ~10 min).
 
 ## Moduli avanzati (Settembre 2026)
 
@@ -349,6 +357,14 @@ cd webapp && npm run build            # build Next.js
   trigger URGENTE "CROLLO QUOTA" (calo ≥5% dal primo snapshot, basta 1
   aggiornamento = 2 snapshot per la velocità). Job già attivo ogni 5'
   14:00–23:50 ITA; destinatari: admin + iscritti, cooldown 60'/match.
+- **Segnali mercato nel report + webapp** (market_signals.py, 02/09):
+  aggregatore condiviso che classifica i segnali value attivi con i VERI
+  rilevatori (line_movement + rlm_alert: steam/crollo/RLM, niente più proxy
+  euristici). Esposto in: sezione "Line Movement" di `format_daily_report`,
+  `GET /api/market_signals` (summary + signals ordinati per severità) e
+  pagina webapp `/movimenti` (badge per tipo + card per segnale). CLI
+  `venv/bin/python market_signals.py [--json]`. Fix build webapp: rimossa
+  chiamata morta `proStake` in schedina/page.tsx (rompeva `npm run build`).
 - **Backup centralizzato** (`backup_manager.py`, 02/09): snapshot
   data/backups/<ts>/ con DB (SQLite backup API) + INTEGRITY CHECK
   (PRAGMA quick_check) + dataset ML RIGENERATO (csv+json, sempre fresco e
@@ -356,7 +372,7 @@ cd webapp && npm run build            # build Next.js
   timestamp con microsecondi. Usato da backup_data_job (03:30 UTC + avvio)
   e comando `/backup` (solo admin). VERIFICATO IN PRODUZIONE: integrity ok,
   56 CLV, dataset ML, 78 file data/.
-- **Test**: 519 test verdi (la suite completa richiede ~10 min).
+- **Test**: 536 test verdi (la suite completa richiede ~10 min).
 - **Sicurezza**: rotazioni token 01/09 e 02/09 verificate (Telegram
   `@Calcifrrbot`, ID 8372645521: `getMe` 200, notifica consegnata al Chat ID
   proprietario 7718157436; GitHub PAT fine-grained nel vault). Token del
@@ -375,7 +391,7 @@ cd webapp && npm run build            # build Next.js
   per identificare mercati critici e ajustare blend/devig/soglie.
 - Eseguire `/backtest_mc` con 15+ previsioni chiuse (oggi 8): le metriche
   Monte Carlo (MaxDD p95) diventano significative solo con abbastanza dati.
-- Mostrare RLM/steam/crollo nel report Telegram e nella webapp.
+✅ Segnali RLM/steam/crollo nel report + webapp (02/09, market_signals.py).
 - Integrazione XGBoost quando il dataset ML raggiunge 500+ campioni
   (attualmente Logistic Regression numpy-only per evitare deps pesanti).
 - Cambiare `IT_OFFSET` da 2 a 1 a fine ottobre (ora legale invernale).

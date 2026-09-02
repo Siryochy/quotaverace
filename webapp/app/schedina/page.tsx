@@ -93,7 +93,6 @@ export default function Schedina() {
           <h2 className="text-xl font-bold">🎯 Single Terbaik Hari Ini</h2>
           <p className="text-amber-400 text-xs">⚠️ Selalu mainkan single. Parlay menghancurkan value.</p>
           {picks.map((p: any, i: number) => {
-            const pro = proStake(Number(p.prob), Number(p.quota))
             const ev = Number(p.ev) * 100
             return (
               <div key={i} className="bg-gray-800 rounded-xl p-5">
