@@ -173,7 +173,9 @@ def test_summary_settled_since(temp_db):
 
 
 def test_day_completed_no_matches(temp_db):
-    assert tracker.day_completed("2020-01-01") is False
+    # Giornata senza partite = "completata" (niente da aspettare): serve al
+    # report EOD in bot.py che invia quando day_completed ritorna True.
+    assert tracker.day_completed("2020-01-01") is True
 
 
 def test_day_completed_waits_for_result(temp_db):

@@ -295,6 +295,10 @@ def run_today_bets(client=None, stake_eur: float | None = None,
                             pick_stake, pick["match_id"], as_result["reason"])
             else:
                 pick_stake = normalize_stake(stake_eur_default)
+            if pick_stake <= 0:
+                logger.info("auto_bet: stake %.2f sotto il minimo per %s, salto",
+                            pick_stake, pick["match_id"])
+                continue
             record = {**pick, "price": price, "stake": pick_stake,
                       "market_id": None, "selection_id": None,
                       "status": "SUCCESS", "bet_id": None, "mode": "sim"}
@@ -337,6 +341,10 @@ def run_today_bets(client=None, stake_eur: float | None = None,
                         pick_stake, pick["match_id"], as_result["reason"])
         else:
             pick_stake = normalize_stake(stake_eur_default)
+        if pick_stake <= 0:
+            logger.info("auto_bet: stake %.2f sotto il minimo Exchange per %s, salto",
+                        pick_stake, pick["match_id"])
+            continue
 
         ins = {"selectionId": opp["selection_id"], "side": "BACK",
                "orderType": "LIMIT",

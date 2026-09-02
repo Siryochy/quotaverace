@@ -7,3 +7,15 @@ node_modules/
 .next/
 quotaverace.db
 *.db
+
+# Segreti: mai nell'immagine (su Railway vivono solo nelle env vars del
+# progetto; in locale vengono caricati in memoria da secrets_store al bootstrap).
+secrets/
+.env
+.env.*
+*.key
+*.pem
+
+# Dati e artefatti locali
+data/
+.git/

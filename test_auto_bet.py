@@ -3,6 +3,7 @@
 Usa un client finto e un catalogo di scansione sintetico: nessuna chiamata
 di rete, nessun ordine reale.
 """
+import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -59,6 +60,10 @@ def _scan(day=None, price=2.10, start_offset_h=3):
 
 
 def test_places_dry_run_bet(monkeypatch, temp_db):
+    # Stake fisso: forza il fallback disabilitando adaptive_staking (import
+    # fallito -> run_today_bets usa stake_eur). Lo stake ADATTIVO e' testato
+    # in test_auto_bet_usa_stake_adaptivo.
+    monkeypatch.setitem(sys.modules, "adaptive_staking", None)
     _seed_value_match()
     scan = _scan(price=2.20)
     monkeypatch.setattr(auto_bet, "load_latest_scan", lambda: scan)
@@ -117,6 +122,9 @@ def test_skips_stale_catalogue(monkeypatch, temp_db):
 
 
 def test_normalizes_stake_below_minimum(monkeypatch, temp_db):
+    # Guardia minimo Exchange sul percorso a stake fisso (adaptive disattivo:
+    # con Kelly attivo lo stake non dipende da stake_eur).
+    monkeypatch.setitem(sys.modules, "adaptive_staking", None)
     _seed_value_match()
     monkeypatch.setattr(auto_bet, "load_latest_scan", lambda: _scan(price=2.20))
     fc = FakeClient()
@@ -128,6 +136,8 @@ def test_normalizes_stake_below_minimum(monkeypatch, temp_db):
 def test_sim_senza_betfair(monkeypatch, temp_db):
     """allow_sim=True senza Betfair: puntate SIM con la quota del segnale
     (paper test per il ML anche senza credenziali Exchange)."""
+    # Come sopra: fallback a stake fisso per l'assert deterministico.
+    monkeypatch.setitem(sys.modules, "adaptive_staking", None)
     _seed_value_match(quota=2.20)
     monkeypatch.setattr(auto_bet, "get_client", lambda: None)
     placed = auto_bet.run_today_bets(allow_sim=True, stake_eur=5.0)
@@ -138,6 +148,32 @@ def test_sim_senza_betfair(monkeypatch, temp_db):
     assert p["stake"] == 5.0
     bets = tracker.get_bets()
     assert len(bets) == 1 and bets[0]["mode"] == "sim"
+
+
+def test_auto_bet_usa_stake_adaptivo(monkeypatch, temp_db):
+    """Con adaptive_staking disponibile il stake della puntata arriva dal
+    modulo adattivo (Kelly dinamico), non da stake_eur (solo fallback)."""
+    import adaptive_staking
+    calls = {}
+
+    def _fake_adaptive(**kw):
+        calls.update(kw)
+        return {"stake": 7.5, "kelly_fraction": 0.2, "confidence_score": 0.6,
+                "drawdown_factor": 1.0, "raw_stake": 7.5, "capped": False,
+                "reason": "test"}
+
+    monkeypatch.setattr(adaptive_staking, "adaptive_stake", _fake_adaptive)
+    monkeypatch.setattr(adaptive_staking, "bankroll_stats",
+                        lambda: {"current": 100.0, "peak": 100.0})
+    _seed_value_match()
+    monkeypatch.setattr(auto_bet, "load_latest_scan", lambda: _scan(price=2.20))
+    fc = FakeClient()
+    placed = auto_bet.run_today_bets(client=fc, stake_eur=5.0)
+    assert len(placed) == 1
+    assert placed[0]["stake"] == 7.5            # stake adattivo, non 5.0
+    assert calls["odds"] == 2.20                # usa il prezzo Exchange
+    ins = fc.calls[0][1][0]
+    assert ins["limitOrder"]["size"] == 7.5
 
 
 def test_senza_betfair_senza_sim_resta_fail_closed(monkeypatch, temp_db):

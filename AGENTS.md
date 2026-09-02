@@ -26,6 +26,7 @@ ml_ensemble.py      → ensemble Poisson + Logistic Regression (numpy-only)
 line_movement.py    → price snapshots, RLM detection, steam moves
 bookmaker_advantage.py → soft book lag detection vs Pinnacle
 adaptive_staking.py → Kelly frazionato dinamico + drawdown protection
+secure_logging.py   → filtro log: maschera segreti/token, httpx silenzioso
 rating_engine.py    → rating squadre time-decay (shrink usa COUNT reale `n`, NON `wsum`!)
 poisson_engine.py   → modello Poisson/Dixon-Coles
 value_filter.py     → gate EV + mercato, is_sane()
@@ -54,13 +55,16 @@ webapp/             → Next.js (Vercel): dashboard, cassa, schedina, calendario
 
 - API base di produzione: `https://api-production-dffd.up.railway.app`
 - Sito: `https://quotaverace.vercel.app`
+- Shell sul container: `railway ssh --service api` (chiave SSH locale
+  `~/.ssh/id_ed25519` registrata come "quotaverace-debug"; nel container NON
+  c'è la CLI `sqlite3` → interrogare il DB con `python3 -c "..."`).
 - Variabili chiave: `QUOTAVERACE_BOT_TOKEN`, `API_FOOTBALL_KEY`, `RAILWAY_TOKEN`,
   `NEXT_PUBLIC_API_BASE` (nel progetto Vercel `quotaverace`).
 
 ## Comandi utili
 
 ```bash
-venv/bin/python -m pytest -q          # test (240+)
+venv/bin/python -m pytest -q          # test (481+, ~5 min)
 venv/bin/python -c "..."              # script rapidi (usare venv/bin/python, NON python)
 cd webapp && npm run build            # build Next.js
 ```
@@ -79,11 +83,15 @@ cd webapp && npm run build            # build Next.js
 5. **Python**: usare sempre `venv/bin/python`, mai `python` nudo.
 6. **DB**: migrazioni schema con ALTER TABLE idempotente in `tracker.py`
    (già fatto per market_prob/market_edge) — verificare sul volume dopo il deploy.
-7. **Token**: rotazione completata e verificata il **01/09** — GitHub con nuovo
-   PAT fine-grained nel vault, Telegram con nuovo token su `api`/`production` e nel
-   vault. Da ora in poi qualunque token finito in un canale pubblico va considerato
-   compromesso e rotato subito (GitHub: nuovo PAT fine-grained → vault; Telegram:
-   @BotFather → nuovo token → `railway variable set QUOTAVERACE_BOT_TOKEN`).
+7. **Token**: rotazioni completate e verificate il **01/09** e il **02/09**
+   (Telegram attivo su `api`/`production`, `getMe` 200 + notifica consegnata).
+   ⚠️ Il token del 02/09 è stato incollato in chat → considerarlo ESPOSTO:
+   ruotarlo di nuovo alla prossima sessione di sicurezza SENZA incollarlo
+   (Opzione A: utente genera da @BotFather e fa `railway variables --service
+   api --set QUOTAVERACE_BOT_TOKEN=...`; l'agente verifica e fa il merge nel
+   vault senza mai vedere il valore). Qualunque token finito in un canale
+   pubblico va considerato compromesso e rotato subito (GitHub: PAT
+   fine-grained → vault; Telegram: @BotFather).
 
 ## Segreti: vault cifrato (`secrets/`)
 
@@ -96,6 +104,10 @@ cd webapp && npm run build            # build Next.js
   plaintext). Se perdi `SECRETS_MASTER_KEY` senza plaintext, i segreti sono
   persi.
 - Su Railway i segreti restano nelle env vars del progetto (cassaforte vera).
+- `vault --commit` NON è ricorsivo: considera solo i file diretti in
+  `secrets/` (`iterdir`) — le sottocartelle tipo `secrets/betfair/` (cert SSL
+  client) non vengono toccate. MAI mettere `*.key`/`*.pem` direttamente in
+  `secrets/`: verrebbero trattati come segreti e cancellati dal commit.
 
 ## Push automatico (credenziali GitHub)
 
@@ -106,7 +118,7 @@ cd webapp && npm run build            # build Next.js
 - Il token va rinnovato quando scade o dopo l'esposizione in chat (flusso:
   fine-grained PAT → Contents RW → va nel VAULT, non più nel `.env`).
 
-## Stato attuale (ultimo aggiornamento)
+## Stato attuale (aggiornato al 02/09/2026)
 
 - **Deploy Railway**: Online, volume montato, bot in polling, health 200.
   **Consegna notifiche Telegram VERIFICATA** (test end-to-end 01/09):
@@ -119,6 +131,38 @@ cd webapp && npm run build            # build Next.js
   restituisce i verdetti appena emessi e i job (pomeriggio/sera/23:30 e
   `/risultati`) inviano la notifica `🔔 ESITO PUNTATE AUTOMATICHE`
   (✅ VINTA/❌ PERSA/⚪ PUSH con P/L) a iscritti+admin.
+- **Settlement watchdog / self-healing** (`bot.py`, ogni 2h): scarica i
+  risultati e salda bet/previsioni/cassa aperte anche fuori dai job serali,
+  con notifica verdetti. Copre redeploy che saltano i job, cache stantie,
+  API lente. VERIFICATO IN PRODUZIONE (01/09): 3 bet pendenti (Birmingham,
+  Wycombe, Tranmere) saldate automaticamente al primo giro, zero interventi.
+- **Fix cache punteggi** (`odds_api.fetch_scores`): la cache non serve più
+  partite iniziate da >3h con `completed=False` (cache scritta a partita in
+  corso = stantia): refresh forzato, fallback cache solo se l'API fallisce
+  (mai meno dati di prima). Causa radice delle bet rimaste aperte 24h.
+- **Logging sicuro** (`secure_logging.py`, integrato in run_all/web_api/bot):
+  filtro su tutti gli handler che maschera token/chiavi/segreti nei messaggi
+  di log (raccoglie i valori da `os.environ` al bootstrap) + `httpx` a
+  WARNING (prima loggava gli URL Telegram col token in chiaro). Verificato:
+  0 occorrenze del token nei log del nuovo deployment.
+- **.dockerignore rinforzato**: `secrets/`, `.env*`, `data/`, `*.key`,
+  `*.pem`, `.git/` esclusi dall'immagine (il Dockerfile fa `COPY . .` — prima
+  i segreti locali sarebbero finiti nell'immagine Docker).
+- **Betfair (parzialmente configurato)**: certificato SSL client generato
+  (self-signed, 3 anni, in `secrets/betfair/`) e caricato sul volume
+  `/app/data/betfair/client-ssl.pem` (hash verificato); `BETFAIR_CERT_PATH`
+  impostata su Railway. MANCANO ancora `BETFAIR_APP_KEY`/`BETFAIR_USERNAME`/
+  `BETFAIR_PASSWORD` (l'utente deve richiedere l'app key su
+  developer.betfair.com "For My Personal Betting" + caricare il PUBBLICO
+  `client-ssl.crt` su myacc.betfair.it → "Automated Betting Program Access").
+  Finché mancano: `betfair_scan_job` salta e auto_bet resta in SIM. NOTA:
+  i risultati finali NON dipendono da Betfair (the-odds-api + watchdog).
+- **Bugfix 02/09**: `auto_bet.run_today_bets` senza guardia `stake <= 0` sul
+  percorso a stake fisso (possibile bet da €0.00); `web_api._schedina_json`
+  con UnboundLocalError (`_bankroll` locale oscurava la funzione modulo →
+  `/api/schedina` rotto con adaptive attivo). Test aggiornati all'era
+  adaptive: percorso fallback testato con stub `sys.modules["adaptive_staking"]
+  = None` + nuovo test del wiring adaptive (stake Kelly usato davvero).
 - **Dataset ML** (`ml_dataset.py`): export CSV di addestramento da
   predictions+bets JOIN match_analysis (lam_h/lam_a, prob 1/X/2/O) e
   match_results → righe con label_ml (1=vinta). CLI
@@ -132,7 +176,7 @@ cd webapp && npm run build            # build Next.js
   1=problemi) e **integrato nel report giornaliero**: `format_daily_report`
   audita le previsioni/puntate chiuse nel periodo e segnala i problemi
   (per tipo + primi esempi) in `/riepilogo` e nei report automatici.
-- **Vault segreti**: attivo da locale (vault.bin Fernet/PBKDF2, 5 segreti
+- **Vault segreti**: attivo da locale (vault.bin Fernet/PBKDF2, 6 segreti
   cifrati, plaintext cancellati) — vedi sezione "Segreti".
 - **Cassa**: funziona con doppia persistenza (localStorage + backup server sul
   volume). Endpoint: `GET/POST/DELETE /api/cassa`. **Ora si SALDA da sola**
@@ -201,7 +245,7 @@ cd webapp && npm run build            # build Next.js
   vuoto per design (ogni partita e' analizzata).
 - **Webapp**: 8 sezioni live (Dashboard, Calcola, Schedina, Storico, Cassa,
   Calendario, Backtest, Value).
-- **Test**: 327+ test verdi (la suite completa richiede ~4 min).
+- **Test**: 481 test verdi (la suite completa richiede ~5 min).
 
 ## Moduli avanzati (Settembre 2026)
 
@@ -233,18 +277,19 @@ cd webapp && npm run build            # build Next.js
 - **Fix Timezone Job**: tutti i job Telegram ora usano `IT_OFFSET=2` per
   convertire UTC → ora italiana. Prima il report delle 23:50 partiva
   alle 01:50 italiane!
-- **Test**: 327+ test verdi (la suite completa richiede ~4 min).
-- **Sicurezza**: rotazione token completata e verificata il 01/09 — nuovo GitHub
-  PAT nel vault, nuovo token Telegram (`@Calcifrrbot`, ID 8372645521) attivo su
-  `api`/`production`: `getMe` 200 nel deployment 2bf814fb, test notifica
-  consegnato al Chat ID proprietario 7718157436.
-- **Sicurezza**: rotazione token completata e verificata il 01/09 — nuovo GitHub
-  PAT nel vault, nuovo token Telegram (`@Calcifrrbot`, ID 8372645521) attivo su
-  `api`/`production`: `getMe` 200 nel deployment 2bf814fb, test notifica
-  consegnato al Chat ID proprietario 7718157436.
+- **Test**: 481 test verdi (la suite completa richiede ~5 min).
+- **Sicurezza**: rotazioni token 01/09 e 02/09 verificate (Telegram
+  `@Calcifrrbot`, ID 8372645521: `getMe` 200, notifica consegnata al Chat ID
+  proprietario 7718157436; GitHub PAT fine-grained nel vault). Token del
+  02/09 esposto in chat → da ruotare di nuovo (vedi regola 7).
 
 ## Prossimi passi possibili (non urgenti)
 
+- **Completare Betfair**: quando arrivano APP_KEY/USERNAME/PASSWORD →
+  `railway variables --set` + merge nel vault + verifica certlogin dal
+  container + monitorare il primo giro di `betfair_scan_job`/`auto_bet_job`.
+- **Ruotare di nuovo il token Telegram** (esposto in chat il 02/09) via
+  Opzione A, senza incollarlo.
 - Quando il ledger avrà 100+ previsioni chiuse: usare `market_diagnose.py`
   per identificare mercati critici e ajustare blend/devig/soglie.
 - Mostrare RLM/steam nel report Telegram e nella webapp.

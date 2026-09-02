@@ -129,13 +129,13 @@ def _schedina_json(params=None):
     try:
         from adaptive_staking import adaptive_stake, bankroll_stats
         _bs = bankroll_stats()
-        _bankroll = _bs.get("current", _bankroll())
-        _peak = _bs.get("peak", _bankroll)
+        bankroll = _bs.get("current", _bankroll())
+        _peak = _bs.get("peak", bankroll)
         _adaptive = True
     except ImportError:
         _adaptive = False
-        _bankroll = _bankroll()
-        _peak = _bankroll
+        bankroll = _bankroll()
+        _peak = bankroll
 
     picks = get_value_picks_for_schedina()
     out = []
@@ -157,7 +157,7 @@ def _schedina_json(params=None):
         # Stake adattivo per ogni pick
         if _adaptive and p["quota"] and p["quota"] > 1.0:
             as_result = adaptive_stake(
-                bankroll=_bankroll, prob=prob, odds=p["quota"],
+                bankroll=bankroll, prob=prob, odds=p["quota"],
                 market_edge=p.get("market_edge"),
                 status=p.get("status", "value"),
                 peak_bankroll=_peak)
@@ -167,8 +167,8 @@ def _schedina_json(params=None):
         else:
             # Fallback: 1/4 Kelly cap 3%
             kelly_full = (prob * p["quota"] - 1) / (p["quota"] - 1) if p["quota"] > 1 else 0
-            stake = max(0, kelly_full * 0.25 * _bankroll)
-            pick_data["stake"] = round(min(stake, _bankroll * 0.03), 2)
+            stake = max(0, kelly_full * 0.25 * bankroll)
+            pick_data["stake"] = round(min(stake, bankroll * 0.03), 2)
             pick_data["stake_kelly"] = 0.25
             pick_data["stake_reason"] = "fallback (1/4 Kelly)"
         out.append(pick_data)
@@ -187,7 +187,7 @@ def _schedina_json(params=None):
             ],
         }
 
-    return {"picks": out, "multipla": multipla, "bankroll": _bankroll}
+    return {"picks": out, "multipla": multipla, "bankroll": bankroll}
 
 
 def _health_json(params=None):
