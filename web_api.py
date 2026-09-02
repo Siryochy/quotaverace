@@ -201,6 +201,14 @@ def _health_json(params=None):
     # Diagnostica Betfair SENZA valori: distingue assente/vuota/presente
     # (mostra solo la lunghezza, mai il segreto) per capire perche' le
     # shared variables BETFAIR non risultano configurate.
+    # Con BETFAIR_ENABLED=0 l'integrazione e' in stand-by VOLUTO: il flag
+    # esplicito evita che i "MANCANTE" sembrino un problema.
+    betfair_enabled = True
+    try:
+        from betfair_client import enabled as _bf_enabled
+        betfair_enabled = _bf_enabled()
+    except Exception:
+        betfair_enabled = True
     betfair = None
     try:
         from betfair_client import check_setup
@@ -218,7 +226,8 @@ def _health_json(params=None):
         else:
             betfair_raw[v] = f"presente (len {len(val)})"
     return {"status": "ok", "api_football_key": bool(os.getenv("API_FOOTBALL_KEY")),
-            "quota": creds, "betfair": betfair, "betfair_raw": betfair_raw}
+            "quota": creds, "betfair": betfair, "betfair_enabled": betfair_enabled,
+            "betfair_raw": betfair_raw}
 
 
 def _segnali_json(params=None):
@@ -582,6 +591,16 @@ def _scan_json(params=None):
     """
     params = params or {}
     from daily_scan_job import load_latest_scan, run_daily_scan
+    try:
+        from betfair_client import enabled as _bf_enabled
+    except Exception:
+        _bf_enabled = None
+    if _bf_enabled is not None and not _bf_enabled():
+        return 503, {
+            "error": "betfair_disabled",
+            "message": "Integrazione Betfair temporaneamente in stand-by "
+                       "(BETFAIR_ENABLED=0). Quote e refertazione: the-odds-api.",
+        }
     if params.get("live") == "1":
         # ?date=YYYY-MM-DD per scansionare un giorno specifico (default: oggi UTC)
         payload = run_daily_scan(params.get("date") or None)

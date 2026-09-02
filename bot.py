@@ -23,6 +23,7 @@ from fixture_engine import (fetch_and_analyze_today, get_calendar_formatted,
                             get_value_picks_for_schedina, format_schedina, build_multipla_block)
 from daily_scanner import scan_day, group_same_start
 from betfair_client import get_client as get_betfair_client
+from betfair_client import enabled as betfair_enabled
 from daily_scan_job import run_daily_scan
 from surebet_pipeline import run_surebet_alert, format_alert
 from auto_bet import run_today_bets
@@ -328,6 +329,14 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 parse_mode="Markdown")
             return
     client = get_betfair_client()
+    if not betfair_enabled():
+        await update.message.reply_text(
+            "⏸ *Betfair in stand-by*\n\n"
+            "L'integrazione Exchange è temporaneamente disattivata "
+            "(BETFAIR_ENABLED=0). I segnali value, la schedina e il saldaggio "
+            "puntate continuano a funzionare via the-odds-api.",
+            parse_mode="Markdown")
+        return
     if client is None:
         await update.message.reply_text(
             "❌ *Betfair non configurato*\n\n"
@@ -1313,6 +1322,9 @@ async def betfair_scan_job(context: ContextTypes.DEFAULT_TYPE):
 
     Dopo il catalogo lancia la pipeline surebet su dati reali (catalogo
     Betfair + quote the-odds-api in cache) e notifica gli iscritti.
+
+    Con BETFAIR_ENABLED=0 il job NON viene nemmeno schedulato (stand-by
+    totale: nessun log di errore per chiave mancante).
     """
     if not os.getenv("BETFAIR_APP_KEY"):
         logger.info("betfair_scan_job: BETFAIR_APP_KEY assente, salto")
@@ -1477,7 +1489,12 @@ def main() -> None:
                                 first=time(hour=21 - IT_OFFSET, minute=0))
         job_queue.run_daily(report_morning_job, time=time(hour=6, minute=5 - IT_OFFSET))
         job_queue.run_daily(history_sync_job, time=time(hour=8, minute=30 - IT_OFFSET))
-        job_queue.run_daily(betfair_scan_job, time=time(hour=8, minute=45 - IT_OFFSET))
+        if betfair_enabled():
+            # Betfair in stand-by? Nessuna schedulazione: zero rumore nei log.
+            job_queue.run_daily(betfair_scan_job, time=time(hour=8, minute=45 - IT_OFFSET))
+        else:
+            logger.info("BETFAIR_ENABLED=0: betfair_scan_job sospeso "
+                        "(refertazione e auto-bet SIM restano attive via the-odds-api)")
         job_queue.run_daily(auto_bet_job, time=time(hour=8, minute=50 - IT_OFFSET))
         job_queue.run_daily(backup_data_job, time=time(hour=3, minute=30))
         job_queue.run_once(backup_data_job, when=10)  # snapshot di base all'avvio
@@ -1491,10 +1508,11 @@ def main() -> None:
         except ImportError:
             logger.warning("rlm_alert non disponibile, alert RLM disabilitato")
         logger.info("Job Pro schedulati (ora italiana): 03:30 backup / 06:05 riepilogo ieri / "
-                    "08:30 sync / 08:45 scan / 08:50 auto-bet / 14:00 pomeriggio / "
+                    "08:30 sync / %s 08:50 auto-bet / 14:00 pomeriggio / "
                     "14:00-23:50 RLM alert (5') / 17:00 free / 20:00 sera / "
                     "21:30 risultati / 21:00-23:50 EOD (ogni 15') / "
-                    "watchdog settlement (ogni 2h)")
+                    "watchdog settlement (ogni 2h)",
+                    "08:45 scan" if betfair_enabled() else "[scan Betfair sospesa]")
     else: logger.warning("JobQueue non disponibile")
     logger.info("QuotaVerace Pro avviato.")
     application.run_polling()

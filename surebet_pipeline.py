@@ -136,7 +136,15 @@ def run_surebet_alert(target_date: str | None = None) -> list:
     """
     scan = load_latest_scan()
     if scan is None or not scan.get("opportunities"):
-        logger.info("nessun catalogo Betfair in cache: surebet alert saltato")
+        # Con Betfair in stand-by (BETFAIR_ENABLED=0) lo skip è VOLUTO:
+        # silenzioso, non un avviso (il catalogo non arriverà mai).
+        try:
+            from betfair_client import enabled as _bf_enabled
+            loud = _bf_enabled()
+        except Exception:
+            loud = True
+        if loud:
+            logger.info("nessun catalogo Betfair in cache: surebet alert saltato")
         return []
 
     betfair_rows = to_odds_records(scan["opportunities"])

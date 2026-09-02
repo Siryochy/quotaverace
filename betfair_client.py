@@ -303,8 +303,24 @@ class BetfairClient:
         return result
 
 
+def enabled() -> bool:
+    """Switch master Betfair (env BETFAIR_ENABLED, default '1' = attivo).
+
+    Con '0'/'false'/'off'/'no' l'integrazione e' in STAND-BY VOLUTO: i job e
+    i comandi Exchange non girano e nessun log segnala chiavi mancanti (non
+    e' un errore, e' una scelta). NON tocca la refertazione: risultati e
+    saldaggio usano SEMPRE e SOLO the-odds-api; auto_bet prosegue in SIM.
+    """
+    return os.getenv("BETFAIR_ENABLED", "1").strip().lower() not in (
+        "0", "false", "off", "no")
+
+
 def get_client(dry_run: bool | None = None) -> BetfairClient:
-    """Client pronto dalle variabili d'ambiente (o None se non configurato)."""
+    """Client pronto dalle variabili d'ambiente (o None se non configurato
+    o disabilitato via BETFAIR_ENABLED=0 — choke point unico: auto_bet
+    degenera in SIM e la scansione in skip)."""
+    if not enabled():
+        return None
     if not _env("BETFAIR_APP_KEY"):
         return None
     return BetfairClient(dry_run=dry_run)
