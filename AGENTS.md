@@ -33,7 +33,7 @@ value_filter.py     → gate EV + mercato, is_sane()
 backtest.py         → calibrazione EV vs ROI, split "batte il mercato"
 market_diagnose.py  → diagnosi calibrazione per mercato (ROI vs EV)
 odds_ingest.py      → ingestione quote da odds API (cache in data/)
-odds_api.py         → client API-Football (rate limit, quota giornaliera)
+odds_api.py         → client the-odds-api (rate limit, quota giornaliera) — FONTE PRIMARIA: quote E refertazione
 surebet_*.py        → scanner arbitraggio (Betfair ecc.)
 daily_scanner.py    → job mattutino: partite del giorno + analisi
 football_hist.py    → storico risultati (2022-2024) per le ratings
@@ -148,15 +148,24 @@ cd webapp && npm run build            # build Next.js
 - **.dockerignore rinforzato**: `secrets/`, `.env*`, `data/`, `*.key`,
   `*.pem`, `.git/` esclusi dall'immagine (il Dockerfile fa `COPY . .` — prima
   i segreti locali sarebbero finiti nell'immagine Docker).
-- **Betfair (parzialmente configurato)**: certificato SSL client generato
-  (self-signed, 3 anni, in `secrets/betfair/`) e caricato sul volume
-  `/app/data/betfair/client-ssl.pem` (hash verificato); `BETFAIR_CERT_PATH`
-  impostata su Railway. MANCANO ancora `BETFAIR_APP_KEY`/`BETFAIR_USERNAME`/
-  `BETFAIR_PASSWORD` (l'utente deve richiedere l'app key su
-  developer.betfair.com "For My Personal Betting" + caricare il PUBBLICO
-  `client-ssl.crt` su myacc.betfair.it → "Automated Betting Program Access").
-  Finché mancano: `betfair_scan_job` salta e auto_bet resta in SIM. NOTA:
-  i risultati finali NON dipendono da Betfair (the-odds-api + watchdog).
+- **Betfair IN STAND-BY (disattivato dal 02/09)**: switch master
+  `BETFAIR_ENABLED=0` su Railway → `betfair_client.enabled()` False →
+  `get_client()` None (choke point unico), `betfair_scan_job` NON schedulato,
+  `/scan` e `/api/scan` rispondono esplicitamente "betfair_disabled" (503),
+  surebet silenzioso, health mostra `betfair_enabled: false`. ZERO rumore
+  nei log (nessun errore per chiave mancante). Lavoro gia' fatto per il
+  futuro: certificato SSL client su `/app/data/betfair/client-ssl.pem`
+  (volume, hash verificato) + `BETFAIR_CERT_PATH` impostata; mancano solo
+  APP_KEY/USERNAME/PASSWORD. **RIATTIVAZIONE**: `BETFAIR_ENABLED=1` + le 3
+  credenziali + upload del PUBBLICO `secrets/betfair/client-ssl.crt` su
+  myacc.betfair.it ("Automated Betting Program Access").
+- **the-odds-api = FONTE PRIMARIA sia per le quote sia per la refertazione**:
+  risultati e saldaggio bet/previsioni/cassa passano SOLO da
+  `odds_api.fetch_scores` (+ watchdog ogni 2h) — MAI da Betfair. Vincolo
+  garantito da test tripwire (`test_betfair_standby.py`): se il flusso di
+  saldaggio toccasse mai un client Betfair, il test rompe.
+- **auto_bet in SIM**: con Betfair in stand-by il job 08:50 prosegue in
+  modalita' SIM (paper, quota del segnale): alimenta ledger/ML senza Exchange.
 - **Bugfix 02/09**: `auto_bet.run_today_bets` senza guardia `stake <= 0` sul
   percorso a stake fisso (possibile bet da €0.00); `web_api._schedina_json`
   con UnboundLocalError (`_bankroll` locale oscurava la funzione modulo →
@@ -245,7 +254,7 @@ cd webapp && npm run build            # build Next.js
   vuoto per design (ogni partita e' analizzata).
 - **Webapp**: 8 sezioni live (Dashboard, Calcola, Schedina, Storico, Cassa,
   Calendario, Backtest, Value).
-- **Test**: 481 test verdi (la suite completa richiede ~5 min).
+- **Test**: 494 test verdi (la suite completa richiede ~6 min).
 
 ## Moduli avanzati (Settembre 2026)
 
@@ -277,7 +286,7 @@ cd webapp && npm run build            # build Next.js
 - **Fix Timezone Job**: tutti i job Telegram ora usano `IT_OFFSET=2` per
   convertire UTC → ora italiana. Prima il report delle 23:50 partiva
   alle 01:50 italiane!
-- **Test**: 481 test verdi (la suite completa richiede ~5 min).
+- **Test**: 494 test verdi (la suite completa richiede ~6 min).
 - **Sicurezza**: rotazioni token 01/09 e 02/09 verificate (Telegram
   `@Calcifrrbot`, ID 8372645521: `getMe` 200, notifica consegnata al Chat ID
   proprietario 7718157436; GitHub PAT fine-grained nel vault). Token del
@@ -285,9 +294,11 @@ cd webapp && npm run build            # build Next.js
 
 ## Prossimi passi possibili (non urgenti)
 
-- **Completare Betfair**: quando arrivano APP_KEY/USERNAME/PASSWORD →
-  `railway variables --set` + merge nel vault + verifica certlogin dal
-  container + monitorare il primo giro di `betfair_scan_job`/`auto_bet_job`.
+- **Riattivare Betfair** (in stand-by dal 02/09): credenziali APP_KEY/
+  USERNAME/PASSWORD → `railway variables --set` + `BETFAIR_ENABLED=1` +
+  merge nel vault + upload `client-ssl.crt` (PUBBLICO) su myacc.betfair.it +
+  verifica certlogin dal container + monitorare il primo giro di
+  `betfair_scan_job`/`auto_bet_job`.
 - **Ruotare di nuovo il token Telegram** (esposto in chat il 02/09) via
   Opzione A, senza incollarlo.
 - Quando il ledger avrà 100+ previsioni chiuse: usare `market_diagnose.py`
