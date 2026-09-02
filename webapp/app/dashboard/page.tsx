@@ -19,6 +19,18 @@ const DEMO = {
   clv: { n: 0, avg_raw: 0, avg_vf: 0, avg_vs_pinnacle: 0, pending: 0 },
   auto_bets: { n: 0, won: 0, lost: 0, total_stake: 0, pnl: 0, roi: 0 },
   bankroll_stats: { current: 500, peak: 500, drawdown_pct: 0, risk_level: '🟢 OK' },
+  market_signals: {
+    summary: { total: 0, urgent: 0, by_type: { steam: 0, crash: 0, rlm: 0 } },
+    signals: [],
+  },
+}
+
+type Signal = { match_id: string; evento: string; esito: string; quota: number; ev?: number; alert_type: string; severity: string; total_move_pct: number; first_price?: number; last_price?: number; n_snapshots?: number; league?: string }
+
+const TYPE_META: Record<string, { label: string; cls: string; desc: string }> = {
+  steam: { label: '🔥 STEAM', cls: 'bg-orange-900 text-orange-300', desc: 'Sharp money in entrata: movimento improvviso del mercato.' },
+  crash: { label: '🚨 CROLLO QUOTA', cls: 'bg-red-900 text-red-300', desc: 'Edge in erosione: esegui subito o scarta il segnale.' },
+  rlm: { label: '⚠️ RLM', cls: 'bg-yellow-900 text-yellow-300', desc: 'Il prezzo si muove contro il pubblico: possibile money sharp.' },
 }
 
 export default function Dashboard() {
@@ -44,14 +56,18 @@ export default function Dashboard() {
   const ab = d.auto_bets || {}
   const pm = d.per_mercato || {}
   const bs = d.bankroll_stats || {}
+  const ms = d.market_signals || { summary: DEMO.market_signals.summary, signals: [] }
+  const msSummary = ms.summary || {}
+  const alerts: Signal[] = ms.signals || []
   const streakTxt = streaks.current_streak
     ? (streaks.current_type === 'won'
         ? `🔥 ${streaks.current_streak} vittorie di fila`
         : `📉 ${streaks.current_streak} perse di fila`)
     : '—'
+  const value = d.ultime_value || []
 
   return (
-    <main className="p-6 max-w-5xl mx-auto">
+    <main className="p-6 max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-2">
         <h1 className="text-3xl font-bold">📊 Dashboard QuotaVerace</h1>
         <Link href="/schedina" className="text-sm bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg font-medium transition">
@@ -59,17 +75,125 @@ export default function Dashboard() {
         </Link>
       </div>
       {usingDemo && <p className="text-amber-400 text-sm mb-8">⚠️ Backend non raggiungibile — dati dimostrativi.</p>}
+
+      {/* KPI principali — saldo cassa in evidenza */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-        <Card title="💰 Bankroll" value={`€${Number(d.bankroll).toFixed(2)}`} color="emerald" />
+        <div className="p-6 rounded-xl bg-gray-800 border-l-4 border-emerald-500 shadow-lg col-span-1 md:col-span-2">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-gray-400 text-sm">💰 Saldo cassa reale</span>
+            <span className={`text-xs px-2 py-1 rounded ${Number(bs.drawdown_pct ?? 0) > 10 ? 'bg-red-900 text-red-300' : 'bg-emerald-900 text-emerald-300'}`}>
+              {bs.risk_level || '🟢 OK'}
+            </span>
+          </div>
+          <div className="font-bold text-3xl">€{Number(d.bankroll).toFixed(2)}</div>
+          <div className="text-gray-400 text-sm mt-1">
+            Peak €{Number(bs.peak ?? d.bankroll).toFixed(2)} · Drawdown{' '}
+            <span className={Number(bs.drawdown_pct ?? 0) > 0 ? 'text-red-400' : 'text-emerald-400'}>
+              {Number(bs.drawdown_pct ?? 0).toFixed(1)}%
+            </span>
+          </div>
+        </div>
         <Card title="📈 ROI 30gg" value={`${Number(d.roi_30gg).toFixed(1)}%`} color="blue" />
         <Card title="🎯 Segnali Oggi" value={String(d.segnali_oggi)} color="purple" />
-        <Card title="✅ Hit Rate (30gg)" value={`${Number(d.hit_rate).toFixed(1)}%`} color="teal" />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
         <Card title="🔥 Streak attuale" value={streakTxt} color="orange" small />
-        <Card title="📉 Drawdown da picco" value={`${Number(bs.drawdown_pct ?? 0).toFixed(1)}% (${bs.risk_level || '?'})`} color="red" small />
+        <Card title="✅ Hit Rate (30gg)" value={`${Number(d.hit_rate).toFixed(1)}%`} color="teal" small />
         <Card title="📈 CLV vig-free" value={clv.n ? `${Number(clv.avg_vf).toFixed(2)}%` : '—'} color="blue" small />
+      </div>
+
+      {/* Monitor Value Bet + Movimenti di linea */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+        <div className="bg-gray-800 rounded-xl p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-bold">🎯 Value Bet attive</h2>
+            <Link href="/value" className="text-sm text-blue-400 hover:underline">Tutte →</Link>
+          </div>
+          {value.length === 0 ? (
+            <p className="text-gray-500 text-sm">Nessuna value bet in corso.</p>
+          ) : (
+            <div className="space-y-3">
+              {value.slice(0, 5).map((v: any, i: number) => {
+                const ev = Number(v.ev) * 100
+                const strong = ev >= 8
+                return (
+                  <div key={i} className="bg-gray-900 rounded-lg p-4">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-medium">{v.evento}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded ${strong ? 'bg-emerald-900 text-emerald-300' : 'bg-yellow-900 text-yellow-300'}`}>
+                        {strong ? '🔥 Strong value' : '🟡 Value'}
+                      </span>
+                    </div>
+                    <div className="text-sm text-gray-400">
+                      {v.esito} @ <b className="text-gray-200">{Number(v.quota).toFixed(2)}</b>
+                      <span className="mx-2">·</span>
+                      EV <b className={ev >= 0 ? 'text-emerald-400' : 'text-red-400'}>+{ev.toFixed(1)}%</b>
+                      {v.probabilita != null && (
+                        <>
+                          <span className="mx-2">·</span>
+                          Prob {(Number(v.probabilita) * 100).toFixed(0)}%
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="bg-gray-800 rounded-xl p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-bold">📉 Movimenti di linea</h2>
+            <Link href="/movimenti" className="text-sm text-blue-400 hover:underline">Dettaglio →</Link>
+          </div>
+          <div className="grid grid-cols-3 gap-3 mb-4">
+            <div className="p-3 rounded-lg bg-gray-900 border-l-4 border-orange-500 text-center">
+              <div className="text-gray-400 text-sm">🔥 Steam</div>
+              <div className="text-xl font-bold">{msSummary.by_type?.steam ?? 0}</div>
+            </div>
+            <div className="p-3 rounded-lg bg-gray-900 border-l-4 border-red-500 text-center">
+              <div className="text-gray-400 text-sm">🚨 Crollo</div>
+              <div className="text-xl font-bold">{msSummary.by_type?.crash ?? 0}</div>
+            </div>
+            <div className="p-3 rounded-lg bg-gray-900 border-l-4 border-yellow-500 text-center">
+              <div className="text-gray-400 text-sm">⚠️ RLM</div>
+              <div className="text-xl font-bold">{msSummary.by_type?.rlm ?? 0}</div>
+            </div>
+          </div>
+          {alerts.length === 0 ? (
+            <p className="text-gray-500 text-sm">Nessun movimento rilevante sui segnali attivi.<br />
+              <span className="text-xs">Job ogni 5&apos; dalle 14:00 — movimenti &gt; 3% compaiono qui.</span>
+            </p>
+          ) : (
+            <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
+              {alerts.slice(0, 5).map((a, i) => {
+                const meta = TYPE_META[a.alert_type] || TYPE_META.rlm
+                const move = Number(a.total_move_pct)
+                return (
+                  <div key={i} className="bg-gray-900 rounded-lg p-4">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-medium text-sm">{a.evento}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded ${meta.cls}`}>
+                        {meta.label}{a.severity === 'urgent' ? ' · URGENTE' : ''}
+                      </span>
+                    </div>
+                    <div className="text-sm text-gray-400">
+                      {a.esito} @ <b className="text-gray-200">{Number(a.quota).toFixed(2)}</b>
+                      <span className="mx-2">·</span>
+                      <b className={move < 0 ? 'text-red-400' : 'text-emerald-400'}>
+                        {move > 0 ? '↗' : '↙'} {move > 0 ? '+' : ''}{move.toFixed(1)}%
+                      </b>
+                      <span className="mx-2">·</span>
+                      {Number(a.first_price).toFixed(2)} → {Number(a.last_price).toFixed(2)}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
@@ -116,25 +240,6 @@ export default function Dashboard() {
             {Number(clv.pending ?? 0) > 0 && <p className="text-amber-400">⏳ {clv.pending} segnali in attesa di chiusura</p>}
           </div>
         </div>
-      </div>
-
-      <div className="bg-gray-800 rounded-xl p-6">
-        <h2 className="text-xl font-bold mb-4">⚡ Ultime Value Bet</h2>
-        <table className="w-full text-left">
-          <thead><tr className="text-gray-400 border-b border-gray-600"><th className="pb-2">Evento</th><th className="pb-2">Esito</th><th className="pb-2">Quota</th><th className="pb-2">EV</th><th className="pb-2">Prob</th></tr></thead>
-          <tbody>
-            {(d.ultime_value || []).map((v: any, i: number) => (
-              <tr key={i} className="border-b border-gray-700">
-                <td className="py-3">{v.evento}</td>
-                <td className="py-3">{v.esito}</td>
-                <td className="py-3">{Number(v.quota).toFixed(2)}</td>
-                <td className={`py-3 font-bold ${Number(v.ev) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{(Number(v.ev) * 100).toFixed(1)}%</td>
-                <td className="py-3">{v.probabilita != null ? `${(Number(v.probabilita) * 100).toFixed(0)}%` : '-'}</td>
-              </tr>
-            ))}
-            {(d.ultime_value || []).length === 0 && <tr><td className="py-3 text-gray-500" colSpan={5}>Nessuna value bet in corso.</td></tr>}
-          </tbody>
-        </table>
       </div>
     </main>
   )

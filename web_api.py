@@ -128,6 +128,18 @@ def _dashboard_json(params=None):
             bankroll = _bs["current"]
     except Exception:
         pass
+    # Segnali di mercato (RLM/steam/crollo) sugli stessi segnali value attivi:
+    # la dashboard li mostra come monitor, stessi dati del report Telegram.
+    market = {}
+    try:
+        from market_signals import collect_market_signals, summarize_market_signals
+        _signals = collect_market_signals()
+        market = {
+            "summary": summarize_market_signals(_signals),
+            "signals": _signals,
+        }
+    except Exception:
+        pass
     return {
         "bankroll": bankroll,
         "roi_30gg": roi,
@@ -136,6 +148,7 @@ def _dashboard_json(params=None):
         "hit_rate": summary.get("hit_rate", 0.0),
         "ultime_value": value,
         "per_mercato": per_mercato,
+        "market_signals": market,
         **extra,
     }
 

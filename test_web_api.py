@@ -69,6 +69,15 @@ class TestDashboard:
         assert "per_mercato" in d
         assert "bankroll_stats" in d
 
+    def test_dashboard_include_market_signals(self):
+        """La dashboard espone anche gli alert RLM/steam/crollo (stessi dati
+        del report Telegram) per il monitor in pagina."""
+        d = web_api._dashboard_json()
+        assert "market_signals" in d
+        assert "summary" in d["market_signals"]
+        assert "signals" in d["market_signals"]
+        assert d["market_signals"]["summary"]["total"] >= 0
+
 
 class TestStorico:
     def test_storico_vuoto(self, monkeypatch):
