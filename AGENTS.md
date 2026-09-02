@@ -38,6 +38,8 @@ surebet_*.py        → scanner arbitraggio (Betfair ecc.)
 daily_scanner.py    → job mattutino: partite del giorno + analisi
 football_hist.py    → storico risultati (2022-2024) per le ratings
 data/               → cache JSON scan + DB sqlite + modello ensemble
+backtest_mc.py      → backtest walk-forward ensemble+Kelly con Monte Carlo (ROI, MaxDD)
+backup_manager.py   → backup DB+dataset ML (integrity check, rotazione, /backup)
 webapp/             → Next.js (Vercel): dashboard, cassa, schedina, calendario, backtest, value...
 ```
 
@@ -269,7 +271,26 @@ cd webapp && npm run build            # build Next.js
   finto 0) sono escluse dalle medie. Il CLV vig-free -3.85% del 01/09 era
   esattamente 1/1.04-1: artefatto del fallback overround stimato, NON un
   segnale di mercato. Il report mostra il conteggio "in attesa di chiusura".
-- **Test**: 503 test verdi (la suite completa richiede ~5 min).
+- **Backtest & Monte Carlo** (`backtest_mc.py`, 02/09): walk-forward SENZA
+  look-ahead (ensemble addestrato solo sulle giornate precedenti; XGBoost se
+  disponibile, altrimenti LR) + staking con l'ADAPTIVE_STAKING di produzione
+  + 1000 percorsi Monte Carlo: ROI base/mediana/p5-p95, MAX DRAWDOWN
+  base/mediana/p95, P(riduzione), P(≥5 perdite di fila). CLI
+  `venv/bin/python backtest_mc.py --formato` e comando `/backtest_mc [sims]`.
+  Guardia: servono ≥10 righe chiuse (oggi 8: si attivera' da solo con il
+  ledger che cresce — ritornare quando il ledger ha 15+ chiusure).
+- **Alert crollo quota** (rlm_alert.py, 02/09): oltre a RLM/steam, nuovo
+  trigger URGENTE "CROLLO QUOTA" (calo ≥5% dal primo snapshot, basta 1
+  aggiornamento = 2 snapshot per la velocità). Job già attivo ogni 5'
+  14:00–23:50 ITA; destinatari: admin + iscritti, cooldown 60'/match.
+- **Backup centralizzato** (`backup_manager.py`, 02/09): snapshot
+  data/backups/<ts>/ con DB (SQLite backup API) + INTEGRITY CHECK
+  (PRAGMA quick_check) + dataset ML RIGENERATO (csv+json, sempre fresco e
+  già deduplicato) + copia data/. Rotazione BACKUP_KEEP (env, default 7),
+  timestamp con microsecondi. Usato da backup_data_job (03:30 UTC + avvio)
+  e comando `/backup` (solo admin). VERIFICATO IN PRODUZIONE: integrity ok,
+  56 CLV, dataset ML, 78 file data/.
+- **Test**: 519 test verdi (la suite completa richiede ~10 min).
 
 ## Moduli avanzati (Settembre 2026)
 
@@ -316,7 +337,26 @@ cd webapp && npm run build            # build Next.js
   finto 0) sono escluse dalle medie. Il CLV vig-free -3.85% del 01/09 era
   esattamente 1/1.04-1: artefatto del fallback overround stimato, NON un
   segnale di mercato. Il report mostra il conteggio "in attesa di chiusura".
-- **Test**: 503 test verdi (la suite completa richiede ~5 min).
+- **Backtest & Monte Carlo** (`backtest_mc.py`, 02/09): walk-forward SENZA
+  look-ahead (ensemble addestrato solo sulle giornate precedenti; XGBoost se
+  disponibile, altrimenti LR) + staking con l'ADAPTIVE_STAKING di produzione
+  + 1000 percorsi Monte Carlo: ROI base/mediana/p5-p95, MAX DRAWDOWN
+  base/mediana/p95, P(riduzione), P(≥5 perdite di fila). CLI
+  `venv/bin/python backtest_mc.py --formato` e comando `/backtest_mc [sims]`.
+  Guardia: servono ≥10 righe chiuse (oggi 8: si attivera' da solo con il
+  ledger che cresce — ritornare quando il ledger ha 15+ chiusure).
+- **Alert crollo quota** (rlm_alert.py, 02/09): oltre a RLM/steam, nuovo
+  trigger URGENTE "CROLLO QUOTA" (calo ≥5% dal primo snapshot, basta 1
+  aggiornamento = 2 snapshot per la velocità). Job già attivo ogni 5'
+  14:00–23:50 ITA; destinatari: admin + iscritti, cooldown 60'/match.
+- **Backup centralizzato** (`backup_manager.py`, 02/09): snapshot
+  data/backups/<ts>/ con DB (SQLite backup API) + INTEGRITY CHECK
+  (PRAGMA quick_check) + dataset ML RIGENERATO (csv+json, sempre fresco e
+  già deduplicato) + copia data/. Rotazione BACKUP_KEEP (env, default 7),
+  timestamp con microsecondi. Usato da backup_data_job (03:30 UTC + avvio)
+  e comando `/backup` (solo admin). VERIFICATO IN PRODUZIONE: integrity ok,
+  56 CLV, dataset ML, 78 file data/.
+- **Test**: 519 test verdi (la suite completa richiede ~10 min).
 - **Sicurezza**: rotazioni token 01/09 e 02/09 verificate (Telegram
   `@Calcifrrbot`, ID 8372645521: `getMe` 200, notifica consegnata al Chat ID
   proprietario 7718157436; GitHub PAT fine-grained nel vault). Token del
@@ -333,7 +373,9 @@ cd webapp && npm run build            # build Next.js
   Opzione A, senza incollarlo.
 - Quando il ledger avrà 100+ previsioni chiuse: usare `market_diagnose.py`
   per identificare mercati critici e ajustare blend/devig/soglie.
-- Mostrare RLM/steam nel report Telegram e nella webapp.
+- Eseguire `/backtest_mc` con 15+ previsioni chiuse (oggi 8): le metriche
+  Monte Carlo (MaxDD p95) diventano significative solo con abbastanza dati.
+- Mostrare RLM/steam/crollo nel report Telegram e nella webapp.
 - Integrazione XGBoost quando il dataset ML raggiunge 500+ campioni
   (attualmente Logistic Regression numpy-only per evitare deps pesanti).
 - Cambiare `IT_OFFSET` da 2 a 1 a fine ottobre (ora legale invernale).
