@@ -994,6 +994,52 @@ async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = run_backtest()
     await update.message.reply_text(text, parse_mode="Markdown")
 
+
+async def cmd_backtest_mc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/backtest_mc [sims] — Backtest walk-forward ML+Kelly con Monte Carlo.
+
+    ROI atteso, Max Drawdown (base/mediana/p95) e probabilita' di riduzione,
+    simulando lo stesso stack di produzione (ensemble + adaptive staking).
+    """
+    sims = 1000
+    if context.args:
+        try:
+            sims = max(100, min(10000, int(context.args[0])))
+        except ValueError:
+            pass
+    await update.message.reply_text(
+        f"🔄 Backtest walk-forward + Monte Carlo ({sims} simulazioni)...\n"
+        "Può richiedere qualche decina di secondi.")
+    loop = asyncio.get_running_loop()
+    try:
+        from backtest_mc import run_backtest_mc, format_backtest_report
+        res = await loop.run_in_executor(
+            _scan_executor, run_backtest_mc, 30, sims, 100.0)
+        text = format_backtest_report(res)
+    except Exception as e:
+        logger.error("cmd_backtest_mc: %s", e)
+        text = f"❌ Errore backtest MC: {e}"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/backup — snapshot manuale del DB + dataset ML (solo admin)."""
+    admin_ids = _admin_chat_ids()
+    if admin_ids and update.effective_chat.id not in admin_ids:
+        await update.message.reply_text(
+            "⛔ Comando riservato agli admin.")
+        return
+    await update.message.reply_text("💾 Backup in corso...")
+    loop = asyncio.get_running_loop()
+    try:
+        from backup_manager import run_backup, format_backup_report
+        s = await loop.run_in_executor(_scan_executor, run_backup)
+        text = format_backup_report(s)
+    except Exception as e:
+        logger.error("cmd_backup: %s", e)
+        text = f"❌ Errore backup: {e}"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
 async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("🔄 Sincronizzazione risultati storici... (può richiedere qualche minuto per via del rate limit)", parse_mode="Markdown")
     text = run_sync()
@@ -1381,56 +1427,18 @@ def _db_path():
 
 
 async def backup_data_job(context: ContextTypes.DEFAULT_TYPE):
-    """Backup giornaliero dei dati persistenti in DATA_DIR/backups/.
+    """Backup giornaliero dei dati persistenti (delega a backup_manager).
 
-    Copia quotaverace.db (via sqlite3 backup, sicuro anche con connessioni
-    aperte) e la cartella data/ corrente. Tiene gli ultimi BACKUP_KEEP
-    snapshot e rimuove i piu' vecchi, per non far crescere il volume
-    all'infinito.
+    Snapshot in data/backups/<timestamp>/: DB (consistente via backup API),
+    dataset ML fresco (csv+json), cache e log. Tiene gli ultimi BACKUP_KEEP
+    snapshot (env, default 7).
     """
-    from tracker import DB_PATH
-    backup_root = DATA_DIR / "backups"
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    dest = backup_root / stamp
-    dest.mkdir(parents=True, exist_ok=True)
-
+    from backup_manager import run_backup
     try:
-        # DB tramite backup API: coerente anche se qualcun altro ha una
-        # connessione aperta (es. web_api in thread).
-        src_db = DB_PATH
-        if src_db.exists():
-            out = sqlite3.connect(str(dest / "quotaverace.db"))
-            with sqlite3.connect(str(src_db)) as src:
-                src.backup(out)
-            out.close()
+        await asyncio.get_running_loop().run_in_executor(
+            _scan_executor, run_backup)
     except Exception as e:
-        logger.error(f"backup_data_job: errore DB: {e}")
-
-    try:
-        # Copia i file data/ (scan, cache, orders, surebet_log...)
-        for item in DATA_DIR.iterdir():
-            if item.name == "backups" or item == dest:
-                continue
-            target = dest / item.name
-            if item.is_dir():
-                shutil.copytree(item, target, dirs_exist_ok=True)
-            else:
-                shutil.copy2(item, target)
-    except Exception as e:
-        logger.error(f"backup_data_job: errore copia data/: {e}")
-
-    # Pulizia: mantieni solo i BACKUP_KEEP piu' recenti.
-    BACKUP_KEEP = 7
-    try:
-        snaps = sorted((p for p in backup_root.iterdir() if p.is_dir()),
-                       key=lambda p: p.name)
-        for old in snaps[:-BACKUP_KEEP]:
-            shutil.rmtree(old, ignore_errors=True)
-    except Exception as e:
-        logger.error(f"backup_data_job: errore pulizia: {e}")
-
-    logger.info(f"backup_data_job: snapshot {stamp} salvato in {dest} "
-                f"(tiene ultimi {BACKUP_KEEP})")
+        logger.error(f"backup_data_job: {e}")
 
 
 def main() -> None:
@@ -1456,6 +1464,8 @@ def main() -> None:
     application.add_handler(CommandHandler("checknow", cmd_checknow))
     application.add_handler(CommandHandler("risultati", cmd_risultati))
     application.add_handler(CommandHandler("backtest", cmd_backtest))
+    application.add_handler(CommandHandler("backtest_mc", cmd_backtest_mc))
+    application.add_handler(CommandHandler("backup", cmd_backup))
     application.add_handler(CommandHandler("sync", cmd_sync))
     application.add_handler(CommandHandler("quota", cmd_quota))
     application.add_handler(CommandHandler("riepilogo", cmd_riepilogo))

@@ -60,8 +60,42 @@ class TestCheckRlmForSignal:
                "home": "Inter", "away": "Napoli", "league": "Serie A"}
         alert = rlm_alert.check_rlm_for_signal(sig)
         assert alert is not None
-        assert alert["alert_type"] in ("rlm", "steam")
+        # -14% dal primo snapshot: crollo quota (urgent), non semplice RLM
+        assert alert["alert_type"] in ("rlm", "steam", "crash")
         assert alert["total_move_pct"] < 0
+
+    def test_crollo_quota_5pct_con_2_snapshot(self, temp_db):
+        """Crollo >= 5%: alert URGENTE anche con soli 2 snapshot (velocita')."""
+        _seed_signal("m4")
+        _seed_snapshots("m4", "1", [2.10, 1.98])   # -5.7%
+        sig = {"match_id": "m4", "esito": "1", "quota": 2.10,
+               "ev": 0.10, "market_edge": 0.03, "status": "value"}
+        alert = rlm_alert.check_rlm_for_signal(sig)
+        assert alert is not None
+        assert alert["alert_type"] == "crash"
+        assert alert["severity"] == "urgent"
+        assert alert["total_move_pct"] <= rlm_alert.CRASH_ALERT_THRESHOLD
+
+    def test_crollo_format_include_label(self, temp_db):
+        _seed_signal("m5")
+        _seed_snapshots("m5", "X", [3.40, 3.20, 3.10])   # -8.8%
+        sig = {"match_id": "m5", "esito": "X", "quota": 3.40,
+               "ev": 0.08, "market_edge": 0.02, "status": "value"}
+        alert = rlm_alert.check_rlm_for_signal(sig)
+        assert alert is not None and alert["alert_type"] == "crash"
+        text = rlm_alert.format_rlm_alert(alert)
+        assert "CROLLO QUOTA" in text
+        assert "Edge in erosione" in text
+
+    def test_sotto_soglia_crollo_nessun_alert(self, temp_db):
+        """-4.9% non e' crollo: resta nel flusso RLM standard (>=3 snapshot)."""
+        _seed_signal("m6")
+        _seed_snapshots("m6", "1", [2.05, 2.02, 1.96])   # -4.4% < 5%
+        sig = {"match_id": "m6", "esito": "1", "quota": 2.05,
+               "ev": 0.05, "market_edge": 0.02, "status": "value"}
+        alert = rlm_alert.check_rlm_for_signal(sig)
+        # Con 3 snapshot puo' essere rlm (>=3% movimento) ma NON crash
+        assert alert is None or alert["alert_type"] != "crash"
 
     def test_nessun_alert_se_movimento_piccolo(self, temp_db):
         _seed_signal("m3")

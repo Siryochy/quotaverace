@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 # Soglie alert
 RLM_ALERT_THRESHOLD = 3.0     # movimento minimo per alert (3%)
 STEAM_ALERT_THRESHOLD = 6.0   # steam move per alert urgente (6%)
+CRASH_ALERT_THRESHOLD = -5.0  # CROLLO quota: calo >= 5% dal primo snapshot
 MIN_SNAPSHOTS = 3             # almeno 3 snapshot per valutare
 ALERT_COOLDOWN_MINUTES = 60   # no alert ripetuti per lo stesso match entro 60 min
 
@@ -84,7 +85,10 @@ def check_rlm_for_signal(signal: Dict) -> Optional[Dict]:
     snap_key = esito_map.get(esito, esito)
 
     snapshots = get_snapshots(match_id, snap_key)
-    if len(snapshots) < MIN_SNAPSHOTS:
+    # 2 snapshot bastano per il CROLLO quota (alert di velocita'): attenderne
+    # 3 ritarderebbe il segnale di un ciclo (5 min). RLM/steam restano
+    # conservativi (>= MIN_SNAPSHOTS) per evitare falsi positivi da rumore.
+    if len(snapshots) < 2:
         return None
 
     # Calcola movimento totale
@@ -104,6 +108,12 @@ def check_rlm_for_signal(signal: Dict) -> Optional[Dict]:
     if steam:
         alert_type = "steam"
         severity = "urgent"
+    elif total_move_pct <= CRASH_ALERT_THRESHOLD:
+        # CROLLO quota (>= 5% in discesa): edge in erosione, esegui o rivaluta.
+        # Copre i movimenti rapidi che detect_rlm (basato su probabilita')
+        # puo' non classificare come RLM.
+        alert_type = "crash"
+        severity = "urgent"
     elif rlm and abs(total_move_pct) >= RLM_ALERT_THRESHOLD:
         alert_type = "rlm"
         severity = "warning"
@@ -117,7 +127,7 @@ def check_rlm_for_signal(signal: Dict) -> Optional[Dict]:
 
     return {
         "match_id": match_id,
-        "evento": f"{signal['home']} vs {signal['away']}",
+        "evento": f"{signal.get('home', '?')} vs {signal.get('away', '?')}",
         "league": signal.get("league", ""),
         "esito": esito,
         "quota": signal["quota"],
@@ -140,7 +150,8 @@ def format_rlm_alert(alert: Dict) -> str:
     """Formatta un alert RLM per Telegram (Markdown)."""
     severity_emoji = {"urgent": "🔥", "warning": "⚠️", "info": "📊"}
     emoji = severity_emoji.get(alert["severity"], "📊")
-    alert_label = "STEAM MOVE" if alert["alert_type"] == "steam" else "RLM"
+    alert_label = {"steam": "STEAM MOVE", "crash": "CROLLO QUOTA",
+                   "rlm": "RLM"}.get(alert["alert_type"], "RLM")
 
     edge_txt = ""
     if alert.get("market_edge") is not None:
@@ -162,6 +173,9 @@ def format_rlm_alert(alert: Dict) -> str:
     if alert["alert_type"] == "steam":
         lines.append("🔥 *STEAM*: movimento improvviso! Sharp money in entrata.")
         lines.append("⚡ Esegui ORA prima che il mercato si aggiusti.")
+    elif alert["alert_type"] == "crash":
+        lines.append("🚨 *CROLLO QUOTA*: -5% o oltre dal primo rilevamento.")
+        lines.append("⚡ Edge in erosione: esegui subito o scarta il segnale.")
     else:
         if alert["sharp_move"]:
             lines.append("📉 Il prezzo scende → i sharps stanno coprendo l'esito.")
