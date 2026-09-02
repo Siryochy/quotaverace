@@ -308,6 +308,44 @@ class TestRepairVerdictAudit:
         assert row[0] == "lost"
         assert row[1] == pytest.approx(-5.0)
 
+    def test_cassa_non_saldata_su_partita_vecchia(self, temp_db, monkeypatch):
+        """La cassa non deve essere saldata sulla partita VECCHIA della stessa
+        coppia: 'CA Osasuna' (prefisso club) vs la riga 2025 'Osasuna'."""
+        # Partita corrente: CA Osasuna 1-0 Getafe (1 goal → Under 2.5)
+        tracker.save_match("osasuna", "La Liga", "CA Osasuna", "Getafe",
+                           "2026-08-31T19:00:00Z")
+        tracker.save_result("osasuna", "La Liga", "CA Osasuna", "Getafe",
+                            0, 1, "2026-08-31T19:59:59Z")  # salvato INVERTITO
+        # Partita VECCHIA 2025 della stessa coppia (senza prefisso)
+        tracker.save_match("La Liga-1208743", "La Liga", "Osasuna", "Getafe",
+                           "2025-03-16T17:30:00+00:00")
+        tracker.save_result("La Liga-1208743", "La Liga", "Osasuna", "Getafe",
+                            1, 2, "2025-03-16T17:30:00+00:00")
+        # Cassa saldata sulla partita VECCHIA (1-2 = 3 gol → Over vinto)
+        tracker.save_cassa_entry("Osasuna vs Getafe", "Over 2.5", 3.05, 20.0)
+        conn = tracker._get_conn()
+        conn.execute("UPDATE cassa SET esito_finale='won', profit=41.0, "
+                     "settled_at=? WHERE id=1", ("2026-09-01T08:00:00Z",))
+        conn.commit(); conn.close()
+
+        # Punteggio VERO: CA Osasuna 1-0 Getafe (1 goal → Under → LOST -20)
+        true_payload = {"id": "osasuna",
+                        "home_team": "CA Osasuna", "away_team": "Getafe",
+                        "scores": [{"name": "Getafe", "score": 0},
+                                   {"name": "CA Osasuna", "score": 1}],
+                        "completed": True}
+        _patch_repair_fetch(monkeypatch, {"m": true_payload})
+
+        rc = repair_scores.repair(apply=True, days_from=3)
+        assert rc == 0
+
+        conn = tracker._get_conn()
+        row = conn.execute(
+            "SELECT esito_finale, profit FROM cassa WHERE id=1").fetchone()
+        conn.close()
+        assert row[0] == "lost"
+        assert row[1] == pytest.approx(-20.0)
+
     def test_main_clampa_days_from_a_3(self, monkeypatch):
         """the-odds-api risponde 422 a daysFrom>3: il CLI non deve mai
         superare il limite (il default era 7 nel primo rilascio)."""

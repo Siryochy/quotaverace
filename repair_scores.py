@@ -108,6 +108,42 @@ def _expected_outcome(mercato, esito, price, sh, sa, home, away):
     return outcome
 
 
+# Prefissi club comuni ignorati nel match per nome (settle_cassa usa _norm_team
+# che elimina solo fc/cf: 'CA Osasuna' non agganciava 'Osasuna' → la cassa
+# poteva finire saldata contro una partita VECCHIA della stessa coppia).
+_CLUB_PREFIXES = ("ca ", "ac ", "as ", "cd ", "fc ", "cf ", "de ",
+                   "ss ", "sc ", "us ", "ud ", "sd ", "at ", "sv ")
+
+
+def _loose_team(name: str) -> str:
+    """Normalizzazione TOLERANTE per il match cassa: _norm_team + rimozione
+    dei prefissi club comuni (es. 'CA Osasuna' → 'osasuna')."""
+    t = _norm_team(name)
+    for _ in range(3):
+        changed = False
+        for p in _CLUB_PREFIXES:
+            if t.startswith(p):
+                t = t[len(p):].strip()
+                changed = True
+        if not changed:
+            break
+    return t or _norm_team(name)
+
+
+def _loose_pair(home: str, away: str) -> tuple:
+    return (_loose_team(home), _loose_team(away))
+
+
+def _partita_pair(partita: str) -> tuple:
+    """Coppia loose (home, away) da una stringa partita cassa
+    ('Serie A – Osasuna vs Getafe' → ('osasuna', 'getafe'))."""
+    clean = str(partita).split(" – ")[-1].strip() if " – " in str(partita) else str(partita)
+    if " vs " not in clean:
+        return None
+    parts = clean.split(" vs ")
+    return _loose_pair(parts[0].strip(), parts[1].strip())
+
+
 def _find_verdict_mismatches(c, results: dict) -> list:
     """Righe ledger saldate il cui verdetto NON corrisponde al punteggio vero.
 
@@ -118,21 +154,19 @@ def _find_verdict_mismatches(c, results: dict) -> list:
 
     Ritorna una lista di righe (tipo, id, match_id|partita, esito, atteso).
     """
-    from tracker import _norm_team as nt
     mismatches = []
-    # Mappa coppia-squadre normalizzata -> (sh, sa) per la cassa
+    # Mappa coppia-squadre LOOSE -> (sh, sa) per la cassa (solo partite
+    # CORRENTI dentro `results`, mai le vecchie della stessa coppia)
     pair_map = {}
     for mid, (lg, home, away, sh, sa) in results.items():
-        pair_map.setdefault((nt(home), nt(away)), (sh, sa))
+        pair_map[_loose_pair(home, away)] = (sh, sa)
 
     for row in _settled_ledger_rows(c):
         kind, rid, ref, mercato, esito, price, stored = row
         if kind == "cassa":
-            clean = str(ref).split(" – ")[-1].strip() if " – " in str(ref) else str(ref)
-            if " vs " not in clean:
+            pair = _partita_pair(ref)
+            if pair is None:
                 continue
-            parts = clean.split(" vs ")
-            pair = (nt(parts[0].strip()), nt(parts[1].strip()))
             match = pair_map.get(pair)
             if match is None:
                 continue
@@ -238,22 +272,31 @@ def repair(apply: bool, days_from: int) -> int:
         print(f"{table}: reset righe saldate: {cur.rowcount}")
     conn.commit()
 
-    # --- RESET cassa saldata sulle partite corrette (match per nomi) ---
-    norm_pairs = set()
-    for mid in reset_ids:
-        row = c.execute("SELECT home_team, away_team FROM match_results "
-                        "WHERE match_id=?", (mid,)).fetchone()
-        if row:
-            norm_pairs.add((_norm_team(row[0]), _norm_team(row[1])))
+    # --- Mappa coppia-squadre LOOSE → (sh, sa) dalle partite CORRENTI ---
+    # (solo dentro `true`: mai le vecchie righe della stessa coppia)
+    pair_map = {_loose_pair(home, away): (sh, sa)
+                for mid, (lg, home, away, sh, sa) in true.items()}
+
+    # --- RESET cassa saldata sulle partite corrette (match per nomi LOOSE) ---
+    # Es. 'CA Osasuna' vs la riga 2025 'Osasuna vs Getafe': la cassa era
+    # stata saldata sulla partita VECCHIA (1-2 → Over vinto) invece che su
+    # quella corrente (1-0 → Under). Solo le coppie delle partite in gioco.
+    current_pairs = set()
+    for mid, (lg, home, away, sh, sa) in true.items():
+        involved = mid in reset_ids or any(
+            (m[0] != "cassa" and m[2] == mid) or
+            (m[0] == "cassa" and _loose_pair(home, away) ==
+             _partita_pair(m[2]))
+            for m in mismatches)
+        if involved:
+            current_pairs.add(_loose_pair(home, away))
     n_cassa = 0
     for cid, partita in c.execute(
             "SELECT id, partita FROM cassa WHERE esito_finale IS NOT NULL").fetchall():
-        clean = partita.split(" – ")[-1].strip() if " – " in partita else partita
-        if " vs " not in clean:
+        pair = _partita_pair(partita)
+        if pair is None:
             continue
-        parts = clean.split(" vs ")
-        pair = (_norm_team(parts[0].strip()), _norm_team(parts[1].strip()))
-        if pair in norm_pairs:
+        if pair in current_pairs:
             c.execute("UPDATE cassa SET esito_finale=NULL, profit=NULL, "
                       "settled_at=NULL WHERE id=?", (cid,))
             n_cassa += 1
@@ -261,14 +304,37 @@ def repair(apply: bool, days_from: int) -> int:
     conn.commit()
 
     # --- RE-SETTLE con i punteggi corretti (recompute profitti) ---
-    from tracker import settle_bets, settle_predictions, settle_cassa
+    # Per la cassa si ri-salda DIRETTAMENTE contro i punteggi veri delle
+    # partite correnti: settle_cassa() usa _norm_team stretto e riaggancerebbe
+    # la riga VECCHIA della stessa coppia (es. Osasuna-Getafe 2025 1-2 → Over
+    # 2.5 vinto quando il match corrente è finito 1-0 → Under).
+    from tracker import settle_bets, settle_predictions, _esito_won
     nb, pb = settle_bets()
     npr, ppr = settle_predictions()
-    nc = settle_cassa()
+    nc = 0
+    conn = _get_conn(); c = conn.cursor()
+    now = datetime.now().isoformat()
+    for cid, partita, esito, quota, importo in c.execute(
+            "SELECT id, partita, esito, quota, importo FROM cassa "
+            "WHERE esito_finale IS NULL").fetchall():
+        pair = _partita_pair(partita)
+        if pair is None:
+            continue
+        match = pair_map.get(pair)
+        if match is None:
+            continue
+        sh, sa = match
+        won = _esito_won(esito, sh, sa)
+        if won is None:
+            continue
+        profit = round((quota - 1) * importo, 2) if won else round(-importo, 2)
+        c.execute("UPDATE cassa SET esito_finale=?, profit=?, settled_at=? "
+                  "WHERE id=?", ("won" if won else "lost", profit, now, cid))
+        nc += 1
+    conn.commit(); conn.close()
     print(f"\nRe-settlement: bets={nb} (push {pb}), "
           f"predictions={npr} (push {ppr}), cassa={nc}")
     print("✅ Riparazione completata: profitti ricalcolati sui punteggi veri.")
-    conn.close()
     return 0
 
 
