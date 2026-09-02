@@ -1,4 +1,5 @@
 """Tracker SQLite per segnali, calendario e analisi"""
+import logging
 import math
 import sqlite3
 import os
@@ -7,7 +8,14 @@ from pathlib import Path
 
 from config import DATA_DIR
 
+logger = logging.getLogger(__name__)
+
 DB_PATH = DATA_DIR / "quotaverace.db"
+
+# Ordine di preferenza dei verdetti nel dedup (prima = meglio): il verdetto
+# definitivo batte quello provvisorio. Le righe APERTE (esito_finale NULL)
+# sono trattate come 'lost' provvisorio: qualsiasi riga gia' chiusa la batte.
+PREFERRED_OUTCOME_ORDER = {"won": 0, "push": 1, "lost": 2}
 
 class Signal:
     def __init__(self, id, chat_id, evento, esito, quota, probabilita, ev, timestamp, esito_finale, profit):
@@ -87,8 +95,162 @@ def _get_conn():
         esito_finale TEXT, profit REAL,
         created_at TEXT, settled_at TEXT,
         UNIQUE(match_id, esito))''')
+    _ensure_unique_constraints(c)
     conn.commit()
     return conn
+
+
+def _dedupe_normalized_esito(c) -> int:
+    """Dedup dei ledger per chiave NORMALIZZATA (match_id, mercato, esito).
+
+    I segnali 1X2 usano il nome squadra (es. "Inter") mentre il salvataggio
+    delle puntate usa la chiave compatta ("1"), e l'OU arriva come "Over 2.5"
+    o "over" a seconda del percorso: senza normalizzazione il dedup non li
+    riconosce come lo stesso segnale. Ricerca per gruppo NORMALIZZATO e
+    conserva la riga migliore (PREFERRED_OUTCOME_ORDER).
+
+    Ritorna il numero di righe eliminate. Chiamata da _ensure_unique_constraints
+    (solo dove serve: la normalizzazione puo' generare conflitti NUOVI).
+    """
+    removed = 0
+    try:
+        groups = c.execute(
+            '''SELECT match_id, mercato, LOWER(TRIM(esito)), COUNT(*) n
+               FROM predictions
+               WHERE mercato IN ('1X2', 'OU')
+               GROUP BY match_id, mercato, LOWER(TRIM(esito))
+               HAVING COUNT(*) > 1''').fetchall()
+    except sqlite3.OperationalError:
+        return 0
+    for mid, mkt, es, n in groups:
+        rows = c.execute(
+            '''SELECT id, esito, esito_finale, profit FROM predictions
+               WHERE match_id=? AND mercato=? AND LOWER(TRIM(esito))=?
+               ORDER BY id''', (mid, mkt, es)).fetchall()
+        if len(rows) <= 1:
+            continue
+        def _rank(row):
+            _id, esito, outcome, profit = row
+            if outcome is not None:
+                return (0, PREFERRED_OUTCOME_ORDER.get(outcome, 3), -_id)
+            return (1, PREFERRED_OUTCOME_ORDER.get("lost"), -_id)
+        best_id = min(rows, key=_rank)[0]
+        for r_id, _, _, _ in rows:
+            if r_id != best_id:
+                c.execute("DELETE FROM predictions WHERE id=?", (r_id,))
+                removed += 1
+    return removed
+
+
+def _create_ledger_table(c, table: str) -> None:
+    """CREATE TABLE (IF NOT EXISTS) per i ledger con i vincoli UNIQUE.
+
+    Unico punto di definizione dello schema: usato da _get_conn, dal
+    recupero delle migrazioni interrotte e dalla migrazione stessa.
+    """
+    if table == "predictions":
+        c.execute('''CREATE TABLE IF NOT EXISTS predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id TEXT, mercato TEXT, esito TEXT,
+            quota REAL, prob REAL, ev REAL,
+            market_prob REAL, market_edge REAL,
+            status TEXT, esito_finale TEXT, profit REAL,
+            created_at TEXT, settled_at TEXT,
+            UNIQUE(match_id, mercato, esito))''')
+    elif table == "bets":
+        c.execute('''CREATE TABLE IF NOT EXISTS bets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id TEXT, mercato TEXT, esito TEXT,
+            market_id TEXT, selection_id INTEGER,
+            price REAL, stake REAL, mode TEXT, status TEXT, bet_id TEXT,
+            esito_finale TEXT, profit REAL,
+            created_at TEXT, settled_at TEXT,
+            UNIQUE(match_id, esito))''')
+
+
+def _ensure_unique_constraints(c) -> None:
+    """Garantisce UNIQUE(match_id, mercato, esito) su predictions e
+    UNIQUE(match_id, esito) su bets ANCHE sui DB creati prima che i vincoli
+    esistessero nel codice (i CREATE TABLE IF NOT EXISTS non migrano le
+    tabelle esistenti): su quei DB un re-run del job poteva duplicare le
+    righe e sporcare il dataset ML (audit: hash 36aa024f...).
+
+    Idempotente ed economico: due PRAGMA index_list a ogni connessione.
+    Se il vincolo manca: dedup NORMALIZZATO -> ricrea la tabella copiando
+    le righe deduplicate. I backup (_old) di migrazioni interrotte vengono
+    recuperati PRIMA di qualunque check, a ogni avvio.
+    """
+    migrations = [
+        ("predictions", "uq_predictions_sig", "match_id, mercato, esito"),
+        ("bets", "uq_bets_sig", "match_id, esito"),
+    ]
+    for table, idx_name, cols in migrations:
+        # 0) Recupero di una migrazione precedente interrotta: SEMPRE prima
+        # di qualunque continue, perche' puo' esserci da recuperare anche
+        # quando la tabella nuova esiste gia' (o non esiste proprio).
+        #   (a) tabella nuova presente: copia le righe mancanti da _old
+        #   (b) tabella nuova ASSENTE (crash tra rename e create): ricreala
+        try:
+            leftover = c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (f"{table}_old",)).fetchone()
+        except sqlite3.OperationalError:
+            leftover = None
+        if leftover:
+            try:
+                cur_cols = [r[1] for r in c.execute(
+                    f"PRAGMA table_info({table})").fetchall()]
+                bk_cols = [r[1] for r in c.execute(
+                    f"PRAGMA table_info({table}_old)").fetchall()]
+                if not cur_cols and bk_cols:
+                    _create_ledger_table(c, table)
+                    cur_cols = [r[1] for r in c.execute(
+                        f"PRAGMA table_info({table})").fetchall()]
+                if bk_cols and bk_cols == cur_cols:
+                    bkl = ", ".join(bk_cols)
+                    c.execute(f"INSERT OR IGNORE INTO {table} ({bkl}) "
+                              f"SELECT {bkl} FROM {table}_old")
+                    c.execute(f"DROP TABLE {table}_old")
+                    logger.warning("tracker: recuperate righe da %s_old "
+                                   "(migrazione precedente interrotta)", table)
+            except sqlite3.OperationalError as e:
+                logger.warning("tracker: recupero %s_old rimandato: %s", table, e)
+
+        # 1) Il vincolo esiste gia'? (nome nostro o autoindex dello schema)
+        try:
+            idx = [r[1] for r in c.execute(f"PRAGMA index_list({table})").fetchall()]
+        except sqlite3.OperationalError:
+            continue
+        if idx_name in idx:
+            continue
+        if any(i and i.startswith("sqlite_autoindex") for i in idx):
+            continue
+
+        # 2) Vincolo davvero assente: migrazione (mai perdere dati)
+        try:
+            table_cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
+            if not table_cols:
+                continue
+            col_list = ", ".join(table_cols)
+            if table == "predictions":
+                removed = _dedupe_normalized_esito(c)
+                if removed:
+                    logger.warning("predictions: eliminate %d righe duplicate "
+                                   "(chiave normalizzata)", removed)
+            c.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
+            _create_ledger_table(c, table)
+            c.execute(f"INSERT OR IGNORE INTO {table} ({col_list}) "
+                      f"SELECT {col_list} FROM {table}_old")
+            c.execute(f"DROP TABLE {table}_old")
+            logger.info("tracker: applicato UNIQUE(%s) su %s (migrazione schema)",
+                        cols, table)
+        except sqlite3.OperationalError as e:
+            # Tipicamente DB lockato da un'altra connessione. MAI buttare il
+            # backup: le righe restano in _old e vengono recuperate al prossimo
+            # avvio (blocco 0 in cima a questo loop).
+            logger.warning("tracker: migrazione UNIQUE su %s rimandata: %s "
+                           "(backup dati in %s_old, recupero al prossimo avvio)",
+                           table, e, table)
 
 
 # --- Cassa (registro scommesse inserite dal sito) ---

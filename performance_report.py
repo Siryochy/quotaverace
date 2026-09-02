@@ -147,7 +147,15 @@ def _predictions_by_market(conn, start: str, end: str) -> Dict:
 
 
 def _clv_stats(conn, start: str, end: str) -> Dict:
-    """Statistiche CLV nel periodo."""
+    """Statistiche CLV nel periodo (raw, vig-free, vs Pinnacle).
+
+    - Vig-free USA DAVVERO clv_vig_free() (devig): prima era una copia del
+      vs-Pinnacle — due metriche identiche con nomi diversi.
+    - Le righe con UN SOLO campione prezzo (closing = eco del segnale, CLV
+      finto 0) sono escluse dalle medie: inquinavano la metrica reale
+      (es. CLV vig-free -3.85% = esattamente 1/1.04 - 1, l'artefatto del
+      fallback overround stimato, non un segnale di mercato).
+    """
     c = conn.cursor()
     rows = c.execute(
         "SELECT signal_quota, closing_quota, pinnacle_quota "
@@ -157,18 +165,34 @@ def _clv_stats(conn, start: str, end: str) -> Dict:
     raw_clvs = []
     vf_clvs = []
     pin_clvs = []
+    pending = 0  # righe con un solo campione: closing non ancora reale
+
+    try:
+        from market_calib import clv_vig_free
+    except Exception:
+        clv_vig_free = None
 
     for sig, clos, pin in rows:
         if not (sig and clos and sig > 0 and clos > 0):
             continue
+        if abs(clos - sig) < 1e-9:
+            # Nessuna lettura di chiusura dopo il segnale: niente CLV ancora.
+            pending += 1
+            continue
         raw_clvs.append((sig / clos) - 1.0)
         if pin and pin > 0:
             pin_clvs.append((sig / pin) - 1.0)
-            # Vig-free: usa Pinnacle come fair
-            vf_clvs.append((sig / pin) - 1.0)
+        if clv_vig_free is not None:
+            # Vig-free: Pinnacle come fair se disponibile, altrimenti la
+            # closing devigata (come il report giornaliero in bot.py).
+            fair = pin if (pin and pin > 0) else clos
+            vf = clv_vig_free(sig, fair)
+            if vf is not None:
+                vf_clvs.append(vf)
 
     return {
         "n": len(raw_clvs),
+        "pending": pending,
         "avg_raw": round(sum(raw_clvs) / len(raw_clvs) * 100, 2) if raw_clvs else 0,
         "avg_vf": round(sum(vf_clvs) / len(vf_clvs) * 100, 2) if vf_clvs else 0,
         "avg_vs_pinnacle": round(sum(pin_clvs) / len(pin_clvs) * 100, 2) if pin_clvs else 0,
@@ -388,9 +412,11 @@ def _report(res: Dict) -> str:
 
     # CLV
     if clv["n"] > 0:
+        pend = (f" (+{clv['pending']} in attesa di chiusura)"
+                if clv.get("pending") else "")
         lines.extend([
             "📈 *CLV*",
-            f"   Raw: {_fmt_pct(clv['avg_raw'])} (n {clv['n']})",
+            f"   Raw: {_fmt_pct(clv['avg_raw'])} (n {clv['n']}{pend})",
             f"   Vig-free: {_fmt_pct(clv['avg_vf'])}",
             f"   Vs Pinnacle: {_fmt_pct(clv['avg_vs_pinnacle'])}",
             f"   Positivo: {clv['positive_pct']:.0f}%",

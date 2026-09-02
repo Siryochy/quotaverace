@@ -106,8 +106,16 @@ def audit_training_rows(rows: List[Dict]) -> List[Dict]:
             problems.append({**base, "tipo": "esito_non_canonico",
                              "msg": f"esito {esito!r} non e' Yes/No (BTTS)"})
 
-        # 8. duplicati (match_id, mercato, esito)
-        dup_key = (mid, mercato, esito)
+        # 8. duplicati sulla CHIAVE NORMALIZZATA (stessa chiave della pipeline:
+        # ml_dataset.dedupe_training_rows). "Over 2.5" e "over" sono lo stesso
+        # segnale; una previsione del ledger e la relativa puntata auto con lo
+        # stesso match+esito sono la stessa scommessa (1 riga sola).
+        norm = r.get("esito_norm")
+        if norm is None:
+            from ml_dataset import esito_norm
+            norm = esito_norm(mercato, esito,
+                              r.get("home") or "", r.get("away") or "")
+        dup_key = (mid, mercato.strip().upper(), norm)
         if dup_key in seen:
             problems.append({**base, "tipo": "duplicato",
                              "msg": f"riga duplicata per ({mid}, {mercato}, {esito})"})
