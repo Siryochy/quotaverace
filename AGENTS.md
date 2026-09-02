@@ -254,7 +254,22 @@ cd webapp && npm run build            # build Next.js
   vuoto per design (ogni partita e' analizzata).
 - **Webapp**: 8 sezioni live (Dashboard, Calcola, Schedina, Storico, Cassa,
   Calendario, Backtest, Value).
-- **Test**: 494 test verdi (la suite completa richiede ~6 min).
+- **Dedup dataset ML** (02/09, audit hash 36aa024f): doppio livello —
+  (1) `tracker` migra automaticamente i vincoli UNIQUE sui ledger ANCHE per
+  DB nati prima (dedup normalizzato: "Over 2.5"=="over", "Inter"=="1" via
+  home/away; backup _old mai perso, recupero automatico se la migrazione
+  viene interrotta); (2) `ml_dataset.dedupe_training_rows` dedup con chiave
+  normalizzata a livello pipeline (stessa scommessa da predictions+bets =
+  1 riga) — idempotente per CLI/API/ensemble/audit. `ml_audit` usa la
+  STESSA chiave (audit e pipeline concordano). VERIFICATO IN PRODUZIONE:
+  autoindex UNIQUE attivi su predictions/bets, 0 duplicati, audit pulito.
+- **CLV vig-free corretto** (02/09): `performance_report._clv_stats` ora
+  USA davvero `clv_vig_free()` (devig) invece di duplicare il vs-Pinnacle,
+  e le righe con UN SOLO campione prezzo (closing = eco del segnale, CLV
+  finto 0) sono escluse dalle medie. Il CLV vig-free -3.85% del 01/09 era
+  esattamente 1/1.04-1: artefatto del fallback overround stimato, NON un
+  segnale di mercato. Il report mostra il conteggio "in attesa di chiusura".
+- **Test**: 503 test verdi (la suite completa richiede ~5 min).
 
 ## Moduli avanzati (Settembre 2026)
 
@@ -286,7 +301,22 @@ cd webapp && npm run build            # build Next.js
 - **Fix Timezone Job**: tutti i job Telegram ora usano `IT_OFFSET=2` per
   convertire UTC → ora italiana. Prima il report delle 23:50 partiva
   alle 01:50 italiane!
-- **Test**: 494 test verdi (la suite completa richiede ~6 min).
+- **Dedup dataset ML** (02/09, audit hash 36aa024f): doppio livello —
+  (1) `tracker` migra automaticamente i vincoli UNIQUE sui ledger ANCHE per
+  DB nati prima (dedup normalizzato: "Over 2.5"=="over", "Inter"=="1" via
+  home/away; backup _old mai perso, recupero automatico se la migrazione
+  viene interrotta); (2) `ml_dataset.dedupe_training_rows` dedup con chiave
+  normalizzata a livello pipeline (stessa scommessa da predictions+bets =
+  1 riga) — idempotente per CLI/API/ensemble/audit. `ml_audit` usa la
+  STESSA chiave (audit e pipeline concordano). VERIFICATO IN PRODUZIONE:
+  autoindex UNIQUE attivi su predictions/bets, 0 duplicati, audit pulito.
+- **CLV vig-free corretto** (02/09): `performance_report._clv_stats` ora
+  USA davvero `clv_vig_free()` (devig) invece di duplicare il vs-Pinnacle,
+  e le righe con UN SOLO campione prezzo (closing = eco del segnale, CLV
+  finto 0) sono escluse dalle medie. Il CLV vig-free -3.85% del 01/09 era
+  esattamente 1/1.04-1: artefatto del fallback overround stimato, NON un
+  segnale di mercato. Il report mostra il conteggio "in attesa di chiusura".
+- **Test**: 503 test verdi (la suite completa richiede ~5 min).
 - **Sicurezza**: rotazioni token 01/09 e 02/09 verificate (Telegram
   `@Calcifrrbot`, ID 8372645521: `getMe` 200, notifica consegnata al Chat ID
   proprietario 7718157436; GitHub PAT fine-grained nel vault). Token del
