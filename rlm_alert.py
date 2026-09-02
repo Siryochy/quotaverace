@@ -40,6 +40,132 @@ def _get_conn():
     return _get_conn()
 
 
+def _norm_team(name) -> str:
+    """Normalizza un nome squadra per il matching con le quote API.
+
+    Toglie prefissi comuni (fc/cf/ac/ca), minuscole e accenti: la cache
+    odds usa i nomi API ("FC Machida Zelvia") mentre il DB salva i nomi
+    normalizzati ("Machida Zelvia") — senza questa normalizzazione i
+    match non si agganciano mai e gli snapshot non vengono registrati.
+    """
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(name)).encode("ascii", "ignore").decode("ascii")
+    s = s.lower().strip()
+    words = [w for w in s.split() if w not in ("fc", "cf", "ac", "ca", "sc", "as")]
+    return " ".join(words)
+
+
+def _current_prices_from_odds(match_id: str, league: str,
+                              home: str, away: str,
+                              esito: str) -> Optional[tuple]:
+    """Legge dalla CACHE odds (costo zero) il prezzo attuale per un esito.
+
+    Returns:
+        (prezzo_migliore, bookmaker) oppure None se il match non e' piu'
+        nella cache (partita iniziata o lega non piu' interrogata).
+    """
+    from odds_api import SPORTS_MAP, fetch_odds
+    from datetime import datetime as _dt, timedelta as _td
+
+    sport_key = None
+    for lg, key in SPORTS_MAP.items():
+        if lg == league:
+            sport_key = key
+            break
+    if not sport_key:
+        return None
+
+    frm = _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    to = (_dt.utcnow() + _td(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        payload = fetch_odds(sport=sport_key, commence_time_from=frm,
+                             commence_time_to=to)
+    except Exception:
+        return None
+
+    nh = _norm_team(home)
+    na = _norm_team(away)
+    if not nh or not na:
+        return None
+    for m in payload:
+        if _norm_team(m.get("home_team", "")) != nh:
+            continue
+        if _norm_team(m.get("away_team", "")) != na:
+            continue
+        best = None
+        best_bm = ""
+        for bm in m.get("bookmakers", []):
+            bname = bm.get("title") or bm.get("key") or ""
+            for mkt in bm.get("markets", []):
+                key = mkt.get("key")
+                for out in mkt.get("outcomes", []):
+                    name = (out.get("name") or "").strip()
+                    price = out.get("price")
+                    if not name or not price or float(price) <= 1.0:
+                        continue
+                    low = name.lower()
+                    if key == "h2h":
+                        if low == m.get("home_team", "").lower():
+                            okey = "1"
+                        elif low == m.get("away_team", "").lower():
+                            okey = "2"
+                        elif low in ("draw", "pareggio"):
+                            okey = "X"
+                        else:
+                            continue
+                    elif key == "totals":
+                        if out.get("point") != 2.5:
+                            continue
+                        if "over" in low:
+                            okey = "Over 2.5"
+                        elif "under" in low:
+                            okey = "Under 2.5"
+                        else:
+                            continue
+                    else:
+                        continue
+                    if okey == esito and (best is None or float(price) > best):
+                        best = float(price)
+                        best_bm = bname
+        if best is not None:
+            return best, best_bm
+    return None
+
+
+def record_snapshots_for_active_signals() -> int:
+    """Registra snapshot di prezzo freschi per i segnali value attivi.
+
+    Il job RLM gira ogni 5 minuti: senza questa funzione gli snapshot
+    esisterebbero solo quando _analyze_match ri-analizza un match (una
+    volta per lega al giorno o meno) e steam/RLM/crollo non avrebbero mai
+    una serie di prezzi intraday su cui scattare. Legge SOLO la cache odds
+    (costo zero crediti): se la lega non e' dovuta, il prezzo e' comunque
+    quello aggiornato all'ultimo scan.
+
+    Returns:
+        Numero di snapshot registrati.
+    """
+    from line_movement import record_snapshot
+
+    signals = get_active_value_signals()
+    n = 0
+    for sig in signals:
+        try:
+            cur = _current_prices_from_odds(
+                sig["match_id"], sig.get("league", ""),
+                sig.get("home", ""), sig.get("away", ""),
+                sig.get("esito", ""))
+            if cur is None:
+                continue
+            price, bookmaker = cur
+            record_snapshot(sig["match_id"], sig.get("esito", ""), price,
+                            bookmaker=bookmaker)
+            n += 1
+        except Exception as e:
+            logger.debug("Snapshot fallito per %s: %s", sig.get("match_id"), e)
+    return n
+
+
 def get_active_value_signals() -> List[Dict]:
     """Recupera i segnali value/strong_value attivi (non ancora iniziati o in corso)."""
     conn = _get_conn()
@@ -244,8 +370,16 @@ async def rlm_alert_job(context) -> None:
     """Job periodico: controlla RLM ogni 5 minuti sulle partite in corso.
 
     Integrato nel job queue del bot (ogni 5 minuti dalle 14:00 alle 23:50 ITA).
+    Prima registra uno snapshot di prezzo fresco per ogni segnale value
+    attivo (dalla cache odds, costo zero) cosi' la serie di prezzi intraday
+    esiste anche se _analyze_match non ha ri-analizzato la lega oggi.
     """
     from tracker import is_notified, mark_notified
+
+    try:
+        record_snapshots_for_active_signals()
+    except Exception as e:
+        logger.warning("Registrazione snapshot RLM fallita: %s", e)
 
     alerts = check_all_alerts()
     if not alerts:

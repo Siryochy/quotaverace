@@ -19,12 +19,12 @@ def temp_db(monkeypatch):
         yield db_path
 
 
-def _seed_signal(match_id, status="value"):
+def _seed_signal(match_id, status="value", esito="1"):
     """Inserisce un segnale value nel DB."""
     tracker.save_match(match_id, "Serie A", "Inter", "Napoli",
                        "2099-01-01T20:00:00Z")
     tracker.save_analysis(match_id, 1.5, 1.2, 0.45, 0.25, 0.30,
-                          0.52, 0.10, "1", 2.10, "Bet365", status,
+                          0.52, 0.10, esito, 2.10, "Bet365", status,
                           market_prob=0.42, market_edge=0.03)
 
 
@@ -144,6 +144,139 @@ class TestCheckAllAlerts:
         _seed_snapshots("m1", "1", [2.10, 2.09, 2.08])
         alerts = rlm_alert.check_all_alerts()
         assert len(alerts) == 0
+
+
+class TestRecordSnapshotsForActiveSignals:
+    """Il job RLM deve registrare snapshot freschi dalle cache odds ogni ciclo
+    (5 minuti): senza, la serie di prezzi intraday non esiste e steam/RLM/
+    crollo non scattano mai. Legge SOLO la cache (costo zero crediti)."""
+
+    def _mock_odds(self, monkeypatch, payload):
+        import odds_api
+        monkeypatch.setattr(odds_api, "fetch_odds", lambda **kw: payload)
+
+    def _get_price(self, match_id, esito):
+        conn = tracker._get_conn()
+        line_movement._ensure_table(conn)
+        rows = conn.execute(
+            "SELECT price FROM price_snapshots WHERE match_id=? AND esito=? "
+            "ORDER BY recorded_at", (match_id, esito)).fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+
+    def test_registra_snapshot_dalla_cache_odds(self, temp_db, monkeypatch):
+        _seed_signal("m10")
+        self._mock_odds(monkeypatch, [{
+            "id": "m10", "home_team": "FC Inter", "away_team": "Napoli",
+            "commence_time": "2099-01-01T20:00:00Z",
+            "bookmakers": [{
+                "key": "bet365", "title": "Bet365",
+                "markets": [{
+                    "key": "h2h",
+                    "outcomes": [
+                        {"name": "FC Inter", "price": 2.10},
+                        {"name": "Napoli", "price": 3.40},
+                        {"name": "Draw", "price": 3.20},
+                    ],
+                }],
+            }],
+        }])
+        n = rlm_alert.record_snapshots_for_active_signals()
+        assert n == 1
+        assert self._get_price("m10", "1") == [2.10]
+
+    def test_job_accumula_serie_di_prezzi_intraday(self, temp_db, monkeypatch):
+        """Due cicli del job con prezzi diversi: la serie cresce e il crollo
+        scatta (era il bug: senza snapshot freschi il crollo non partiva)."""
+        _seed_signal("m11")
+
+        def _payload(price):
+            return [{
+                "id": "m11", "home_team": "Inter", "away_team": "Napoli",
+                "commence_time": "2099-01-01T20:00:00Z",
+                "bookmakers": [{
+                    "key": "bet365", "title": "Bet365",
+                    "markets": [{
+                        "key": "h2h",
+                        "outcomes": [
+                            {"name": "Inter", "price": price},
+                            {"name": "Napoli", "price": 3.40},
+                            {"name": "Draw", "price": 3.20},
+                        ],
+                    }],
+                }],
+            }]
+
+        # Ciclo 1: quota 2.10 (snapshot 1)
+        self._mock_odds(monkeypatch, _payload(2.10))
+        assert rlm_alert.record_snapshots_for_active_signals() == 1
+        # Ciclo 2: quota 1.95 (-7.1% dal primo snapshot)
+        self._mock_odds(monkeypatch, _payload(1.95))
+        assert rlm_alert.record_snapshots_for_active_signals() == 1
+
+        prices = self._get_price("m11", "1")
+        assert prices == [2.10, 1.95]
+        # Con 2 snapshot e calo >= 5% -> crollo quota URGENTE
+        sig = {"match_id": "m11", "esito": "1", "quota": 2.10,
+               "ev": 0.10, "market_edge": 0.03, "status": "value",
+               "home": "Inter", "away": "Napoli", "league": "Serie A"}
+        alert = rlm_alert.check_rlm_for_signal(sig)
+        assert alert is not None
+        assert alert["alert_type"] == "crash"
+
+    def test_nessun_snapshot_se_la_quota_manca(self, temp_db, monkeypatch):
+        """Esito non presente nella cache (es. Over 2.5 non offerto): nessun
+        snapshot, nessun crash del job."""
+        _seed_signal("m12", esito="Over 2.5")
+        self._mock_odds(monkeypatch, [{
+            "id": "m12", "home_team": "Inter", "away_team": "Napoli",
+            "commence_time": "2099-01-01T20:00:00Z",
+            "bookmakers": [{
+                "key": "bet365", "title": "Bet365",
+                "markets": [{
+                    "key": "totals",
+                    "outcomes": [
+                        {"name": "Over", "point": 1.5, "price": 1.70},
+                        {"name": "Under", "point": 1.5, "price": 2.05},
+                    ],
+                }],
+            }],
+        }])
+        assert rlm_alert.record_snapshots_for_active_signals() == 0
+        assert self._get_price("m12", "Over 2.5") == []
+
+    def test_match_non_trovato_nessun_snapshot(self, temp_db, monkeypatch):
+        """Partita non piu' in cache (iniziata): nessun snapshot, nessun errore."""
+        _seed_signal("m13")
+        self._mock_odds(monkeypatch, [])
+        assert rlm_alert.record_snapshots_for_active_signals() == 0
+
+
+class TestCurrentPricesFromOdds:
+    def test_normalizza_prefissi_squadre(self, temp_db, monkeypatch):
+        """'FC Inter' (API) == 'Inter' (DB): i prefissi club non bloccano
+        il matching (stesso problema del repair cassa 'CA Osasuna')."""
+        import odds_api
+        monkeypatch.setattr(odds_api, "fetch_odds", lambda **kw: [{
+            "id": "m20", "home_team": "FC Machida Zelvia",
+            "away_team": "Kawasaki Frontale",
+            "commence_time": "2099-01-01T10:00:00Z",
+            "bookmakers": [{
+                "key": "pinnacle", "title": "Pinnacle",
+                "markets": [{
+                    "key": "h2h",
+                    "outcomes": [
+                        {"name": "FC Machida Zelvia", "price": 3.10},
+                        {"name": "Kawasaki Frontale", "price": 4.00},
+                        {"name": "Draw", "price": 3.30},
+                    ],
+                }],
+            }],
+        }])
+        price, bm = rlm_alert._current_prices_from_odds(
+            "m20", "Serie A", "Machida Zelvia", "Kawasaki Frontale", "2")
+        assert price == 4.00
+        assert bm == "Pinnacle"
 
 
 if __name__ == "__main__":
