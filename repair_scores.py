@@ -11,18 +11,27 @@ Cosa fa (per ogni partita di match_results con risultati the-odds-api):
   1. Riscarica i punteggi veri (fetch_scores, associazione per NOME tramite
      odds_api.match_scores_by_name — la stessa logica del fix).
   2. Confronta con il punteggio salvato: se diverso, corregge la riga.
-  3. Ri-salda TUTTI i ledger (bets, predictions, cassa) usando i punteggi
+  3. **Audit dei verdetti sui ledger**: anche se match_results e' gia'
+     corretto (es. risalvato dal watchdog DOPO il fix, come per Machida),
+     le bet/previsioni/cassa possono essere state saldate col verdetto
+     SPECCHIATO (puntata sul "2" marcata won per una vittoria casa). Il
+     repair le individua confrontando l'esito saldato con quello atteso
+     dal punteggio vero e le ri-salda.
+  4. Ri-salda TUTTI i ledger (bets, predictions, cassa) usando i punteggi
      corretti: reset esito_finale/profit/settled_at delle righe gia'
      saldate su quelle partite, poi settle_* con recompute del profitto.
 
 Dry-run di default: stampa il piano senza toccare il DB. Con --apply
 esegue le correzioni (e aggiorna il bankroll implicitamente: bankroll_stats
-deriva da SUM(cassa.amount), quindi la rettifica dell'entry cassa con il
+deriva da SUM(cassa.importo), quindi la rettifica dell'entry cassa con il
 profit recompute' corregge anche il totale).
 
+NOTA: the-odds-api /scores accetta daysFrom massimo 3 giorni (422 oltre):
+il default e' gia' 3, non superarlo a mano.
+
 Uso:
-  railway ssh --service api -- "python3 repair_scores.py --days-from 7"
-  railway ssh --service api -- "python3 repair_scores.py --apply --days-from 7"
+  railway ssh --service api -- "python3 repair_scores.py --days-from 3"
+  railway ssh --service api -- "python3 repair_scores.py --apply --days-from 3"
 """
 
 from __future__ import annotations
@@ -70,6 +79,81 @@ def fetch_true_scores(days_from: int, leagues: dict = None) -> dict:
     return true_scores
 
 
+def _settled_ledger_rows(c) -> list:
+    """Righe gia' saldate di bets/predictions/cassa con i dati per l'audit."""
+    rows = []
+    for bid, match_id, mercato, esito, price, stake, mode, out, profit in c.execute(
+            "SELECT id, match_id, mercato, esito, price, stake, mode, "
+            "esito_finale, profit FROM bets WHERE esito_finale IS NOT NULL"
+    ).fetchall():
+        rows.append(("bet", bid, match_id, mercato, esito, price, out))
+    for pid, match_id, mercato, esito, quota, out in c.execute(
+            "SELECT id, match_id, mercato, esito, quota, esito_finale "
+            "FROM predictions WHERE esito_finale IS NOT NULL"
+    ).fetchall():
+        rows.append(("pred", pid, match_id, mercato, esito, quota, out))
+    # cassa: si aggancia per coppia di squadre normalizzate (non ha match_id)
+    for cid, partita, esito, quota, out in c.execute(
+            "SELECT id, partita, esito, quota, esito_finale "
+            "FROM cassa WHERE esito_finale IS NOT NULL"
+    ).fetchall():
+        rows.append(("cassa", cid, partita, None, esito, quota, out))
+    return rows
+
+
+def _expected_outcome(mercato, esito, price, sh, sa, home, away):
+    """Outcome atteso (won/lost/push) per un ledger row, o None se non risolvibile."""
+    from tracker import _prediction_outcome
+    outcome, _ = _prediction_outcome(mercato, esito, price, sh, sa, home, away)
+    return outcome
+
+
+def _find_verdict_mismatches(c, results: dict) -> list:
+    """Righe ledger saldate il cui verdetto NON corrisponde al punteggio vero.
+
+    `results`: {match_id: (home, away, sh, sa)} — i punteggi VERI.
+    Per la cassa l'aggancio e' per coppia di squadre normalizzate
+    (la tabella non ha match_id): si usa la stessa normalizzazione di
+    settle_cassa (ultimo " vs " della partita).
+
+    Ritorna una lista di righe (tipo, id, match_id|partita, esito, atteso).
+    """
+    from tracker import _norm_team as nt
+    mismatches = []
+    # Mappa coppia-squadre normalizzata -> (sh, sa) per la cassa
+    pair_map = {}
+    for mid, (lg, home, away, sh, sa) in results.items():
+        pair_map.setdefault((nt(home), nt(away)), (sh, sa))
+
+    for row in _settled_ledger_rows(c):
+        kind, rid, ref, mercato, esito, price, stored = row
+        if kind == "cassa":
+            clean = str(ref).split(" – ")[-1].strip() if " – " in str(ref) else str(ref)
+            if " vs " not in clean:
+                continue
+            parts = clean.split(" vs ")
+            pair = (nt(parts[0].strip()), nt(parts[1].strip()))
+            match = pair_map.get(pair)
+            if match is None:
+                continue
+            sh, sa = match
+            from tracker import _esito_won
+            won = _esito_won(esito, sh, sa)
+            expected = "won" if won else ("lost" if won is not None else None)
+        else:
+            match = results.get(ref)
+            if match is None:
+                continue
+            lg, home, away, sh, sa = match
+            expected = _expected_outcome(mercato, esito, price, sh, sa,
+                                         home, away)
+        if expected is None:
+            continue
+        if expected != stored:
+            mismatches.append((kind, rid, ref, esito, expected, stored))
+    return mismatches
+
+
 def repair(apply: bool, days_from: int) -> int:
     conn = _get_conn()
     _create_results_table(conn)
@@ -99,15 +183,28 @@ def repair(apply: bool, days_from: int) -> int:
 
     if not wrong:
         print("✅ Nessun punteggio invertito: i dati sono coerenti.")
-        return 0
+    else:
+        print(f"⚠️ {len(wrong)} partite con punteggio errato:")
+        for mid, lg, home, away, sh_s, sa_s, sh, sa in wrong:
+            print(f"   {lg}: {home} {sh_s}-{sa_s} → CORRETTO {sh}-{sa} ({mid})")
 
-    print(f"⚠️ {len(wrong)} partite con punteggio errato:")
-    for mid, lg, home, away, sh_s, sa_s, sh, sa in wrong:
-        print(f"   {lg}: {home} {sh_s}-{sa_s} → CORRETTO {sh}-{sa} ({mid})")
+    # --- AUDIT verdetti sui ledger (anche con match_results gia' corretto) ---
+    conn = _get_conn(); c = conn.cursor()
+    mismatches = _find_verdict_mismatches(c, true)
+    conn.close()
+    if mismatches:
+        print(f"⚠️ {len(mismatches)} righe ledger saldate col verdetto "
+              f"SBAGLIATO (da ri-saldare):")
+        for kind, rid, ref, esito, exp, stored in mismatches[:15]:
+            short = str(ref)[:44]
+            print(f"   {kind:5s} #{rid} {short}: {esito} "
+                  f"(saldata '{stored}' → atteso '{exp}')")
+        if len(mismatches) > 15:
+            print(f"   … e altre {len(mismatches) - 15} righe.")
 
     if not apply:
         print("\n(DRY-RUN: nessuna modifica. Rilancia con --apply per correggere.)")
-        return 1
+        return 1 if (wrong or mismatches) else 0
 
     # --- FIX match_results ---
     conn = _get_conn()
@@ -122,21 +219,28 @@ def repair(apply: bool, days_from: int) -> int:
     conn.commit()
     print(f"\nmatch_results corretti: {len(fixed_ids)}")
 
-    # --- RESET ledger saldati sulle partite corrette ---
-    qmarks = ",".join("?" for _ in fixed_ids)
+    # --- RESET ledger saldati sulle partite corrette + su quelli con verdetto errato ---
+    # (match_results gia' corretto ma verdetto specchiato: serve il reset per
+    #  far ripartire il settlement con l'esito giusto — caso Machida)
+    reset_ids = set(fixed_ids)
+    for kind, rid, ref, esito, exp, stored in mismatches:
+        if kind == "cassa":
+            continue  # la cassa si aggancia per coppia squadre sotto
+        reset_ids.add(ref)
+    qmarks = ",".join("?" for _ in reset_ids)
     for table in ("bets", "predictions"):
         cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
         if "esito_finale" not in cols:
             continue
         cur = c.execute(f"UPDATE {table} SET esito_finale=NULL, profit=NULL, "
                         f"settled_at=NULL WHERE match_id IN ({qmarks})",
-                        fixed_ids)
+                        list(reset_ids))
         print(f"{table}: reset righe saldate: {cur.rowcount}")
     conn.commit()
 
     # --- RESET cassa saldata sulle partite corrette (match per nomi) ---
     norm_pairs = set()
-    for mid in fixed_ids:
+    for mid in reset_ids:
         row = c.execute("SELECT home_team, away_team FROM match_results "
                         "WHERE match_id=?", (mid,)).fetchone()
         if row:
@@ -173,10 +277,11 @@ def main(argv=None) -> int:
         description="Ripara punteggi invertiti (bug ordine scores)")
     ap.add_argument("--apply", action="store_true",
                     help="applica le correzioni (default: dry-run)")
-    ap.add_argument("--days-from", type=int, default=7,
-                    help="finestra di riscarica the-odds-api (default 7)")
+    ap.add_argument("--days-from", type=int, default=3,
+                    help="finestra di riscarica the-odds-api (max 3, default 3)")
     args = ap.parse_args(argv)
-    return repair(args.apply, args.days_from)
+    days = max(1, min(args.days_from, 3))  # the-odds-api: 422 oltre 3
+    return repair(args.apply, days)
 
 
 if __name__ == "__main__":

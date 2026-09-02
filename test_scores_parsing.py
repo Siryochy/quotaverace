@@ -206,6 +206,122 @@ class TestPredictionOutcome1X2:
         assert outcome == "won"
 
 
+# --- 4b. Audit verdetti: match_results GIÀ corretto ma ledger specchiato ----
+
+class TestRepairVerdictAudit:
+    """Caso Machida reale: il watchdog ha GIÀ risalvato match_results col
+    punteggio vero (vittoria casa), ma la bet/previsione erano state saldate
+    col verdetto specchiato dal bug e sono rimaste 'won'. Il repair deve
+    rilevarle e ri-sal darle anche senza toccare match_results."""
+
+    def _seed(self, temp_db):
+        tracker.save_match("machida", "J1 League", "FC Machida Zelvia",
+                           "Kawasaki Frontale", "2026-09-02T05:00:00Z")
+        tracker.save_analysis("machida", 1.2, 1.6, 0.28, 0.26, 0.46, 0.52,
+                              0.14, "2", 4.0, "Pinnacle", "value")
+        # match_results GIÀ CORRETTO: vittoria casa 2-1 (risalvato dal watchdog)
+        tracker.save_result("machida", "J1 League", "FC Machida Zelvia",
+                            "Kawasaki Frontale", 2, 1, "2026-09-02T20:10:00Z")
+        # ma il ledger è stato saldato col verdetto SPECCHIATO (bug pre-fix)
+        tracker.save_bet("machida", "1X2", "2", None, None, 4.0, 5.0)
+        tracker.save_prediction("machida", "1X2", "2", 4.0, 0.25, 0.14,
+                                status="value")
+        conn = tracker._get_conn()
+        conn.execute("UPDATE bets SET esito_finale='won', profit=15.0, "
+                     "settled_at=? WHERE match_id='machida'",
+                     ("2026-09-02T13:53:56Z",))
+        conn.execute("UPDATE predictions SET esito_finale='won', profit=3.0, "
+                     "settled_at=? WHERE match_id='machida'",
+                     ("2026-09-02T13:53:56Z",))
+        conn.commit(); conn.close()
+
+    def test_dry_run_rileva_verdetto_specchiato(self, temp_db, monkeypatch):
+        self._seed(temp_db)
+        # I punteggi veri (casa 2-1) coincidono con match_results: nessun
+        # punteggio da correggere, ma il ledger va ri-sal dato.
+        true_payload = dict(MACHIDA_AWAY_FIRST)
+        true_payload["scores"] = [{"name": "Kawasaki Frontale", "score": 1},
+                                   {"name": "FC Machida Zelvia", "score": 2}]
+        _patch_repair_fetch(monkeypatch,
+                            {"m": dict(true_payload, completed=True)})
+        rc = repair_scores.repair(apply=False, days_from=3)
+        assert rc == 1  # incongruenza rilevata (verdetto, non punteggio)
+        # DB invariato nel dry-run
+        conn = tracker._get_conn()
+        sh, sa = conn.execute(
+            "SELECT score_home, score_away FROM match_results "
+            "WHERE match_id='machida'").fetchone()
+        conn.close()
+        assert (sh, sa) == (2, 1)
+
+    def test_apply_ri_salda_bet_specchiata(self, temp_db, monkeypatch):
+        self._seed(temp_db)
+        true_payload = dict(MACHIDA_AWAY_FIRST)
+        true_payload["scores"] = [{"name": "Kawasaki Frontale", "score": 1},
+                                   {"name": "FC Machida Zelvia", "score": 2}]
+        _patch_repair_fetch(monkeypatch,
+                            {"m": dict(true_payload, completed=True)})
+        rc = repair_scores.repair(apply=True, days_from=3)
+        assert rc == 0
+
+        rows = {r["esito"]: r for r in tracker.get_bets(limit=10)}
+        assert rows["2"]["esito_finale"] == "lost"
+        assert rows["2"]["profit"] == pytest.approx(-5.0)
+
+    def test_apply_ri_salda_previsione_specchiata(self, temp_db, monkeypatch):
+        self._seed(temp_db)
+        true_payload = dict(MACHIDA_AWAY_FIRST)
+        true_payload["scores"] = [{"name": "Kawasaki Frontale", "score": 1},
+                                   {"name": "FC Machida Zelvia", "score": 2}]
+        _patch_repair_fetch(monkeypatch,
+                            {"m": dict(true_payload, completed=True)})
+        repair_scores.repair(apply=True, days_from=3)
+
+        conn = tracker._get_conn()
+        row = conn.execute(
+            "SELECT esito_finale, profit FROM predictions "
+            "WHERE match_id='machida' AND esito='2'").fetchone()
+        conn.close()
+        assert row[0] == "lost"
+        assert row[1] == pytest.approx(-1.0)
+
+    def test_apply_ri_salda_cassa_specchiata(self, temp_db, monkeypatch):
+        self._seed(temp_db)
+        tracker.save_cassa_entry("FC Machida Zelvia vs Kawasaki Frontale",
+                                 "2", 4.0, 5.0)
+        conn = tracker._get_conn()
+        conn.execute("UPDATE cassa SET esito_finale='won', profit=15.0, "
+                     "settled_at=? WHERE id=1", ("2026-09-02T13:53:56Z",))
+        conn.commit(); conn.close()
+
+        true_payload = dict(MACHIDA_AWAY_FIRST)
+        true_payload["scores"] = [{"name": "Kawasaki Frontale", "score": 1},
+                                   {"name": "FC Machida Zelvia", "score": 2}]
+        _patch_repair_fetch(monkeypatch,
+                            {"m": dict(true_payload, completed=True)})
+        repair_scores.repair(apply=True, days_from=3)
+
+        conn = tracker._get_conn()
+        row = conn.execute(
+            "SELECT esito_finale, profit FROM cassa WHERE id=1").fetchone()
+        conn.close()
+        assert row[0] == "lost"
+        assert row[1] == pytest.approx(-5.0)
+
+    def test_main_clampa_days_from_a_3(self, monkeypatch):
+        """the-odds-api risponde 422 a daysFrom>3: il CLI non deve mai
+        superare il limite (il default era 7 nel primo rilascio)."""
+        calls = {}
+        def fake_repair(apply, days_from):
+            calls["days"] = days_from
+            return 0
+        monkeypatch.setattr(repair_scores, "repair", fake_repair)
+        repair_scores.main(["--days-from", "7"])
+        assert calls["days"] == 3
+        repair_scores.main([])
+        assert calls["days"] == 3
+
+
 # --- 4. Riparazione dati esistenti ----------------------------------------
 
 def _seed_inverted(temp_db):
