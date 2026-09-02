@@ -665,7 +665,7 @@ def _update_results():
       2. Salda cassa / previsioni / puntate auto (ora i risultati esistono)
       3. Aggiorna rating
     """
-    from odds_api import SPORTS_MAP, fetch_scores
+    from odds_api import SPORTS_MAP, fetch_scores, match_scores_by_name
     from tracker import (save_result, get_results_stats, get_leagues_with_signals,
                           settle_cassa, settle_predictions, settle_bets)
     from rating_engine import compute_ratings
@@ -679,13 +679,10 @@ def _update_results():
         for m in fetch_scores(sport, days_from=2):
             if not m.get("id"):
                 continue
-            sc = m.get("scores") or []
-            if len(sc) < 2:
+            parsed = match_scores_by_name(m)
+            if parsed is None:
                 continue
-            try:
-                sh = int(sc[0]["score"]); sa = int(sc[1]["score"])
-            except Exception:
-                continue
+            sh, sa = parsed
             save_result(m["id"], lg, m.get("home_team", ""), m.get("away_team", ""),
                         sh, sa, m.get("last_update", ""))
             updated += 1

@@ -49,6 +49,41 @@ def _cache_is_stale_for_settlement(payload: list) -> bool:
             continue
     return False
 
+def match_scores_by_name(m):
+    """Punteggi (home, away) di un match the-odds-api associati per NOME.
+
+    L'array `scores` NON ha ordine garantito: ogni elemento ha `name`
+    (e opzionale `key`) da confrontare con home_team/away_team. NON si puo'
+    assumere che scores[0] sia la squadra di casa: il 02/09 FC Machida
+    Zelvia vs Kawasaki Frontale e' stato saldato con i punteggi invertiti
+    (bet sul 2 segnata vinta per una vittoria casalinga).
+
+    Returns:
+        (score_home, score_away) oppure None se i punteggi non sono
+        associabili con certezza (dati parziali o nomi non corrispondenti).
+    """
+    scores = m.get("scores") or []
+    home = str(m.get("home_team") or "").strip().lower()
+    away = str(m.get("away_team") or "").strip().lower()
+    if not home or not away:
+        return None
+    sh = sa = None
+    for s in scores:
+        name = str(s.get("name") or "").strip().lower()
+        key = str(s.get("key") or "").strip().lower()
+        try:
+            val = int(s.get("score"))
+        except (TypeError, ValueError):
+            continue
+        if name == home or (key and key == home):
+            sh = val
+        elif name == away or (key and key == away):
+            sa = val
+    if sh is None or sa is None:
+        return None
+    return sh, sa
+
+
 # TUTTE le competizioni di calcio coperte da the-odds-api (chiavi ufficiali
 # verificate su the-odds-api.com/sports-apis). Le squadre senza roster in
 # leagues_data usano il profilo di lega di default (expected_goals).
