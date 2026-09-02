@@ -686,6 +686,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    import secure_logging
+    secure_logging.setup()  # maschera segreti nei log + httpx a WARNING
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     _get_conn().close()

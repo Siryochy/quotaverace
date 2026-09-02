@@ -89,6 +89,9 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             await update.message.reply_text(answer)
 
+import secure_logging
+secure_logging.setup()  # maschera segreti nei log + httpx a WARNING (no token negli URL)
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -646,13 +649,40 @@ def format_scan_result(result: dict, max_events: int = 8,
 
 
 def _update_results():
-    """Aggiorna risultati e rating dalle API. Ritorna (updated, stats)."""
+    """Aggiorna risultati e rating dalle API. Ritorna (updated, stats, bet_settlements).
+
+    Ordine corretto:
+      1. Scarica risultati dall'API e salva in match_results
+      2. Salda cassa / previsioni / puntate auto (ora i risultati esistono)
+      3. Aggiorna rating
+    """
     from odds_api import SPORTS_MAP, fetch_scores
     from tracker import (save_result, get_results_stats, get_leagues_with_signals,
                           settle_cassa, settle_predictions, settle_bets)
     from rating_engine import compute_ratings
-    # Salda la cassa (le tue puntate reali) e il ledger previsioni (tutti i
-    # segnali proposti) coi risultati appena scaricati.
+    # --- STEP 1: scarica risultati PRIMA di saldare ---
+    leagues = get_leagues_with_signals(days=3)
+    updated = 0
+    for lg in leagues:
+        sport = SPORTS_MAP.get(lg)
+        if not sport:
+            continue
+        for m in fetch_scores(sport, days_from=2):
+            if not m.get("id"):
+                continue
+            sc = m.get("scores") or []
+            if len(sc) < 2:
+                continue
+            try:
+                sh = int(sc[0]["score"]); sa = int(sc[1]["score"])
+            except Exception:
+                continue
+            save_result(m["id"], lg, m.get("home_team", ""), m.get("away_team", ""),
+                        sh, sa, m.get("last_update", ""))
+            updated += 1
+    if updated:
+        logger.info("Risultati scaricati: %d partite aggiornate.", updated)
+    # --- STEP 2: salda cassa, previsioni e puntate AUTO ---
     try:
         settled = settle_cassa()
         if settled:
@@ -673,25 +703,7 @@ def _update_results():
             logger.info("Puntate auto: saldate %d (di cui %d push).", settled, pushes)
     except Exception as e:
         logger.warning("settle_bets fallita: %s", e)
-    leagues = get_leagues_with_signals(days=3)
-    updated = 0
-    for lg in leagues:
-        sport = SPORTS_MAP.get(lg)
-        if not sport:
-            continue
-        for m in fetch_scores(sport, days_from=2):
-            if not m.get("id"):
-                continue
-            sc = m.get("scores") or []
-            if len(sc) < 2:
-                continue
-            try:
-                sh = int(sc[0]["score"]); sa = int(sc[1]["score"])
-            except Exception:
-                continue
-            save_result(m["id"], lg, m.get("home_team", ""), m.get("away_team", ""),
-                        sh, sa, m.get("last_update", ""))
-            updated += 1
+    # --- STEP 3: aggiorna rating ---
     compute_ratings()
     return updated, get_results_stats(), bet_settlements
 
@@ -1183,6 +1195,38 @@ async def results_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Errore results_job: {e}")
 
+
+async def settlement_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
+    """Self-healing pendenze: ogni 2h (dopo la finestra dei match job)
+    scarica i risultati e salda cassa/previsioni/puntate rimaste aperte.
+
+    Copre i buchi della copertura job (es. redeploy alle 23:13 che salta il
+    results_job delle 21:30, come il 01/09): al prossimo tick le bet delle
+    16:40 vengono saldate automaticamente, senza intervento manuale.
+    """
+    try:
+        updated, stats, settlements = _update_results()
+    except Exception as e:
+        logger.error(f"Errore settlement_watchdog_job: {e}")
+        return
+    open_bets = open_preds = -1
+    try:
+        from tracker import _get_conn
+        conn = _get_conn(); c = conn.cursor()
+        open_bets = c.execute(
+            "SELECT COUNT(*) FROM bets WHERE esito_finale IS NULL").fetchone()[0]
+        open_preds = c.execute(
+            "SELECT COUNT(*) FROM predictions WHERE esito_finale IS NULL").fetchone()[0]
+        conn.close()
+    except Exception:
+        pass
+    if updated or settlements:
+        logger.info("settlement_watchdog: %d risultati, %d bet saldate, "
+                    "pendenze: %d bet / %d previsioni",
+                    updated, len(settlements), open_bets, open_preds)
+    if settlements:
+        await _send_bet_settlements(context, settlements)
+
 async def _send_report_to_recipients(context, text: str):
     """Invia il messaggio agli iscritti + sempre ai chat ADMIN_CHAT_ID."""
     chat_ids = set(get_subscribers())
@@ -1422,6 +1466,11 @@ def main() -> None:
         job_queue.run_daily(afternoon_job, time=time(hour=14 - IT_OFFSET, minute=0))
         job_queue.run_daily(evening_job, time=time(hour=20 - IT_OFFSET, minute=0))
         job_queue.run_daily(results_job, time=time(hour=21, minute=30 - IT_OFFSET))
+        # Self-healing pendenze: ogni 2h scarica risultati e salda bet/
+        # previsioni/cassa rimaste aperte (copre redeploy che saltano i job
+        # serali, cache stantie, API lente). Silenzioso se non c'e' nulla.
+        job_queue.run_repeating(settlement_watchdog_job, interval=7200,
+                                first=1200)  # primo giro dopo 20 min
         # Riepilogo a fine ultima partita: check ogni 15' dalle 21:00 ITA
         # (fallback notturno 23:50 ITA se la giornata non si chiude da sola).
         job_queue.run_repeating(end_of_day_report_job, interval=900,
@@ -1444,7 +1493,8 @@ def main() -> None:
         logger.info("Job Pro schedulati (ora italiana): 03:30 backup / 06:05 riepilogo ieri / "
                     "08:30 sync / 08:45 scan / 08:50 auto-bet / 14:00 pomeriggio / "
                     "14:00-23:50 RLM alert (5') / 17:00 free / 20:00 sera / "
-                    "21:30 risultati / 21:00-23:50 EOD (ogni 15')")
+                    "21:30 risultati / 21:00-23:50 EOD (ogni 15') / "
+                    "watchdog settlement (ogni 2h)")
     else: logger.warning("JobQueue non disponibile")
     logger.info("QuotaVerace Pro avviato.")
     application.run_polling()

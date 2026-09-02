@@ -1,4 +1,5 @@
 import json, os, time, logging, requests
+from datetime import datetime, timezone
 from pathlib import Path
 from config import DATA_DIR, load_dotenv
 
@@ -9,6 +10,44 @@ logger = logging.getLogger(__name__)
 CACHE_DIR = DATA_DIR
 ODDS_TTL = 86400          # cache 24h = 1 chiamata/giorno per lega
 MIN_REMAINING = 20        # stop sotto 20 crediti
+
+# Una partita iniziata da piu' di STALE_INPLAY_HOURS ma ancora senza punteggio
+# finale indica una cache scritta MENTRE la partita era in corso: servirne i
+# risultati blocca il settlement delle puntate per un'intera giornata (bug
+# 01/09: le 3 bet delle 16:40 non sono state mai saldate perche' results_job
+# delle 19:30 UTC rileggeva la cache del pomeriggio con completed=False).
+STALE_INPLAY_HOURS = 3.0
+
+
+def _cache_is_stale_for_settlement(payload: list) -> bool:
+    """True se la cache punteggi non e' attendibile per il settlement.
+
+    Serve a _scores_from_cache (via fetch_scores): una partita iniziata da
+    oltre STALE_INPLAY_HOURS ma con completed=False e' un artefatto di una
+    cache troppo vecchia, non un dato reale (una partita di calcio finisce
+    entro ~2h dal kickoff; oltre quelle ore 'completed=False' significa
+    'il risultato non era ancora disponibile quando la cache e' stata scritta').
+    """
+    if not payload:
+        return False
+    now = time.time()
+    for m in payload:
+        if m.get("completed"):
+            continue
+        scores = m.get("scores") or []
+        if len(scores) >= 2:
+            continue
+        try:
+            commence = (m.get("commence_time") or "").replace("Z", "+00:00")
+            start = datetime.fromisoformat(commence)
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            kickoff_age_h = (now - start.timestamp()) / 3600.0
+            if kickoff_age_h > STALE_INPLAY_HOURS:
+                return True  # partita finita da ore ma cache dice 'in corso'
+        except Exception:
+            continue
+    return False
 
 # TUTTE le competizioni di calcio coperte da the-odds-api (chiavi ufficiali
 # verificate su the-odds-api.com/sports-apis). Le squadre senza roster in
@@ -189,34 +228,62 @@ def fetch_odds(sport=None, commence_time_from=None, commence_time_to=None, **kwa
     return payload
 
 def fetch_scores(sport=None, days_from=2):
-    """Risultati finali (stessa chiave, ~1 credito/call, cache 24h)."""
+    """Risultati finali (stessa chiave, ~1 credito/call, cache 24h).
+
+    La cache NON viene fidata se contiene partite iniziate da oltre
+    STALE_INPLAY_HOURS ancora marcate completed=False (cache scritta mentre
+    la partita era in gioco): in quel caso si richiama l'API per avere i
+    risultati veri, altrimenti il settlement delle puntate resta bloccato.
+    Se la chiamata fallisce (crediti esauriti, rete), si ripiega sulla cache
+    comunque: meglio dati vecchi di nessun dato.
+    """
     if not sport:
         return []
     cache_file = CACHE_DIR / f"toa_scores_{sport}.json"
+    payload = []
     if cache_file.exists():
         try:
             data = json.loads(cache_file.read_text())
-            if time.time() - data.get("ts", 0) < ODDS_TTL:
-                return data.get("payload", [])
+            ts = data.get("ts", 0)
+            payload = data.get("payload", [])
+            if time.time() - ts < ODDS_TTL:
+                if not _cache_is_stale_for_settlement(payload):
+                    return payload
+                # Cache stantia per il settlement: forza il refresh (fallthrough)
+                logger.warning("scores cache stantia (%s): refresh forzato", sport)
         except Exception:
             pass
     key = _env("ODDS_API_KEY")
     if not key:
-        return []
+        # Nessuna chiave: la cache e' tutto quello che abbiamo.
+        return payload if cache_file.exists() else []
     try:
         r = requests.get(f"https://api.the-odds-api.com/v4/sports/{sport}/scores",
                          params={"apiKey": key, "daysFrom": days_from}, timeout=30)
         remaining = int(r.headers.get("x-requests-remaining", 999))
         if r.status_code in (401, 429):
             logger.warning(f"Scores bloccati ({r.status_code})")
-            return []
+            return payload if cache_file.exists() else []
         r.raise_for_status()
         payload = r.json()
     except Exception as e:
         logger.warning(f"Errore scores {sport}: {e}")
-        return []
+        return payload if cache_file.exists() else []
     CACHE_DIR.mkdir(exist_ok=True)
-    cache_file.write_text(json.dumps({"ts": time.time(), "payload": payload}))
+    # Se il payload contiene SOLO partite completate, salviamo con il
+    # timestamp originale della cache precedente (se fresca): cosi' la
+    # scrittura non 'ringiovanisce' artificialmente una cache che copre
+    # ancora la finestra quote, e il refresh non costa piu' crediti del
+    # necessario nelle ore successive.
+    save_ts = time.time()
+    if isinstance(payload, list) and payload and all(m.get("completed") for m in payload):
+        try:
+            old = json.loads(cache_file.read_text())
+            if time.time() - old.get("ts", 0) < ODDS_TTL:
+                save_ts = old["ts"]
+        except Exception:
+            pass
+    cache_file.write_text(json.dumps({"ts": save_ts, "payload": payload}))
     logger.info(f"the-odds-api scores {sport}: {len(payload)} | crediti residui: {remaining}")
     return payload
 

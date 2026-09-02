@@ -21,6 +21,8 @@ def _serve_api() -> None:
 
 
 def main() -> None:
+    import secure_logging
+    secure_logging.setup()  # maschera segreti nei log + httpx a WARNING
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     # init DB condiviso prima di tutto
