@@ -174,7 +174,7 @@ def test_update_results_mai_betfair(temp_db, monkeypatch):
     monkeypatch.setattr(odds_api, "fetch_scores",
                         lambda sport, days_from=2: payload.get(sport, []))
 
-    updated, stats, settlements = bot._update_results()
+    updated, stats, settlements, sanity = bot._update_results()
 
     assert updated == 1
     bets = tracker.get_bets()

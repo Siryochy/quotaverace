@@ -307,6 +307,82 @@ def _esito_won(esito, sh, sa):
     return None
 
 
+# Prefissi club comuni ignorati nel match per nome della cassa
+# (_norm_team elimina solo fc/cf: 'CA Osasuna' non agganciava 'Osasuna'
+# → la cassa finiva saldata su una partita VECCHIA della stessa coppia).
+_CLUB_PREFIXES = ("ca ", "ac ", "as ", "cd ", "fc ", "cf ", "de ",
+                   "ss ", "sc ", "us ", "ud ", "sd ", "at ", "sv ")
+
+
+def _loose_team(name):
+    """Normalizzazione TOLERANTE per il match cassa: _norm_team + rimozione
+    dei prefissi club comuni (es. 'CA Osasuna' → 'osasuna')."""
+    t = _norm_team(name)
+    for _ in range(3):
+        changed = False
+        for p in _CLUB_PREFIXES:
+            if t.startswith(p):
+                t = t[len(p):].strip()
+                changed = True
+        if not changed:
+            break
+    return t or _norm_team(name)
+
+
+def _goals_sane(sh, sa, result=None) -> bool:
+    """True se (sh, sa) è un punteggio finale plausibile (int non negativi).
+
+    Se `result` è dato ('1'/'X'/'2'), verifica anche che sia coerente coi
+    gol: una riga con result='1' ma sh < sa è un dato CORROTTO su cui il
+    settlement non deve chiudere nulla.
+    """
+    try:
+        sh_i, sa_i = int(sh), int(sa)
+    except (TypeError, ValueError):
+        return False
+    if sh_i < 0 or sa_i < 0:
+        return False
+    if result is not None:
+        expected = "1" if sh_i > sa_i else ("2" if sh_i < sa_i else "X")
+        if str(result).strip().upper() != expected:
+            return False
+    return True
+
+
+def _esito_possible(mercato, esito, sh, sa, home=None, away=None):
+    """Tripwire anti-contraddizione: l'esito PUÒ essere vinto coi gol (sh, sa)?
+
+    Ritorna True/False, oppure None per i mercati non verificabili qui
+    (Asian Handicap, esiti sconosciuti). Il settlement deve BLOCCARE la
+    chiusura di una scommessa quando il verdetto calcolato è 'won' ma i gol
+    rendono l'esito impossibile (es. esito '2' con vittoria casa): è il
+    segnale di dati corrotti o di una regressione nel calcolo dell'esito.
+    """
+    m = str(mercato or "").upper()
+    el = str(esito or "").lower().strip()
+    if m == "AH":
+        return None
+    home_n = _norm_team(home) if home else ""
+    away_n = _norm_team(away) if away else ""
+    el_n = _norm_team(el)
+    if m in ("1X2",) or el in ("1", "2", "x", "draw", "pareggio") or \
+            (home and el_n == home_n) or (away and el_n == away_n):
+        if el == "1" or (home and el_n == home_n):
+            return sh > sa
+        if el == "2" or (away and el_n == away_n):
+            return sa > sh
+        if el in ("x", "draw", "pareggio"):
+            return sh == sa
+        return None
+    if "over" in el:
+        return (sh + sa) >= 3
+    if "under" in el:
+        return (sh + sa) <= 2
+    if "btts" in el or "gol gol" in el:
+        return sh > 0 and sa > 0
+    return None
+
+
 def settle_cassa():
     """Salda le scommesse aperte della cassa con i risultati reali (match_results).
 
@@ -314,6 +390,11 @@ def settle_cassa():
     per coppia di squadre normalizzate; le scommesse senza risultato ancora
     disponibile restano in 'in gioco'. Ritorna il numero saldate in questa
     chiamata.
+
+    SANITY CHECK: se i gol registrati sono corrotti (punteggio negativo/
+    non numerico) o l'esito calcolato è in contraddizione EVIDENTE coi gol
+    (es. esito '2' vinto con vittoria casa), la riga NON viene chiusa: resta
+    in gioco e viene loggata, per non pagare un verdetto su dati falsi.
     """
     conn = _get_conn()
     _create_results_table(conn)
@@ -321,36 +402,56 @@ def settle_cassa():
     try:
         rows = c.execute("SELECT id, partita, esito, quota, importo FROM cassa "
                          "WHERE esito_finale IS NULL").fetchall()
-        results = c.execute("SELECT home_team, away_team, score_home, score_away "
-                            "FROM match_results").fetchall()
+        results = c.execute("SELECT home_team, away_team, score_home, score_away, "
+                            "settled_at FROM match_results").fetchall()
     finally:
         conn.close()
     norm_map = {}
-    for home, away, sh, sa in results:
-        norm_map.setdefault((_norm_team(home), _norm_team(away)), (sh, sa))
+    for home, away, sh, sa, settled_at in results:
+        # Doppia chiave (stretta + loose): 'CA Osasuna' e 'Osasuna' devono
+        # agganciare lo stesso match. Se la stessa coppia ha più partite
+        # (es. stagioni diverse), si salda sulla PIÙ RECENTE: la cassa si
+        # riferisce al match corrente, non a una riga storica (bug 2025).
+        for key in ((_norm_team(home), _norm_team(away)),
+                    (_loose_team(home), _loose_team(away))):
+            if key not in norm_map or (settled_at or "") > (norm_map[key][2] or ""):
+                norm_map[key] = (sh, sa, settled_at or "")
 
     conn = _get_conn(); c = conn.cursor()
     now = datetime.now().isoformat()
-    settled = 0
+    settled = blocked = 0
     for cid, partita, esito, quota, importo in rows:
         # "Serie A – Roma vs Empoli" -> ultimo " vs " separa casa/trasferta
         clean = partita.split(" – ")[-1].strip() if " – " in partita else partita
         if " vs " not in clean:
             continue
         parts = clean.split(" vs ")
-        home, away = _norm_team(parts[0].strip()), _norm_team(parts[1].strip())
+        home, away = _loose_team(parts[0].strip()), _loose_team(parts[1].strip())
         match = norm_map.get((home, away))
         if match is None:
             continue
-        sh, sa = match
+        sh, sa = match[0], match[1]
+        if not _goals_sane(sh, sa):
+            logger.warning("settle_cassa: gol non validi (%r-%r) su %s: "
+                           "settlement BLOCCATO (cassa #%d)", sh, sa, partita, cid)
+            blocked += 1
+            continue
         won = _esito_won(esito, sh, sa)
         if won is None:
+            continue
+        if won and _esito_possible(None, esito, sh, sa) is False:
+            logger.warning("settle_cassa: esito '%s' VINTO in contraddizione coi "
+                           "gol %s-%s (%s): settlement BLOCCATO (cassa #%d)",
+                           esito, sh, sa, partita, cid)
+            blocked += 1
             continue
         profit = round((quota - 1) * importo, 2) if won else round(-importo, 2)
         c.execute("UPDATE cassa SET esito_finale=?, profit=?, settled_at=? WHERE id=?",
                   ("won" if won else "lost", profit, now, cid))
         settled += 1
     conn.commit(); conn.close()
+    if blocked:
+        logger.warning("settle_cassa: %d righe BLOCCATE dal sanity check", blocked)
     return settled
 
 
@@ -532,14 +633,28 @@ def settle_predictions():
 
     conn = _get_conn(); c = conn.cursor()
     now = datetime.now().isoformat()
-    settled = pushes = 0
+    settled = pushes = blocked = 0
     for pid, match_id, mercato, esito, quota in open_rows:
         r = res_map.get(match_id)
         if not r:
             continue
         home, away, sh, sa = r
+        if not _goals_sane(sh, sa):
+            logger.warning("settle_predictions: gol non validi (%r-%r) su "
+                           "match %s: settlement BLOCCATO (pred #%d)",
+                           sh, sa, match_id, pid)
+            blocked += 1
+            continue
         outcome, profit = _prediction_outcome(mercato, esito, quota, sh, sa, home, away)
         if outcome is None:
+            continue
+        if outcome == "won" and _esito_possible(mercato, esito, sh, sa,
+                                                home, away) is False:
+            logger.warning("settle_predictions: esito '%s' VINTO in "
+                           "contraddizione coi gol %s-%s (%s vs %s): "
+                           "settlement BLOCCATO (pred #%d)",
+                           esito, sh, sa, home, away, pid)
+            blocked += 1
             continue
         if outcome == "push":
             pushes += 1
@@ -547,6 +662,8 @@ def settle_predictions():
                   (outcome, profit, now, pid))
         settled += 1
     conn.commit(); conn.close()
+    if blocked:
+        logger.warning("settle_predictions: %d righe BLOCCATE dal sanity check", blocked)
     return settled, pushes
 
 
@@ -677,15 +794,27 @@ def settle_bets(return_details: bool = False):
 
     conn = _get_conn(); c = conn.cursor()
     now = datetime.now().isoformat()
-    settled = pushes = 0
+    settled = pushes = blocked = 0
     details = []
     for bid, match_id, mercato, esito, price, stake, mode in open_rows:
         r = res_map.get(match_id)
         if not r:
             continue
         home, away, sh, sa = r
+        if not _goals_sane(sh, sa):
+            logger.warning("settle_bets: gol non validi (%r-%r) su match %s: "
+                           "settlement BLOCCATO (bet #%d)", sh, sa, match_id, bid)
+            blocked += 1
+            continue
         outcome, _ = _prediction_outcome(mercato, esito, price, sh, sa, home, away)
         if outcome is None:
+            continue
+        if outcome == "won" and _esito_possible(mercato, esito, sh, sa,
+                                                home, away) is False:
+            logger.warning("settle_bets: esito '%s' VINTO in contraddizione "
+                           "coi gol %s-%s (%s vs %s): settlement BLOCCATO "
+                           "(bet #%d)", esito, sh, sa, home, away, bid)
+            blocked += 1
             continue
         if outcome == "push":
             profit = 0.0
@@ -706,10 +835,87 @@ def settle_bets(return_details: bool = False):
             "outcome": outcome, "profit": profit,
         })
     conn.commit(); conn.close()
+    if blocked:
+        logger.warning("settle_bets: %d righe BLOCCATE dal sanity check", blocked)
 
     if return_details:
         return settled, pushes, details
     return settled, pushes
+
+
+def settlement_sanity_check() -> list:
+    """Righe GIÀ saldate (bets/predictions) il cui verdetto contraddice i
+    gol correnti di match_results.
+
+    Tripwire post-fix (bug 02/09): se match_results viene corretto dopo che
+    la bet era stata chiusa (es. il watchdog risalva il punteggio vero con
+    match_scores_by_name), il verdetto salvato può restare SPECCHIATO
+    (esito '2' marcato won mentre i gol dicono vittoria casa). Questa
+    funzione le trova ricomputando l'esito atteso dai gol correnti.
+
+    Ritorna una lista di dict: {table, id, match_id, mercato, esito,
+    stored, expected, home, away, sh, sa}. Vuota se tutto coerente.
+    """
+    conn = _get_conn()
+    _create_results_table(conn)
+    c = conn.cursor()
+    try:
+        results = {r[0]: r[1:] for r in c.execute(
+            "SELECT match_id, home_team, away_team, score_home, score_away "
+            "FROM match_results").fetchall()}
+        rows = []
+        for bid, match_id, mercato, esito, price, stored in c.execute(
+                "SELECT id, match_id, mercato, esito, price, esito_finale "
+                "FROM bets WHERE esito_finale IS NOT NULL").fetchall():
+            rows.append(("bets", bid, match_id, mercato, esito, price, stored))
+        for pid, match_id, mercato, esito, quota, stored in c.execute(
+                "SELECT id, match_id, mercato, esito, quota, esito_finale "
+                "FROM predictions WHERE esito_finale IS NOT NULL").fetchall():
+            rows.append(("predictions", pid, match_id, mercato, esito, quota, stored))
+    finally:
+        conn.close()
+
+    out = []
+    for table, rid, match_id, mercato, esito, price, stored in rows:
+        r = results.get(match_id)
+        if not r:
+            continue
+        home, away, sh, sa = r
+        if not _goals_sane(sh, sa):
+            continue
+        expected, _ = _prediction_outcome(mercato, esito, price, sh, sa,
+                                          home, away)
+        if expected is None or expected == stored:
+            continue
+        out.append({"table": table, "id": rid, "match_id": match_id,
+                    "mercato": mercato, "esito": esito,
+                    "stored": stored, "expected": expected,
+                    "home": home, "away": away, "sh": sh, "sa": sa})
+    return out
+
+
+def heal_settled_contradictions(contradictions: list) -> int:
+    """Riapre le righe in contraddizione e le ri-salda coi gol correnti.
+
+    Il verdetto specchiato (bug 02/09) viene azzerato (esito_finale/profit/
+    settled_at NULL) e il settlement ricomputa l'esito dai gol VERI di
+    match_results: la bet passa da 'won' a 'lost' senza intervento manuale.
+
+    Ritorna il numero di righe corrette (0 se la lista è vuota).
+    """
+    if not contradictions:
+        return 0
+    conn = _get_conn(); c = conn.cursor()
+    for item in contradictions:
+        c.execute(f"UPDATE {item['table']} SET esito_finale=NULL, profit=NULL, "
+                  f"settled_at=NULL WHERE id=?", (item["id"],))
+    conn.commit(); conn.close()
+    nb, _ = settle_bets()
+    npr, _ = settle_predictions()
+    logger.warning("heal_settled_contradictions: riaperte e ri-sal date "
+                   "%d righe (%d bets, %d pred)",
+                   len(contradictions), nb, npr)
+    return len(contradictions)
 
 
 def bets_period(since: str):

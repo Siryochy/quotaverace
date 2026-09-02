@@ -709,9 +709,38 @@ def _update_results():
             logger.info("Puntate auto: saldate %d (di cui %d push).", settled, pushes)
     except Exception as e:
         logger.warning("settle_bets fallita: %s", e)
+    # --- STEP 2.5: SANITY CHECK sui verdetti già emessi ---
+    # Tripwire del bug 02/09 (punteggi invertiti): se match_results è stato
+    # corretto dopo la chiusura (es. watchdog con match_scores_by_name), una
+    # bet può restare 'won' con l'esito SPECCHIATO. Qui si ricomputa l'esito
+    # dai gol correnti e si ri-saldano automaticamente le righe in
+    # contraddizione, con alert su Telegram (blocca la chiusura sbagliata).
+    sanity_alerts = []
+    try:
+        from tracker import settlement_sanity_check, heal_settled_contradictions
+        contrad = settlement_sanity_check()
+        if contrad:
+            healed = heal_settled_contradictions(contrad)
+            lines = []
+            for c in contrad[:8]:
+                lines.append(
+                    f"   ⚠️ {c['table']} #{c['id']} {c['esito']}: "
+                    f"era '{c['stored']}' → atteso '{c['expected']}' "
+                    f"({c['home']} {c['sh']}-{c['sa']} {c['away']})")
+            if len(contrad) > 8:
+                lines.append(f"   … e altre {len(contrad) - 8} righe.")
+            alert = ("🔔 *SANITY CHECK SETTLEMENT*\n"
+                     f"{healed} verdetto/i in contraddizione coi gol "
+                     "registrati: RI-SALDATI automaticamente\n\n" +
+                     "\n".join(lines))
+            sanity_alerts.append(alert)
+            logger.warning("SANITY CHECK: %d righe ri-sal date "
+                           "automaticamente", healed)
+    except Exception as e:
+        logger.warning("settlement sanity check fallita: %s", e)
     # --- STEP 3: aggiorna rating ---
     compute_ratings()
-    return updated, get_results_stats(), bet_settlements
+    return updated, get_results_stats(), bet_settlements, sanity_alerts
 
 
 def _admin_chat_ids() -> list:
@@ -1061,9 +1090,11 @@ async def cmd_risultati(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         from odds_api import SPORTS_MAP, fetch_scores
         from tracker import save_result, get_results_stats, get_leagues_with_signals
-        updated, stats, settlements = _update_results()
+        updated, stats, settlements, sanity = _update_results()
         if settlements:
             await _send_bet_settlements(context, settlements)
+        for alert in sanity:
+            await _send_report_to_recipients(context, alert)
         if stats["total"] == 0:
             text = "📊 *RISULTATI TRACKING*\n\nNessuna scommessa chiusa ancora.\nI risultati si aggiornano da soli quando le partite finiscono."
         else:
@@ -1195,9 +1226,11 @@ async def afternoon_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Job pomeridiano: ricontrollo Pro")
     fetch_and_analyze_today()
     try:
-        _, _, settlements = _update_results()
+        _, _, settlements, sanity = _update_results()
         if settlements:
             await _send_bet_settlements(context, settlements)
+        for alert in sanity:
+            await _send_report_to_recipients(context, alert)
     except Exception as e:
         logger.error(f"Errore update risultati job: {e}")
     await notify_job(context)          # immediato per i premium
@@ -1211,9 +1244,11 @@ async def evening_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Job serale: ricontrollo Pro")
     fetch_and_analyze_today()
     try:
-        _, _, settlements = _update_results()
+        _, _, settlements, sanity = _update_results()
         if settlements:
             await _send_bet_settlements(context, settlements)
+        for alert in sanity:
+            await _send_report_to_recipients(context, alert)
     except Exception as e:
         logger.error(f"Errore update risultati job: {e}")
     await notify_job(context)
@@ -1221,10 +1256,12 @@ async def evening_job(context: ContextTypes.DEFAULT_TYPE):
 async def results_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Job risultati serali (23:30 ITA)")
     try:
-        updated, stats, settlements = _update_results()
+        updated, stats, settlements, sanity = _update_results()
         logger.info(f"Risultati aggiornati: {updated} partite")
         if settlements:
             await _send_bet_settlements(context, settlements)
+        for alert in sanity:
+            await _send_report_to_recipients(context, alert)
     except Exception as e:
         logger.error(f"Errore results_job: {e}")
 
@@ -1238,7 +1275,7 @@ async def settlement_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
     16:40 vengono saldate automaticamente, senza intervento manuale.
     """
     try:
-        updated, stats, settlements = _update_results()
+        updated, stats, settlements, sanity = _update_results()
     except Exception as e:
         logger.error(f"Errore settlement_watchdog_job: {e}")
         return
@@ -1253,12 +1290,15 @@ async def settlement_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
         conn.close()
     except Exception:
         pass
-    if updated or settlements:
+    if updated or settlements or sanity:
         logger.info("settlement_watchdog: %d risultati, %d bet saldate, "
-                    "pendenze: %d bet / %d previsioni",
-                    updated, len(settlements), open_bets, open_preds)
+                    "pendenze: %d bet / %d previsioni, %d sanity check",
+                    updated, len(settlements), open_bets, open_preds,
+                    len(sanity))
     if settlements:
         await _send_bet_settlements(context, settlements)
+    for alert in sanity:
+        await _send_report_to_recipients(context, alert)
 
 async def _send_report_to_recipients(context, text: str):
     """Invia il messaggio agli iscritti + sempre ai chat ADMIN_CHAT_ID."""
