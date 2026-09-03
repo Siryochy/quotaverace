@@ -86,15 +86,17 @@ cd webapp && npm run build            # build Next.js
 5. **Python**: usare sempre `venv/bin/python`, mai `python` nudo.
 6. **DB**: migrazioni schema con ALTER TABLE idempotente in `tracker.py`
    (già fatto per market_prob/market_edge) — verificare sul volume dopo il deploy.
-7. **Token**: rotazioni completate e verificate il **01/09** e il **02/09**
-   (Telegram attivo su `api`/`production`, `getMe` 200 + notifica consegnata).
-   ⚠️ Il token del 02/09 è stato incollato in chat → considerarlo ESPOSTO:
-   ruotarlo di nuovo alla prossima sessione di sicurezza SENZA incollarlo
+7. **Token**: rotazioni completate e verificate il **01/09**, il **02/09** e
+   il **04/09** (Telegram attivo su `api`/`production`, `getMe` 200).
+   ⚠️ Il token del 02/09 (incollato in chat) è stato REVOCATO il 04/09 via
+   Opzione A: il vecchio risponde 401, il nuovo è attivo e nel vault cifrato
+   locale. Regola permanente: qualunque token finito in un canale pubblico
+   va considerato compromesso e rotato subito, SENZA incollarlo in chat
    (Opzione A: utente genera da @BotFather e fa `railway variables --service
    api --set QUOTAVERACE_BOT_TOKEN=...`; l'agente verifica e fa il merge nel
-   vault senza mai vedere il valore). Qualunque token finito in un canale
-   pubblico va considerato compromesso e rotato subito (GitHub: PAT
-   fine-grained → vault; Telegram: @BotFather).
+   vault senza mai vedere il valore — GitHub: PAT fine-grained → vault;
+   Telegram: @BotFather). Vincolo custodito dal tripwire
+   `test_secret_hygiene.py` (rompe se compare una credenziale in chiaro).
 
 ## Segreti: vault cifrato (`secrets/`)
 
@@ -449,10 +451,13 @@ cd webapp && npm run build            # build Next.js
   e comando `/backup` (solo admin). VERIFICATO IN PRODUZIONE: integrity ok,
   56 CLV, dataset ML, 78 file data/.
 - **Test**: 631 test verdi (la suite completa richiede ~9 min).
-- **Sicurezza**: rotazioni token 01/09 e 02/09 verificate (Telegram
-  `@Calcifrrbot`, ID 8372645521: `getMe` 200, notifica consegnata al Chat ID
-  proprietario 7718157436; GitHub PAT fine-grained nel vault). Token del
-  02/09 esposto in chat → da ruotare di nuovo (vedi regola 7).
+- **Sicurezza**: rotazioni token 01/09, 02/09 e **04/09** verificate
+  (Telegram `@Calcifrrbot`, ID 8372645521). Rotazione 04/09 completata
+  con Opzione A: token esposto in chat REVOCATO (getMe col vecchio → 401)
+  e nuovo token attivo (getMe 200), letto dalle env Railway e portato nel
+  vault cifrato locale SENZA mai apparire in chat (46 chars, diff vs
+  vecchio verificata). Tripwire `test_secret_hygiene.py` rende permanente
+  il vincolo "nessuna credenziale in chiaro nel codice" (vedi regola 7).
 
 ## Prossimi passi possibili (non urgenti)
 
@@ -461,8 +466,6 @@ cd webapp && npm run build            # build Next.js
   merge nel vault + upload `client-ssl.crt` (PUBBLICO) su myacc.betfair.it +
   verifica certlogin dal container + monitorare il primo giro di
   `betfair_scan_job`/`auto_bet_job`.
-- **Ruotare di nuovo il token Telegram** (esposto in chat il 02/09) via
-  Opzione A, senza incollarlo.
 - Quando il ledger avrà 100+ previsioni chiuse: usare `market_diagnose.py`
   per identificare mercati critici e ajustare blend/devig/soglie.
 - Eseguire `/backtest_mc` con 15+ previsioni chiuse (oggi 8): le metriche
