@@ -91,8 +91,8 @@ def _get_conn():
     _pred_cols = [r[1] for r in c.execute("PRAGMA table_info(predictions)")]
     if "settled_at" not in _pred_cols:
         c.execute("ALTER TABLE predictions ADD COLUMN settled_at TEXT")
-    # Puntate automatiche su Betfair (auto_bet.py): ordini reali o dry-run,
-    # saldati a fine partita come le previsioni.
+    # Puntate automatiche (auto_bet.py): SIM-only dal 04/09 (paper trading
+    # con la quota del segnale), saldati a fine partita come le previsioni.
     c.execute('''CREATE TABLE IF NOT EXISTS bets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         match_id TEXT, mercato TEXT, esito TEXT,

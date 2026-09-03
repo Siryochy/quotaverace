@@ -8,7 +8,7 @@ Endpoint:
   GET /api/storico           -> storico segnali + riepilogo 30gg
   GET /api/value             -> migliori value bet filtrate
   GET /api/schedina          -> schedina del giorno (picks + multipla)
-  GET /api/scan              -> catalogo Betfair (cache job 8:45; ?live=1 per scan immediata)
+  GET /api/scan              -> rimosso (04/09): Betfair non è più in architettura
 
 Uso su Railway: dopo aver deployato il bot, crea un secondo servizio con
   startCommand = "python web_api.py"
@@ -239,36 +239,11 @@ def _health_json(params=None):
     except Exception:
         quota = None
     creds = {"remaining": quota[0], "cache": quota[1]} if quota else None
-    # Diagnostica Betfair SENZA valori: distingue assente/vuota/presente
-    # (mostra solo la lunghezza, mai il segreto) per capire perche' le
-    # shared variables BETFAIR non risultano configurate.
-    # Con BETFAIR_ENABLED=0 l'integrazione e' in stand-by VOLUTO: il flag
-    # esplicito evita che i "MANCANTE" sembrino un problema.
-    betfair_enabled = True
-    try:
-        from betfair_client import enabled as _bf_enabled
-        betfair_enabled = _bf_enabled()
-    except Exception:
-        betfair_enabled = True
-    betfair = None
-    try:
-        from betfair_client import check_setup
-        betfair = check_setup()
-    except Exception:
-        betfair = None
-    betfair_raw = {}
-    for v in ("BETFAIR_APP_KEY", "BETFAIR_USERNAME", "BETFAIR_PASSWORD",
-              "BETFAIR_CERT_PATH", "BETFAIR_CERT_KEY_PATH"):
-        val = os.getenv(v)
-        if val is None:
-            betfair_raw[v] = "assente"
-        elif val == "":
-            betfair_raw[v] = "vuota"
-        else:
-            betfair_raw[v] = f"presente (len {len(val)})"
+    # Dal 04/09 Betfair è stato RIMOSSO dall'architettura: la refertazione
+    # usa solo API-Football, le quote/CLV solo the-odds-api. Il flag
+    # betfair_enabled resta per compatibilità col frontend, sempre False.
     return {"status": "ok", "api_football_key": bool(os.getenv("API_FOOTBALL_KEY")),
-            "quota": creds, "betfair": betfair, "betfair_enabled": betfair_enabled,
-            "betfair_raw": betfair_raw}
+            "quota": creds, "betfair_enabled": False, "betfair": None}
 
 
 def _segnali_json(params=None):
@@ -518,13 +493,12 @@ def _telegram_send_message(token: str, chat_id: int, text: str):
 
 
 def _auto_bet(params=None, body=None):
-    """POST /api/auto_bet — esegue SUBITO le puntate del giorno (paper test),
+    """POST /api/auto_bet — esegue SUBITO le puntate del giorno (SIM-only),
     come il job delle 08:50, e notifica su Telegram gli admin.
 
-    Con allow_sim=True: se Betfair non e' configurato o manca il catalogo,
-    piazza puntate SIMULATE con la quota del segnale (mode='sim') cosi' il
-    ledger/ML si addestra comunque. Le puntate finiscono in tabella `bets`
-    e vengono saldate a fine partita come sempre.
+    Dal 04/09 le puntate sono SEMPRE simulate con la quota del segnale
+    (mode='sim', nessun conto Exchange): finiscono in tabella `bets` e
+    vengono saldate a fine partita come sempre (ledger/ML/CLV).
     """
     try:
         from auto_bet import run_today_bets
@@ -642,41 +616,16 @@ def _market_signals_json(params=None):
 
 
 def _scan_json(params=None):
-    """Catalogo Betfair: cache del job giornaliero, o scan live con ?live=1.
+    """Endpoint rimosso (04/09): Betfair non fa più parte dell'architettura.
 
-    Ritorna (status_code, payload) — il codice HTTP riflette lo stato:
-    200 = ok, 503 = nessuna cache o Betfair non configurato.
+    La refertazione usa esclusivamente API-Football e le quote/CLV
+    the-odds-api: non esiste più un catalogo Exchange da esporre.
     """
-    params = params or {}
-    from daily_scan_job import load_latest_scan, run_daily_scan
-    try:
-        from betfair_client import enabled as _bf_enabled
-    except Exception:
-        _bf_enabled = None
-    if _bf_enabled is not None and not _bf_enabled():
-        return 503, {
-            "error": "betfair_disabled",
-            "message": "Integrazione Betfair temporaneamente in stand-by "
-                       "(BETFAIR_ENABLED=0). Quote e refertazione: the-odds-api.",
-        }
-    if params.get("live") == "1":
-        # ?date=YYYY-MM-DD per scansionare un giorno specifico (default: oggi UTC)
-        payload = run_daily_scan(params.get("date") or None)
-        if payload is None:
-            return 503, {
-                "error": "betfair_not_configured",
-                "message": "Configura BETFAIR_APP_KEY, BETFAIR_USERNAME, "
-                           "BETFAIR_PASSWORD, BETFAIR_CERT_PATH",
-            }
-        return 200, payload
-    cached = load_latest_scan()
-    if cached is None:
-        return 503, {
-            "error": "no_scan_cache",
-            "message": "Nessuna scansione salvata: usa /scan nel bot "
-                       "o GET /api/scan?live=1",
-        }
-    return 200, cached
+    return 503, {
+        "error": "betfair_removed",
+        "message": "Betfair rimosso dall'architettura (04/09). "
+                   "Refertazione: API-Football; quote/CLV: the-odds-api.",
+    }
 
 
 ROUTES = {

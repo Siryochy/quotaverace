@@ -21,11 +21,6 @@ from backtest import run_backtest
 from football_hist import run_sync
 from fixture_engine import (fetch_and_analyze_today, get_calendar_formatted,
                             get_value_picks_for_schedina, format_schedina, build_multipla_block)
-from daily_scanner import scan_day, group_same_start
-from betfair_client import get_client as get_betfair_client
-from betfair_client import enabled as betfair_enabled
-from daily_scan_job import run_daily_scan
-from surebet_pipeline import run_surebet_alert, format_alert
 from auto_bet import run_today_bets
 
 try:
@@ -313,59 +308,6 @@ async def cmd_surebet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = format_surebets(get_odds_data())
     await update.message.reply_text(text, parse_mode="Markdown")
 
-async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/scan [YYYY-MM-DD] — scansione giornaliera prezzi back del Betfair Exchange.
-
-    Solo lettura: non piazza alcun ordine (livello 'descoperta').
-    """
-    args = context.args
-    target_date = args[0].strip() if args else None
-    if target_date:
-        try:
-            datetime.strptime(target_date, "%Y-%m-%d")
-        except ValueError:
-            await update.message.reply_text(
-                "❌ Data non valida: usa formato YYYY-MM-DD.\nEsempio: `/scan 2026-09-01`",
-                parse_mode="Markdown")
-            return
-    client = get_betfair_client()
-    if not betfair_enabled():
-        await update.message.reply_text(
-            "⏸ *Betfair in stand-by*\n\n"
-            "L'integrazione Exchange è temporaneamente disattivata "
-            "(BETFAIR_ENABLED=0). I segnali value, la schedina e il saldaggio "
-            "puntate continuano a funzionare via the-odds-api.",
-            parse_mode="Markdown")
-        return
-    if client is None:
-        await update.message.reply_text(
-            "❌ *Betfair non configurato*\n\n"
-            "Aggiungi al file .env:\n"
-            "• `BETFAIR_APP_KEY`\n"
-            "• `BETFAIR_USERNAME`\n"
-            "• `BETFAIR_PASSWORD`\n"
-            "• `BETFAIR_CERT_PATH` (certificato SSL)\n\n"
-            "🔒 La scansione è solo lettura: nessun ordine.",
-            parse_mode="Markdown")
-        return
-    note = await update.message.reply_text("🔄 Scansione giornaliera Betfair in corso...")
-    loop = asyncio.get_running_loop()
-    try:
-        result = await loop.run_in_executor(
-            _scan_executor, lambda: scan_day(client, target_date))
-    except Exception as e:
-        logger.exception("Errore scansione Betfair")
-        await note.edit_text(f"❌ Scansione fallita: {type(e).__name__}: {e}")
-        return
-    text = format_scan_result(result)
-    # Markdown Telegram è severo (underscore nei nomi squadra): fallback testuale
-    try:
-        await note.edit_text(text, parse_mode="Markdown")
-    except Exception:
-        try:
-            await note.edit_text(text)
-        except Exception:
-            await update.message.reply_text(text)
 
 async def cmd_storico_personale(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
@@ -518,7 +460,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/segnale <casa> <trasferta>` – analisi specifica\n"
         "`/value` – value bet filtrate\n"
         "`/surebet` – scanner arbitraggi\n"
-        "`/scan [data]` – scansione Betfair del giorno (solo lettura)\n"
         "`/setbankroll <€>` – imposta bankroll\n"
         "`/subscribe` – attiva notifiche Pro\n"
         "`/risultati` – statistiche reali dei segnali\n"
@@ -612,49 +553,6 @@ def format_surebets(odds_data):
     return msg + DISCLAIMER
 
 
-def format_scan_result(result: dict, max_events: int = 8,
-                       max_prices_per_event: int = 4, max_chars: int = 3800) -> str:
-    """Formatta l'output di scan_day per Telegram (compatto, entro il limite 4096)."""
-    opps = result.get("opportunities", [])
-    header = (
-        f"🔍 *SCANSIONE BETFAIR — {result.get('day', 'oggi')}*\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🏟 Eventi: {result.get('events', 0)}\n"
-        f"🎯 Mercati: {result.get('markets', 0)}\n"
-        f"📋 Prezzi back: {len(opps)}\n\n"
-    )
-    if not opps:
-        return header + "Nessun prezzo disponibile." + DISCLAIMER
-
-    groups = group_same_start(opps)
-    unique_events = {o.get("event_name") or "?" for o in opps}
-    lines: list[str] = []
-    shown_events = 0
-    for start_key in sorted(groups.keys()):
-        if not start_key:
-            continue  # senza kickoff: fuori ordine, mostrati solo se resta spazio
-        group = groups[start_key]
-        for ev in sorted({o.get("event_name") or "?" for o in group}):
-            if shown_events >= max_events:
-                break
-            shown_events += 1
-            prices = sorted(
-                (o for o in group if o.get("event_name") == ev and o.get("price")),
-                key=lambda o: o.get("market_type") or "")
-            block = [f"🏟 *{ev}* — {start_key.replace('T', ' ')} UTC"]
-            for o in prices[:max_prices_per_event]:
-                block.append(
-                    f"   • {o.get('market_type', '?')} | "
-                    f"{o.get('selection_name', '?')} @ {o.get('price'):.2f}")
-            lines.append("\n".join(block))
-
-    text = header + ("\n\n".join(lines) if lines else "Nessun evento con prezzi.")
-    if shown_events < len(unique_events):
-        text += f"\n\n… e altri {len(unique_events) - shown_events} eventi."
-    if len(text) > max_chars:
-        text = text[:max_chars].rsplit("\n", 1)[0] + "\n…"
-    return text + DISCLAIMER
-
 
 
 def _update_results():
@@ -665,27 +563,20 @@ def _update_results():
       2. Salda cassa / previsioni / puntate auto (ora i risultati esistono)
       3. Aggiorna rating
     """
-    from odds_api import SPORTS_MAP, fetch_scores, match_scores_by_name
-    from tracker import (save_result, get_results_stats, get_leagues_with_signals,
-                          settle_cassa, settle_predictions, settle_bets)
+    from tracker import (get_results_stats, settle_cassa, settle_predictions,
+                          settle_bets)
     from rating_engine import compute_ratings
     # --- STEP 1: scarica risultati PRIMA di saldare ---
-    leagues = get_leagues_with_signals(days=3)
+    # Refertazione ESCLUSIVAMENTE via API-Football (settlement_apifootball):
+    # scarica le fixtures finite delle leghe con match/cassa aperti, le
+    # abbina per nome ai match_id the-odds-api e le salva in match_results.
+    # Le quote/CLV restano su the-odds-api (ODDS_API_KEY), mai qui.
+    from settlement_apifootball import settle_results_from_apifootball
     updated = 0
-    for lg in leagues:
-        sport = SPORTS_MAP.get(lg)
-        if not sport:
-            continue
-        for m in fetch_scores(sport, days_from=2):
-            if not m.get("id"):
-                continue
-            parsed = match_scores_by_name(m)
-            if parsed is None:
-                continue
-            sh, sa = parsed
-            save_result(m["id"], lg, m.get("home_team", ""), m.get("away_team", ""),
-                        sh, sa, m.get("last_update", ""))
-            updated += 1
+    try:
+        updated = settle_results_from_apifootball().get("updated", 0)
+    except Exception as e:
+        logger.warning("settlement_apifootball fallita: %s", e)
     if updated:
         logger.info("Risultati scaricati: %d partite aggiornate.", updated)
     # --- STEP 2: salda cassa, previsioni e puntate AUTO ---
@@ -759,9 +650,8 @@ def _admin_chat_ids() -> list:
 def _missing_env_keys() -> list:
     """Chiavi mancanti: i job corrispondenti saltano in silenzio."""
     missing = []
-    for key, what in (("API_FOOTBALL_KEY", "calendario/analisi"),
-                      ("ODDS_API_KEY", "quote live + risultati + settlement bet"),
-                      ("BETFAIR_APP_KEY", "scansione Betfair e surebet")):
+    for key, what in (("API_FOOTBALL_KEY", "calendario/analisi + settlement risultati"),
+                      ("ODDS_API_KEY", "quote live + CLV + analisi mercato")):
         if not os.getenv(key):
             missing.append(f"{key} ({what})")
     return missing
@@ -1121,8 +1011,7 @@ async def _send_bet_settlements(context, settlements: list):
 
 async def cmd_risultati(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        from odds_api import SPORTS_MAP, fetch_scores
-        from tracker import save_result, get_results_stats, get_leagues_with_signals
+        from tracker import get_results_stats
         updated, stats, settlements, sanity = _update_results()
         if settlements:
             await _send_bet_settlements(context, settlements)
@@ -1379,19 +1268,16 @@ async def report_morning_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
-    """08:50: piazza le puntate del giorno (paper test).
+    """08:50: piazza le puntate del giorno (SIM-only dal 04/09).
 
-    Segue la scansione (08:45) e l'analisi del mattino (08:00). Se Betfair e'
-    configurato usa il catalogo Exchange (dry-run di default; LIVE solo con
-    BETFAIR_DRY_RUN=0, BETFAIR_LIVE=1 e nessun kill-switch). Se Betfair manca
-    (o il catalogo non c'e'), ripiega automaticamente sulla modalita' SIM
-    (paper senza Exchange, quota del segnale) cosi' ledger e ML si addestrano
-    comunque ogni giorno.
+    Nessun conto Exchange: puntate simulate con la quota del segnale
+    (paper trading), registrate in `bets` e saldate a fine partita come
+    sempre — alimentano ledger, CLV e dataset ML.
     """
     loop = asyncio.get_running_loop()
     try:
         placed = await loop.run_in_executor(_scan_executor, run_today_bets,
-                                            None, None, True)
+                                            None, True)
     except Exception as e:
         logger.error("auto_bet_job: %s", e)
         return
@@ -1410,51 +1296,6 @@ async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
     await _send_report_to_recipients(context, text)
     logger.info("auto_bet_job: %d puntate (%s), €%.2f", len(placed), mode, total)
 
-
-async def betfair_scan_job(context: ContextTypes.DEFAULT_TYPE):
-    """Job 8:45: scansione Betfair del giorno -> data/scan_<giorno>.json.
-
-    Solo lettura, nessun ordine. Salta silenziosamente se le credenziali
-    BETFAIR_* non sono configurate. Alimenta /api/scan (cache frontend).
-
-    Dopo il catalogo lancia la pipeline surebet su dati reali (catalogo
-    Betfair + quote the-odds-api in cache) e notifica gli iscritti.
-
-    Con BETFAIR_ENABLED=0 il job NON viene nemmeno schedulato (stand-by
-    totale: nessun log di errore per chiave mancante).
-    """
-    if not os.getenv("BETFAIR_APP_KEY"):
-        logger.info("betfair_scan_job: BETFAIR_APP_KEY assente, salto")
-        return
-    loop = asyncio.get_running_loop()
-    try:
-        res = await loop.run_in_executor(_scan_executor, run_daily_scan)
-        logger.info("betfair_scan_job: %s",
-                    f"ok ({res['events']} eventi)" if res else "saltata")
-    except Exception as e:
-        logger.error(f"Errore betfair_scan_job: {e}")
-        return
-    # pipeline surebet su dati reali (cache-only, zero rete aggiuntiva)
-    # Alert surebet: SOLO premium (vantaggio competitivo in tempo reale).
-    try:
-        alerts = await loop.run_in_executor(_scan_executor, run_surebet_alert)
-        if alerts:
-            text = format_alert(alerts)
-            subscribers = [cid for cid in get_subscribers(tier="premium")
-                           if is_premium(cid)]
-            logger.info("surebet alert su dati reali: %d opportunita', %d iscritti premium",
-                        len(alerts), len(subscribers))
-            # Sticker animato una volta per chat, prima dell'alert surebet.
-            for chat_id in subscribers:
-                await send_premium_sticker(context.bot, chat_id)
-            for chat_id in subscribers:
-                try:
-                    await context.bot.send_message(chat_id=chat_id, text=text,
-                                                   parse_mode="Markdown")
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.error(f"Errore pipeline surebet: {e}")
 
 async def history_sync_job(context: ContextTypes.DEFAULT_TYPE):
     """Sincronizzazione risultati storici (API-Football) + ricalcolo rating.
@@ -1500,7 +1341,6 @@ def main() -> None:
     application.add_handler(CommandHandler("segnale", cmd_segnale))
     application.add_handler(CommandHandler("value", cmd_value))
     application.add_handler(CommandHandler("surebet", cmd_surebet))
-    application.add_handler(CommandHandler("scan", cmd_scan))
     application.add_handler(CommandHandler("storico_personale", cmd_storico_personale))
     application.add_handler(CommandHandler("setbankroll", cmd_setbankroll))
     application.add_handler(CommandHandler("campionati", cmd_campionati))
@@ -1550,12 +1390,6 @@ def main() -> None:
                                 first=time(hour=21 - IT_OFFSET, minute=0))
         job_queue.run_daily(report_morning_job, time=time(hour=6, minute=5 - IT_OFFSET))
         job_queue.run_daily(history_sync_job, time=time(hour=8, minute=30 - IT_OFFSET))
-        if betfair_enabled():
-            # Betfair in stand-by? Nessuna schedulazione: zero rumore nei log.
-            job_queue.run_daily(betfair_scan_job, time=time(hour=8, minute=45 - IT_OFFSET))
-        else:
-            logger.info("BETFAIR_ENABLED=0: betfair_scan_job sospeso "
-                        "(refertazione e auto-bet SIM restano attive via the-odds-api)")
         job_queue.run_daily(auto_bet_job, time=time(hour=8, minute=50 - IT_OFFSET))
         job_queue.run_daily(backup_data_job, time=time(hour=3, minute=30))
         job_queue.run_once(backup_data_job, when=10)  # snapshot di base all'avvio
@@ -1569,11 +1403,10 @@ def main() -> None:
         except ImportError:
             logger.warning("rlm_alert non disponibile, alert RLM disabilitato")
         logger.info("Job Pro schedulati (ora italiana): 03:30 backup / 06:05 riepilogo ieri / "
-                    "08:30 sync / %s 08:50 auto-bet / 14:00 pomeriggio / "
+                    "08:30 sync / 08:50 auto-bet (SIM) / 14:00 pomeriggio / "
                     "14:00-23:50 RLM alert (5') / 17:00 free / 20:00 sera / "
                     "21:30 risultati / 21:00-23:50 EOD (ogni 15') / "
-                    "watchdog settlement (ogni 2h)",
-                    "08:45 scan" if betfair_enabled() else "[scan Betfair sospesa]")
+                    "watchdog settlement (ogni 2h)")
     else: logger.warning("JobQueue non disponibile")
     logger.info("QuotaVerace Pro avviato.")
     application.run_polling()

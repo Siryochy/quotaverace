@@ -16,13 +16,8 @@ export default defineRailway(() => {
     ODDS_API_KEY: preserve(),
     API_FOOTBALL_KEY: preserve(),
     BANKROLL_DEFAULT: preserve(),
-    BETFAIR_APP_KEY: preserve(),
-    BETFAIR_USERNAME: preserve(),
-    BETFAIR_PASSWORD: preserve(),
-    BETFAIR_CERT_PATH: preserve(),
-    BETFAIR_CERT_KEY_PATH: preserve(),
-    BETFAIR_DRY_RUN: preserve(),
-    BETFAIR_LIVE: preserve(),
+    // BETFAIR_* rimosse il 04/09: Betfair è fuori dall'architettura
+    // (refertazione = API-Football, quote/CLV = the-odds-api, auto_bet SIM).
   };
 
   const api = service("api", {

@@ -34,15 +34,22 @@ value_filter.py     → gate EV + mercato, is_sane()
 backtest.py         → calibrazione EV vs ROI, split "batte il mercato"
 market_diagnose.py  → diagnosi calibrazione per mercato (ROI vs EV)
 odds_ingest.py      → ingestione quote da odds API (cache in data/)
-odds_api.py         → client the-odds-api (rate limit, quota giornaliera) — FONTE PRIMARIA: quote E refertazione
-surebet_*.py        → scanner arbitraggio (Betfair ecc.)
-daily_scanner.py    → job mattutino: partite del giorno + analisi
+odds_api.py         → client the-odds-api (rate limit, quota giornaliera) — quote E CLV
+settlement_apifootball.py → refertazione risultati (API-Football) — FONTE UNICA del settlement
 football_hist.py    → storico risultati (2022-2024) per le ratings
-data/               → cache JSON scan + DB sqlite + modello ensemble
+surebet_scanner.py  → scanner arbitraggi tra bookmaker (quote the-odds-api)
+data/               → cache JSON + DB sqlite + modello ensemble
 backtest_mc.py      → backtest walk-forward ensemble+Kelly con Monte Carlo (ROI, MaxDD)
 backup_manager.py   → backup DB+dataset ML (integrity check, rotazione, /backup)
 webapp/             → Next.js (Vercel): dashboard, cassa, schedina, calendario, backtest, value...
 ```
+
+**Betfair è stato RIMOSSO dall'architettura il 04/09**: moduli
+`betfair_client.py`, `daily_scanner.py`, `daily_scan_job.py`,
+`surebet_pipeline.py` e i relativi test non esistono più. Refertazione =
+API-Football (`settlement_apifootball.py`); quote/CLV = the-odds-api
+(`odds_api.py`). auto_bet è SIM-only permanente. Tripwire
+`test_betfair_removed.py`: reintrodurre Betfair rompe la suite.
 
 **Backend e bot stanno nello STESSO container Railway** (volume unico su
 `/app/data`). Niente servizi separati con volumi divisi.
@@ -110,9 +117,10 @@ cd webapp && npm run build            # build Next.js
   persi.
 - Su Railway i segreti restano nelle env vars del progetto (cassaforte vera).
 - `vault --commit` NON è ricorsivo: considera solo i file diretti in
-  `secrets/` (`iterdir`) — le sottocartelle tipo `secrets/betfair/` (cert SSL
-  client) non vengono toccate. MAI mettere `*.key`/`*.pem` direttamente in
-  `secrets/`: verrebbero trattati come segreti e cancellati dal commit.
+  `secrets/` (`iterdir`) — le sottocartelle non vengono toccate (es. la
+  vecchia `secrets/betfair/` col cert SSL, ora inutile e ignorabile). MAI
+  mettere `*.key`/`*.pem` direttamente in `secrets/`: verrebbero trattati
+  come segreti e cancellati dal commit.
 - **Tripwire igiene segreti** (`test_secret_hygiene.py`): la suite ROMPE se un
   sorgente .py contiene una credenziale in chiaro (formati noti: token
   Telegram, GitHub PAT, Google API key, AWS, Slack, Stripe, PEM, Bearer;
@@ -222,24 +230,26 @@ cd webapp && npm run build            # build Next.js
 - **.dockerignore rinforzato**: `secrets/`, `.env*`, `data/`, `*.key`,
   `*.pem`, `.git/` esclusi dall'immagine (il Dockerfile fa `COPY . .` — prima
   i segreti locali sarebbero finiti nell'immagine Docker).
-- **Betfair IN STAND-BY (disattivato dal 02/09)**: switch master
-  `BETFAIR_ENABLED=0` su Railway → `betfair_client.enabled()` False →
-  `get_client()` None (choke point unico), `betfair_scan_job` NON schedulato,
-  `/scan` e `/api/scan` rispondono esplicitamente "betfair_disabled" (503),
-  surebet silenzioso, health mostra `betfair_enabled: false`. ZERO rumore
-  nei log (nessun errore per chiave mancante). Lavoro gia' fatto per il
-  futuro: certificato SSL client su `/app/data/betfair/client-ssl.pem`
-  (volume, hash verificato) + `BETFAIR_CERT_PATH` impostata; mancano solo
-  APP_KEY/USERNAME/PASSWORD. **RIATTIVAZIONE**: `BETFAIR_ENABLED=1` + le 3
-  credenziali + upload del PUBBLICO `secrets/betfair/client-ssl.crt` su
-  myacc.betfair.it ("Automated Betting Program Access").
-- **the-odds-api = FONTE PRIMARIA sia per le quote sia per la refertazione**:
-  risultati e saldaggio bet/previsioni/cassa passano SOLO da
-  `odds_api.fetch_scores` (+ watchdog ogni 2h) — MAI da Betfair. Vincolo
-  garantito da test tripwire (`test_betfair_standby.py`): se il flusso di
-  saldaggio toccasse mai un client Betfair, il test rompe.
-- **auto_bet in SIM**: con Betfair in stand-by il job 08:50 prosegue in
-  modalita' SIM (paper, quota del segnale): alimenta ledger/ML senza Exchange.
+- **Betfair RIMOSSO dall'architettura (04/09)**: moduli, comando `/scan`,
+  endpoint `/api/scan` (risponde "betfair_removed" 503) e job di scansione
+  eliminati. health mostra `betfair_enabled: false` fisso (compatibilità
+  frontend). Tripwire `test_betfair_removed.py`: i moduli non devono
+  riapparire, i moduli attivi non devono nominare Betfair nel codice.
+- **Refertazione SOLO API-Football**: risultati e saldaggio bet/previsioni/
+  cassa passano ESCLUSIVAMENTE da `settlement_apifootball` (fixtures finite
+  API-Football abbinate per nome ai match_id the-odds-api; mappa
+  SETTLEMENT_LEAGUE_IDS ~50 leghe, le non mappate vengono loggate e saltate).
+  `odds_api.fetch_scores` NON è più nel flusso di settlement; the-odds-api
+  resta solo per quote + CLV. Vincolo garantito da `test_betfair_removed.py`
+  e dai test di settlement (patch del confine `settlement_apifootball._api_get`).
+  Limite free plan API-Football (100 req/giorno): si scaricano SOLO le leghe
+  con match/cassa aperti (1 chiamata a lega).
+- **auto_bet SIM-only permanente (04/09)**: il job 08:50 piazza puntate
+  SIMULATE con la quota del segnale (mode='sim', niente conto Exchange);
+  alimenta ledger/ML/CLV come prima, saldate a fine partita. I candidati
+  del giorno usano una FINESTRA MOBILE di 24h (non il giorno calendario
+  UTC): a fine giornata un match con kickoff poco dopo la mezzanotte
+  cadrebbe nel giorno dopo e verrebbe perso dal filtro per data.
 - **Bugfix 02/09**: `auto_bet.run_today_bets` senza guardia `stake <= 0` sul
   percorso a stake fisso (possibile bet da €0.00); `web_api._schedina_json`
   con UnboundLocalError (`_bankroll` locale oscurava la funzione modulo →
@@ -276,24 +286,18 @@ cd webapp && npm run build            # build Next.js
   il segnale della schedina resta 1X2/OU.
 - **Quote**: fix fallback `load_odds(path)` (prima non funzionava mai) e nota
   di freschezza in `/segnale` quando le quote sono da cache vecchia.
-- **Puntate automatiche** (`auto_bet.py`, job 08:50 ITA): piazza su Betfair
-  Exchange i segnali value/strong_value del giorno (MATCH_ODDS e
-  OVER_UNDER_25 dal catalogo di scansione), stake **ADATTIVO** (`adaptive_staking.py`):
+- **Puntate automatiche** (`auto_bet.py`, job 08:50 ITA): **SIM-only dal
+  04/09** — simula i segnali value/strong_value del giorno con la quota del
+  segnale (mode='sim', nessun conto Exchange), stake **ADATTIVO** (`adaptive_staking.py`):
   Kelly frazionato dinamico (0.10-0.35 vs 0.25 fisso prima) con drawdown
   protection (>10% drawdown → riduzione stakes) e confidence weighting
   (market_edge alto + strong_value → stake più alto). Cap: 3% value, 5%
   strong_value. Fallback: stake fisso `BET_STAKE_EUR` se modulo assente.
-  **DRY-RUN di default**: ordini reali solo con `BETFAIR_DRY_RUN=0` +
-  `BETFAIR_LIVE=1` e senza kill-switch (`data/kill_switch`). Guardie:
-  salta partite a <15 min dall'inizio, prezzi Exchange <95% della quota
-  segnale, doppie puntate (UNIQUE match_id+esito).
-  **Verifica incrociata runner**: `_resolve_team` risolve gli alias squadre
-  (TEAM_MAP: 'AC Milan'→'milan', 'West Ham United'→'west ham') sia sul
-  matching dell'evento sia sull'esito; `_runner_esito` accetta SOLO runner
-  riconosciuti (draw o una delle due squadre) — mai un runner ambiguo
-  (fail-closed: la partita non si perde per un alias, ma un runner non
-  riconosciuto non viene mai piazzato). Registro in tabella `bets`, saldato
-  a fine partita (`settle_bets`) e incluso nel riepilogo.
+  Guardie: salta partite a <15 min dall'inizio, doppie puntate (UNIQUE
+  match_id+esito). Risk caps prima del salvataggio: correlation cap (30%
+  bankroll per blocco correlato) + cap esposizione totale (40%). Registro
+  in tabella `bets`, saldato a fine partita (`settle_bets`) e incluso nel
+  riepilogo.
 - **Report giornaliero**: `/riepilogo [oggi|ieri|YYYY-MM-DD]` + invio
   automatico all'alba (06:05 ITA, riepilogo di ieri) e **a fine ultima
   partita** (check ogni 15' dalle 21:00 ITA, fallback notturno 23:50 ITA):
@@ -370,7 +374,7 @@ cd webapp && npm run build            # build Next.js
   timestamp con microsecondi. Usato da backup_data_job (03:30 UTC + avvio)
   e comando `/backup` (solo admin). VERIFICATO IN PRODUZIONE: integrity ok,
   56 CLV, dataset ML, 78 file data/.
-- **Test**: 631 test verdi (la suite completa richiede ~9 min).
+- **Test**: 528 test verdi (la suite completa richiede ~8 min).
 
 ## Moduli avanzati (Settembre 2026)
 
@@ -450,7 +454,7 @@ cd webapp && npm run build            # build Next.js
   timestamp con microsecondi. Usato da backup_data_job (03:30 UTC + avvio)
   e comando `/backup` (solo admin). VERIFICATO IN PRODUZIONE: integrity ok,
   56 CLV, dataset ML, 78 file data/.
-- **Test**: 631 test verdi (la suite completa richiede ~9 min).
+- **Test**: 528 test verdi (la suite completa richiede ~8 min).
 - **Sicurezza**: rotazioni token 01/09, 02/09 e **04/09** verificate
   (Telegram `@Calcifrrbot`, ID 8372645521). Rotazione 04/09 completata
   con Opzione A: token esposto in chat REVOCATO (getMe col vecchio → 401)
@@ -461,11 +465,6 @@ cd webapp && npm run build            # build Next.js
 
 ## Prossimi passi possibili (non urgenti)
 
-- **Riattivare Betfair** (in stand-by dal 02/09): credenziali APP_KEY/
-  USERNAME/PASSWORD → `railway variables --set` + `BETFAIR_ENABLED=1` +
-  merge nel vault + upload `client-ssl.crt` (PUBBLICO) su myacc.betfair.it +
-  verifica certlogin dal container + monitorare il primo giro di
-  `betfair_scan_job`/`auto_bet_job`.
 - Quando il ledger avrà 100+ previsioni chiuse: usare `market_diagnose.py`
   per identificare mercati critici e ajustare blend/devig/soglie.
 - Eseguire `/backtest_mc` con 15+ previsioni chiuse (oggi 8): le metriche

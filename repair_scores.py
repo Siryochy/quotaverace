@@ -1,33 +1,22 @@
-"""repair_scores.py — Ripara i punteggi invertiti dal bug dell'ordine `scores`.
+"""repair_scores.py — Ripara i punteggi errati in match_results.
 
 Storico: fino al 02/09 _update_results assumeva che `scores[0]` di
 the-odds-api fosse la squadra di casa, ma l'array NON ha ordine garantito.
-Le partite con l'away in prima posizione sono state salvate in
-match_results con i gol invertiti, saldando bet/previsioni/cassa con
-verdetti specchiati (es. FC Machida Zelvia vs Kawasaki Frontale: vittoria
-casa reale salvata 1-2 → bet sul "2" pagata come VINTA +15.00).
+Dal 04/09 la refertazione usa ESCLUSIVAMENTE API-Football
+(settlement_apifootball): questo strumento riscarica i punteggi veri dalla
+stessa fonte e corregge le righe salvate male + i verdetti dei ledger.
 
-Cosa fa (per ogni partita di match_results con risultati the-odds-api):
-  1. Riscarica i punteggi veri (fetch_scores, associazione per NOME tramite
-     odds_api.match_scores_by_name — la stessa logica del fix).
+Cosa fa (per ogni partita di match_results):
+  1. Riscarica i punteggi veri (API-Football, associazione per NOME).
   2. Confronta con il punteggio salvato: se diverso, corregge la riga.
   3. **Audit dei verdetti sui ledger**: anche se match_results e' gia'
-     corretto (es. risalvato dal watchdog DOPO il fix, come per Machida),
-     le bet/previsioni/cassa possono essere state saldate col verdetto
-     SPECCHIATO (puntata sul "2" marcata won per una vittoria casa). Il
-     repair le individua confrontando l'esito saldato con quello atteso
-     dal punteggio vero e le ri-salda.
+     corretto, le bet/previsioni/cassa possono essere state saldate col
+     verdetto SPECCHIATO. Il repair le individua e le ri-salda.
   4. Ri-salda TUTTI i ledger (bets, predictions, cassa) usando i punteggi
-     corretti: reset esito_finale/profit/settled_at delle righe gia'
-     saldate su quelle partite, poi settle_* con recompute del profitto.
+     corretti: reset esito_finale/profit/settled_at, poi settle_*.
 
 Dry-run di default: stampa il piano senza toccare il DB. Con --apply
-esegue le correzioni (e aggiorna il bankroll implicitamente: bankroll_stats
-deriva da SUM(cassa.importo), quindi la rettifica dell'entry cassa con il
-profit recompute' corregge anche il totale).
-
-NOTA: the-odds-api /scores accetta daysFrom massimo 3 giorni (422 oltre):
-il default e' gia' 3, non superarlo a mano.
+esegue le correzioni (aggiorna anche il bankroll implicitamente).
 
 Uso:
   railway ssh --service api -- "python3 repair_scores.py --days-from 3"
@@ -40,43 +29,30 @@ import argparse
 import sys
 from datetime import datetime, timedelta
 
-from odds_api import SPORTS_MAP, fetch_scores, match_scores_by_name
 from tracker import _get_conn, _create_results_table, _norm_team
+from settlement_apifootball import fetch_true_scores
 
 
 def _leagues_with_results(conn) -> dict:
-    """Leghe presenti in match_results -> sport key (risparmio crediti API:
-    si riscaricano SOLO le leghe con risultati salvati, non tutte le 66)."""
+    """Leghe presenti in match_results (per il log di repair). Dal 04/09 il
+    fetch dei punteggi veri passa da settlement_apifootball (API-Football),
+    che scarica SOLO le leghe con risultati salvati."""
     out = {}
     for (lg,) in conn.execute("SELECT DISTINCT league FROM match_results").fetchall():
-        sport = SPORTS_MAP.get(lg)
-        if sport:
-            out[lg] = sport
+        if lg:
+            out[lg] = lg
     return out
 
 
-def fetch_true_scores(days_from: int, leagues: dict = None) -> dict:
-    """Punteggi veri (per match_id) da the-odds-api, associazione per nome.
+def fetch_true_scores_apifootball(days_from: int) -> dict:
+    """Punteggi veri (per match_id the-odds-api) via API-Football.
 
-    `leagues` limita il fetch alle leghe indicate {lega: sport_key}:
-    senza, si interroga tutto SPORTS_MAP (molto piu' costoso in crediti).
+    Delega a settlement_apifootball.fetch_true_scores: scarica le fixtures
+    finite delle leghe presenti in match_results, le abbina per nome ai
+    match_id the-odds-api e ritorna {match_id: (lg, home, away, sh, sa)}.
+    Il parametro days_from viene passato come finestra di ricerca.
     """
-    leagues = leagues or SPORTS_MAP
-    true_scores = {}
-    for lg, sport in leagues.items():
-        try:
-            for m in fetch_scores(sport, days_from=days_from):
-                if not m.get("id") or not m.get("completed"):
-                    continue
-                parsed = match_scores_by_name(m)
-                if parsed is None:
-                    continue
-                true_scores[m["id"]] = (lg, m.get("home_team", ""),
-                                        m.get("away_team", ""),
-                                        parsed[0], parsed[1])
-        except Exception as e:
-            print(f"  ! fetch_scores({sport}) fallito: {e}")
-    return true_scores
+    return fetch_true_scores(days_back=days_from)
 
 
 def _settled_ledger_rows(c) -> list:
@@ -203,7 +179,7 @@ def repair(apply: bool, days_from: int) -> int:
         return 0
     print(f"Risultati salvati: {len(saved)}. Riscarico i punteggi veri "
           f"(solo leghe con risultati, days_from={days_from})…")
-    true = fetch_true_scores(days_from, leagues)
+    true = fetch_true_scores_apifootball(days_from)
     print(f"Punteggi veri recuperati: {len(true)} partite completate.\n")
 
     wrong = []

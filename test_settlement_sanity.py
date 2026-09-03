@@ -24,6 +24,40 @@ import pytest
 import tracker
 import odds_api
 import bot
+import settlement_apifootball
+from football_hist import FINISHED_STATUSES
+from settlement_apifootball import SETTLEMENT_LEAGUE_IDS
+
+
+def _fixture(mid, home, away, sh, sa, status="FT", date="2026-09-02T10:00:00Z"):
+    """Fixture API-Football finita (formato v3)."""
+    return {
+        "fixture": {"id": mid, "date": date, "status": {"short": status}},
+        "teams": {"home": {"name": home}, "away": {"name": away}},
+        "goals": {"home": sh, "away": sa},
+    }
+
+
+def _patch_fetch_scores(monkeypatch, fixtures_per_league):
+    """Patch del confine settlement_apifootball (API-Football): il fake
+    restituisce le fixture per la lega richiesta (formato v3)."""
+    by_id = {}
+    for lg, fixtures in (fixtures_per_league or {}).items():
+        lid = SETTLEMENT_LEAGUE_IDS.get(lg)
+        if lid:
+            by_id[lid] = fixtures
+
+    def fake_api_get(path, params):
+        fixtures = by_id.get(params.get("league"), [])
+        return {"results": len(fixtures), "response": fixtures}
+
+    def fake_finished(lid, season, d_from, d_to):
+        return [fx for fx in by_id.get(lid, [])
+                if (((fx.get("fixture") or {}).get("status") or {}).get("short") or "")
+                in FINISHED_STATUSES]
+
+    monkeypatch.setattr(settlement_apifootball, "_api_get", fake_api_get)
+    monkeypatch.setattr(settlement_apifootball, "_fixtures_finished", fake_finished)
 
 
 @pytest.fixture()
@@ -262,14 +296,6 @@ def _patch_send(monkeypatch):
     return calls
 
 
-def _patch_fetch_scores(monkeypatch, payload_per_sport):
-    def fake_fetch(sport=None, days_from=2):
-        return payload_per_sport.get(sport, [])
-
-    monkeypatch.setattr(odds_api, "fetch_scores", fake_fetch)
-    monkeypatch.setitem(sys.modules, "odds_api", odds_api)
-
-
 def _patch_ratings(monkeypatch):
     import rating_engine
     monkeypatch.setattr(rating_engine, "compute_ratings", lambda: None)
@@ -281,18 +307,12 @@ def _patch_admin(monkeypatch):
     monkeypatch.setattr(tracker, "get_subscribers", lambda *a, **k: [])
 
 
-AWAY_FIRST = {"id": "m1", "home_team": "FC Machida Zelvia",
-              "away_team": "Kawasaki Frontale",
-              "scores": [{"name": "Kawasaki Frontale", "score": 0},
-                         {"name": "FC Machida Zelvia", "score": 1}],
-              "last_update": ""}
-
 
 class TestUpdateResultsSanity:
     def test_update_results_auto_corregge_verdetto_specchiato(self, temp_db,
                                                               monkeypatch):
         """Flusso REALE: match_results col punteggio INVERTITO (1-2, il bug),
-        bet sul 2 chiusa won. Il job scarica i punteggi veri (away-first,
+        bet sul 2 chiusa won. Il job scarica i punteggi veri (API-Football:
         casa 2-1) → match_results corretto → sanity check rileva la
         contraddizione e ri-salda la bet a lost."""
         tracker.save_match("m1", "J1 League", "FC Machida Zelvia",
@@ -308,7 +328,10 @@ class TestUpdateResultsSanity:
         assert rows[0]["esito_finale"] == "won"   # chiusa col punteggio sbagliato
 
         _patch_send(monkeypatch)
-        _patch_fetch_scores(monkeypatch, {"soccer_japan_j_league": [dict(AWAY_FIRST)]})
+        _patch_fetch_scores(
+            monkeypatch,
+            {"J1 League": [_fixture("m1", "FC Machida Zelvia",
+                                    "Kawasaki Frontale", 2, 1)]})
         _patch_ratings(monkeypatch)
         _patch_admin(monkeypatch)
 

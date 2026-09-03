@@ -23,6 +23,9 @@ import tracker
 import odds_api
 import bot
 import repair_scores
+import settlement_apifootball
+from football_hist import FINISHED_STATUSES
+from settlement_apifootball import SETTLEMENT_LEAGUE_IDS
 
 
 @pytest.fixture()
@@ -33,6 +36,41 @@ def temp_db(monkeypatch):
         monkeypatch.setattr(odds_api, "CACHE_DIR", Path(td))
         tracker.init_db()
         yield db_path
+
+
+def _fixture(mid, home, away, sh, sa, status="FT", date="2026-09-02T10:00:00Z"):
+    """Fixture API-Football finita (formato v3)."""
+    return {
+        "fixture": {"id": mid, "date": date, "status": {"short": status}},
+        "teams": {"home": {"name": home}, "away": {"name": away}},
+        "goals": {"home": sh, "away": sa},
+    }
+
+
+def _patch_api(monkeypatch, fixtures_per_league):
+    """Patch del confine settlement_apifootball: ritorna le fixture
+    API-Football per la lega richiesta (formato v3).
+
+    `fixtures_per_league` e' {nome_lega: [fixture]}: il fake guarda il
+    league_id API-Football nei params della chiamata.
+    """
+    by_id = {}
+    for lg, fixtures in (fixtures_per_league or {}).items():
+        lid = SETTLEMENT_LEAGUE_IDS.get(lg)
+        if lid:
+            by_id[lid] = fixtures
+
+    def fake_api_get(path, params):
+        fixtures = by_id.get(params.get("league"), [])
+        return {"results": len(fixtures), "response": fixtures}
+
+    def fake_finished(lid, season, d_from, d_to):
+        return [fx for fx in by_id.get(lid, [])
+                if (((fx.get("fixture") or {}).get("status") or {}).get("short") or "")
+                in FINISHED_STATUSES]
+
+    monkeypatch.setattr(settlement_apifootball, "_api_get", fake_api_get)
+    monkeypatch.setattr(settlement_apifootball, "_fixtures_finished", fake_finished)
 
 
 # --- 1. Parsing per nome -------------------------------------------------
@@ -101,14 +139,9 @@ def _patch_send(monkeypatch):
     return calls
 
 
-def _patch_fetch_scores(monkeypatch, payload_per_sport):
-    import sys
-
-    def fake_fetch(sport=None, days_from=2):
-        return payload_per_sport.get(sport, [])
-
-    monkeypatch.setattr(odds_api, "fetch_scores", fake_fetch)
-    monkeypatch.setitem(sys.modules, "odds_api", odds_api)
+def _patch_fetch_scores(monkeypatch, fixtures_per_league):
+    """Patch del confine settlement_apifootball (API-Football)."""
+    _patch_api(monkeypatch, fixtures_per_league)
 
 
 def _patch_ratings(monkeypatch):
@@ -124,7 +157,7 @@ def _patch_admin(monkeypatch):
 
 
 class TestUpdateResultsAwayFirst:
-    """Il payload away-first di Machida-Kawasaki nel flusso REALE."""
+    """La vittoria casa di Machida-Kawasaki nel flusso REALE (API-Football)."""
 
     def _setup(self, temp_db):
         tracker.save_match("machida", "J1 League", "FC Machida Zelvia",
@@ -133,12 +166,16 @@ class TestUpdateResultsAwayFirst:
                               0.14, "2", 4.0, "Pinnacle", "value")
         tracker.save_bet("machida", "1X2", "2", None, None, 4.0, 5.0)
 
+    def _machida_fixture(self):
+        # vittoria CASA reale 1-0 (il vecchio bug la salvava 1-2)
+        return {"J1 League": [
+            _fixture("machida", "FC Machida Zelvia", "Kawasaki Frontale", 1, 0)]}
+
     def test_bet_sul_2_perde_con_vittoria_casa(self, temp_db, monkeypatch):
         """REGRESSION: bet sul 2 + vittoria casa reale (1-0) → LOST -5.00."""
         self._setup(temp_db)
         _patch_send(monkeypatch)
-        _patch_fetch_scores(monkeypatch,
-                            {"soccer_japan_j_league": [dict(MACHIDA_AWAY_FIRST)]})
+        _patch_fetch_scores(monkeypatch, self._machida_fixture())
         _patch_ratings(monkeypatch)
         _patch_admin(monkeypatch)
 
@@ -151,8 +188,7 @@ class TestUpdateResultsAwayFirst:
     def test_risultato_salvato_non_invertito(self, temp_db, monkeypatch):
         self._setup(temp_db)
         _patch_send(monkeypatch)
-        _patch_fetch_scores(monkeypatch,
-                            {"soccer_japan_j_league": [dict(MACHIDA_AWAY_FIRST)]})
+        _patch_fetch_scores(monkeypatch, self._machida_fixture())
         _patch_ratings(monkeypatch)
         _patch_admin(monkeypatch)
 
@@ -169,8 +205,7 @@ class TestUpdateResultsAwayFirst:
         self._setup(temp_db)
         tracker.save_bet("machida", "1X2", "1", None, None, 2.5, 5.0)
         _patch_send(monkeypatch)
-        _patch_fetch_scores(monkeypatch,
-                            {"soccer_japan_j_league": [dict(MACHIDA_AWAY_FIRST)]})
+        _patch_fetch_scores(monkeypatch, self._machida_fixture())
         _patch_ratings(monkeypatch)
         _patch_admin(monkeypatch)
 
@@ -239,11 +274,10 @@ class TestRepairVerdictAudit:
         self._seed(temp_db)
         # I punteggi veri (casa 2-1) coincidono con match_results: nessun
         # punteggio da correggere, ma il ledger va ri-sal dato.
-        true_payload = dict(MACHIDA_AWAY_FIRST)
-        true_payload["scores"] = [{"name": "Kawasaki Frontale", "score": 1},
-                                   {"name": "FC Machida Zelvia", "score": 2}]
-        _patch_repair_fetch(monkeypatch,
-                            {"m": dict(true_payload, completed=True)})
+        _patch_repair_fetch(
+            monkeypatch,
+            {"J1 League": [_fixture("machida", "FC Machida Zelvia",
+                                    "Kawasaki Frontale", 2, 1)]})
         rc = repair_scores.repair(apply=False, days_from=3)
         assert rc == 1  # incongruenza rilevata (verdetto, non punteggio)
         # DB invariato nel dry-run
@@ -256,11 +290,10 @@ class TestRepairVerdictAudit:
 
     def test_apply_ri_salda_bet_specchiata(self, temp_db, monkeypatch):
         self._seed(temp_db)
-        true_payload = dict(MACHIDA_AWAY_FIRST)
-        true_payload["scores"] = [{"name": "Kawasaki Frontale", "score": 1},
-                                   {"name": "FC Machida Zelvia", "score": 2}]
-        _patch_repair_fetch(monkeypatch,
-                            {"m": dict(true_payload, completed=True)})
+        _patch_repair_fetch(
+            monkeypatch,
+            {"J1 League": [_fixture("machida", "FC Machida Zelvia",
+                                    "Kawasaki Frontale", 2, 1)]})
         rc = repair_scores.repair(apply=True, days_from=3)
         assert rc == 0
 
@@ -270,11 +303,10 @@ class TestRepairVerdictAudit:
 
     def test_apply_ri_salda_previsione_specchiata(self, temp_db, monkeypatch):
         self._seed(temp_db)
-        true_payload = dict(MACHIDA_AWAY_FIRST)
-        true_payload["scores"] = [{"name": "Kawasaki Frontale", "score": 1},
-                                   {"name": "FC Machida Zelvia", "score": 2}]
-        _patch_repair_fetch(monkeypatch,
-                            {"m": dict(true_payload, completed=True)})
+        _patch_repair_fetch(
+            monkeypatch,
+            {"J1 League": [_fixture("machida", "FC Machida Zelvia",
+                                    "Kawasaki Frontale", 2, 1)]})
         repair_scores.repair(apply=True, days_from=3)
 
         conn = tracker._get_conn()
@@ -294,11 +326,10 @@ class TestRepairVerdictAudit:
                      "settled_at=? WHERE id=1", ("2026-09-02T13:53:56Z",))
         conn.commit(); conn.close()
 
-        true_payload = dict(MACHIDA_AWAY_FIRST)
-        true_payload["scores"] = [{"name": "Kawasaki Frontale", "score": 1},
-                                   {"name": "FC Machida Zelvia", "score": 2}]
-        _patch_repair_fetch(monkeypatch,
-                            {"m": dict(true_payload, completed=True)})
+        _patch_repair_fetch(
+            monkeypatch,
+            {"J1 League": [_fixture("machida", "FC Machida Zelvia",
+                                    "Kawasaki Frontale", 2, 1)]})
         repair_scores.repair(apply=True, days_from=3)
 
         conn = tracker._get_conn()
@@ -329,12 +360,9 @@ class TestRepairVerdictAudit:
         conn.commit(); conn.close()
 
         # Punteggio VERO: CA Osasuna 1-0 Getafe (1 goal → Under → LOST -20)
-        true_payload = {"id": "osasuna",
-                        "home_team": "CA Osasuna", "away_team": "Getafe",
-                        "scores": [{"name": "Getafe", "score": 0},
-                                   {"name": "CA Osasuna", "score": 1}],
-                        "completed": True}
-        _patch_repair_fetch(monkeypatch, {"m": true_payload})
+        _patch_repair_fetch(
+            monkeypatch,
+            {"La Liga": [_fixture("osasuna", "CA Osasuna", "Getafe", 1, 0)]})
 
         rc = repair_scores.repair(apply=True, days_from=3)
         assert rc == 0
@@ -380,21 +408,23 @@ def _seed_inverted(temp_db):
     assert rows["2"]["profit"] == pytest.approx(15.0)
 
 
-def _patch_repair_fetch(monkeypatch, true_scores):
-    """Patch di repair_scores.fetch_scores (importato per nome nel modulo:
-    patchare odds_api.fetch_scores non basterebbe)."""
-    def fake_fetch(sport=None, days_from=2):
-        return list(true_scores.values()) if sport else []
+def _patch_repair_fetch(monkeypatch, fixtures_per_league):
+    """Patch del confine repair_scores -> settlement_apifootball (API-Football).
 
-    monkeypatch.setattr(repair_scores, "fetch_scores", fake_fetch)
+    repair_scores.fetch_true_scores_apifootball delega a
+    settlement_apifootball.fetch_true_scores, che usa _api_get: il fake
+    restituisce le fixture API-Football per la lega richiesta.
+    """
+    _patch_api(monkeypatch, fixtures_per_league)
 
 
 class TestRepairScores:
     def test_dry_run_non_tocca_il_db(self, temp_db, monkeypatch):
         _seed_inverted(temp_db)
-        _patch_repair_fetch(monkeypatch,
-                            {"m": dict(MACHIDA_AWAY_FIRST,
-                                       completed=True)})
+        _patch_repair_fetch(
+            monkeypatch,
+            {"J1 League": [_fixture("machida", "FC Machida Zelvia",
+                                    "Kawasaki Frontale", 1, 0)]})
         rc = repair_scores.repair(apply=False, days_from=7)
         assert rc == 1  # rilevata incongruenza
         conn = tracker._get_conn()
@@ -406,9 +436,10 @@ class TestRepairScores:
 
     def test_apply_corregge_risultato_e_ledger(self, temp_db, monkeypatch):
         _seed_inverted(temp_db)
-        _patch_repair_fetch(monkeypatch,
-                            {"m": dict(MACHIDA_AWAY_FIRST,
-                                       completed=True)})
+        _patch_repair_fetch(
+            monkeypatch,
+            {"J1 League": [_fixture("machida", "FC Machida Zelvia",
+                                    "Kawasaki Frontale", 1, 0)]})
         rc = repair_scores.repair(apply=True, days_from=7)
         assert rc == 0
 
@@ -425,9 +456,10 @@ class TestRepairScores:
 
     def test_apply_ri_salda_previsioni(self, temp_db, monkeypatch):
         _seed_inverted(temp_db)
-        _patch_repair_fetch(monkeypatch,
-                            {"m": dict(MACHIDA_AWAY_FIRST,
-                                       completed=True)})
+        _patch_repair_fetch(
+            monkeypatch,
+            {"J1 League": [_fixture("machida", "FC Machida Zelvia",
+                                    "Kawasaki Frontale", 1, 0)]})
         repair_scores.repair(apply=True, days_from=7)
 
         conn = tracker._get_conn()
@@ -448,9 +480,10 @@ class TestRepairScores:
             "SELECT esito_finale FROM cassa WHERE id=1").fetchone()[0] == "won"
         conn.close()
 
-        _patch_repair_fetch(monkeypatch,
-                            {"m": dict(MACHIDA_AWAY_FIRST,
-                                       completed=True)})
+        _patch_repair_fetch(
+            monkeypatch,
+            {"J1 League": [_fixture("machida", "FC Machida Zelvia",
+                                    "Kawasaki Frontale", 1, 0)]})
         repair_scores.repair(apply=True, days_from=7)
 
         conn = tracker._get_conn()
@@ -463,10 +496,10 @@ class TestRepairScores:
     def test_nessuna_incongruenza_ritorna_zero(self, temp_db, monkeypatch):
         _seed_inverted(temp_db)
         # fetch ritorna il punteggio GIA' salvato (corretto): nessuna riparazione
-        coerente = dict(MACHIDA_AWAY_FIRST)
-        coerente["scores"] = [{"name": "FC Machida Zelvia", "score": 1},
-                              {"name": "Kawasaki Frontale", "score": 2}]
-        _patch_repair_fetch(monkeypatch, {"m": dict(coerente, completed=True)})
+        _patch_repair_fetch(
+            monkeypatch,
+            {"J1 League": [_fixture("machida", "FC Machida Zelvia",
+                                    "Kawasaki Frontale", 1, 2)]})
         rc = repair_scores.repair(apply=True, days_from=7)
         assert rc == 0
 
