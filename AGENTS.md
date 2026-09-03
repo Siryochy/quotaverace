@@ -35,8 +35,7 @@ backtest.py         → calibrazione EV vs ROI, split "batte il mercato"
 market_diagnose.py  → diagnosi calibrazione per mercato (ROI vs EV)
 odds_ingest.py      → ingestione quote da odds API (cache in data/)
 odds_api.py         → client the-odds-api (rate limit, quota giornaliera) — quote E CLV
-settlement_apifootball.py → refertazione risultati (API-Football) — FONTE UNICA del settlement
-football_hist.py    → storico risultati (2022-2024) per le ratings
+football_hist.py    → storico risultati (2022-2024, piano free API-Football) per le ratings
 surebet_scanner.py  → scanner arbitraggi tra bookmaker (quote the-odds-api)
 data/               → cache JSON + DB sqlite + modello ensemble
 backtest_mc.py      → backtest walk-forward ensemble+Kelly con Monte Carlo (ROI, MaxDD)
@@ -47,9 +46,13 @@ webapp/             → Next.js (Vercel): dashboard, cassa, schedina, calendario
 **Betfair è stato RIMOSSO dall'architettura il 04/09**: moduli
 `betfair_client.py`, `daily_scanner.py`, `daily_scan_job.py`,
 `surebet_pipeline.py` e i relativi test non esistono più. Refertazione =
-API-Football (`settlement_apifootball.py`); quote/CLV = the-odds-api
-(`odds_api.py`). auto_bet è SIM-only permanente. Tripwire
-`test_betfair_removed.py`: reintrodurre Betfair rompe la suite.
+the-odds-api (`odds_api.fetch_scores`, risultati stagione corrente — la
+stessa chiave delle quote); quote/CLV = the-odds-api. API-Football serve
+SOLO allo storico ratings 2022-2024 (`football_hist.py`): il piano free
+NON copre la stagione corrente (verificato 04/09), quindi non può saldare
+le partite del 2026. auto_bet è SIM-only permanente. Tripwire
+`test_betfair_removed.py`: reintrodurre Betfair (o spostare il settlement
+su API-Football) rompe la suite.
 
 **Backend e bot stanno nello STESSO container Railway** (volume unico su
 `/app/data`). Niente servizi separati con volumi divisi.
@@ -235,15 +238,18 @@ cd webapp && npm run build            # build Next.js
   eliminati. health mostra `betfair_enabled: false` fisso (compatibilità
   frontend). Tripwire `test_betfair_removed.py`: i moduli non devono
   riapparire, i moduli attivi non devono nominare Betfair nel codice.
-- **Refertazione SOLO API-Football**: risultati e saldaggio bet/previsioni/
-  cassa passano ESCLUSIVAMENTE da `settlement_apifootball` (fixtures finite
-  API-Football abbinate per nome ai match_id the-odds-api; mappa
-  SETTLEMENT_LEAGUE_IDS ~50 leghe, le non mappate vengono loggate e saltate).
-  `odds_api.fetch_scores` NON è più nel flusso di settlement; the-odds-api
-  resta solo per quote + CLV. Vincolo garantito da `test_betfair_removed.py`
-  e dai test di settlement (patch del confine `settlement_apifootball._api_get`).
-  Limite free plan API-Football (100 req/giorno): si scaricano SOLO le leghe
-  con match/cassa aperti (1 chiamata a lega).
+- **Refertazione SOLO the-odds-api**: risultati e saldaggio bet/previsioni/
+  cassa passano ESCLUSIVAMENTE da `odds_api.fetch_scores` +
+  `match_scores_by_name` (la stessa chiave delle quote restituisce i
+  risultati FINITI della stagione corrente, aggancio diretto ai match_id
+  the-odds-api già in `matches`). TENTATIVO API-Football il 04/09 e
+  REVERSO nello stesso giorno: il piano free copre solo le stagioni
+  2022-2024 (errore API "Free plans do not have access to this season"),
+  quindi NON può saldare le partite correnti del 2026 — verificato con
+  chiamata reale su copia del DB di produzione (0 match aggiornati).
+  API-Football resta solo per lo storico ratings in `football_hist.py`.
+  Vincolo garantito da `test_betfair_removed.py` e dai test di settlement
+  (patch del confine `odds_api.fetch_scores`).
 - **auto_bet SIM-only permanente (04/09)**: il job 08:50 piazza puntate
   SIMULATE con la quota del segnale (mode='sim', niente conto Exchange);
   alimenta ledger/ML/CLV come prima, saldate a fine partita. I candidati

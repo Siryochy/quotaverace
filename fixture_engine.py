@@ -502,7 +502,7 @@ def _candidate_status(cand: Dict) -> str:
 def get_calendar_formatted() -> str:
     rows = get_today_matches()
     if not rows:
-        return "📅 *CALENDARIO DEL GIORNO*\n\nNessuna partita trovata oggi.\nAssicurati che API_FOOTBALL_KEY sia configurata."
+        return "📅 *CALENDARIO DEL GIORNO*\n\nNessuna partita trovata oggi.\nAssicurati che ODDS_API_KEY sia configurata."
     msg = "📅 *CALENDARIO DEL GIORNO*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
     current_league = ""
     for row in rows:

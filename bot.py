@@ -563,20 +563,31 @@ def _update_results():
       2. Salda cassa / previsioni / puntate auto (ora i risultati esistono)
       3. Aggiorna rating
     """
-    from tracker import (get_results_stats, settle_cassa, settle_predictions,
-                          settle_bets)
+    from odds_api import SPORTS_MAP, fetch_scores, match_scores_by_name
+    from tracker import (save_result, get_results_stats, get_leagues_with_signals,
+                          settle_cassa, settle_predictions, settle_bets)
     from rating_engine import compute_ratings
     # --- STEP 1: scarica risultati PRIMA di saldare ---
-    # Refertazione ESCLUSIVAMENTE via API-Football (settlement_apifootball):
-    # scarica le fixtures finite delle leghe con match/cassa aperti, le
-    # abbina per nome ai match_id the-odds-api e le salva in match_results.
-    # Le quote/CLV restano su the-odds-api (ODDS_API_KEY), mai qui.
-    from settlement_apifootball import settle_results_from_apifootball
+    # Refertazione ESCLUSIVAMENTE via the-odds-api (fetch_scores): la stessa
+    # chiave delle quote restituisce anche i risultati FINITI delle partite
+    # correnti. API-Football resta SOLO per lo storico ratings (football_hist,
+    # stagioni 2022-2024 coperte dal piano free).
+    leagues = get_leagues_with_signals(days=3)
     updated = 0
-    try:
-        updated = settle_results_from_apifootball().get("updated", 0)
-    except Exception as e:
-        logger.warning("settlement_apifootball fallita: %s", e)
+    for lg in leagues:
+        sport = SPORTS_MAP.get(lg)
+        if not sport:
+            continue
+        for m in fetch_scores(sport, days_from=2):
+            if not m.get("id"):
+                continue
+            parsed = match_scores_by_name(m)
+            if parsed is None:
+                continue
+            sh, sa = parsed
+            save_result(m["id"], lg, m.get("home_team", ""), m.get("away_team", ""),
+                        sh, sa, m.get("last_update", ""))
+            updated += 1
     if updated:
         logger.info("Risultati scaricati: %d partite aggiornate.", updated)
     # --- STEP 2: salda cassa, previsioni e puntate AUTO ---
@@ -650,8 +661,9 @@ def _admin_chat_ids() -> list:
 def _missing_env_keys() -> list:
     """Chiavi mancanti: i job corrispondenti saltano in silenzio."""
     missing = []
-    for key, what in (("API_FOOTBALL_KEY", "calendario/analisi + settlement risultati"),
-                      ("ODDS_API_KEY", "quote live + CLV + analisi mercato")):
+    for key, what in (("API_FOOTBALL_KEY", "storico ratings 2022-2024 (football_hist)"),
+                      ("ODDS_API_KEY", "quote live + CLV + settlement risultati"),
+                      ("QUOTAVERACE_BOT_TOKEN", "bot Telegram")):
         if not os.getenv(key):
             missing.append(f"{key} ({what})")
     return missing

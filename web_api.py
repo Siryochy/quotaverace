@@ -618,13 +618,13 @@ def _market_signals_json(params=None):
 def _scan_json(params=None):
     """Endpoint rimosso (04/09): Betfair non fa più parte dell'architettura.
 
-    La refertazione usa esclusivamente API-Football e le quote/CLV
-    the-odds-api: non esiste più un catalogo Exchange da esporre.
+    La refertazione usa esclusivamente the-odds-api (fetch_scores) e le
+    quote/CLV idem: non esiste più un catalogo Exchange da esporre.
     """
     return 503, {
         "error": "betfair_removed",
         "message": "Betfair rimosso dall'architettura (04/09). "
-                   "Refertazione: API-Football; quote/CLV: the-odds-api.",
+                   "Refertazione e quote/CLV: the-odds-api.",
     }
 
 

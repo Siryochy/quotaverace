@@ -42,14 +42,18 @@ ed è condiviso per costruzione.
 |---|---|---|
 | `QUOTAVERACE_BOT_TOKEN` | ✅ | Token del bot Telegram (@BotFather). Se manca, `run_all.py` termina: il servizio resta in Crash |
 | `ODDS_API_KEY` | opzionale | Chiave the-odds-api (quote + CLV) |
-| `API_FOOTBALL_KEY` | opzionale | Chiave API-Football (settlement risultati + rating dinamici + sync storico) |
+| `API_FOOTBALL_KEY` | opzionale | Chiave API-Football (solo storico ratings 2022-2024: il piano free NON copre la stagione corrente) |
 | `BANKROLL_DEFAULT` | opzionale | Bankroll di default (default `100.0`) |
 | `QUOTAVERACE_DATA_DIR` | opzionale | Directory dei dati persistenti (default `/app/data`). Su Railway punta al Volume montato; non usare `/app` |
 
 > ⚠️ **Betfair è stato RIMOSSO dall'architettura il 04/09**: nessuna
 > variabile `BETFAIR_*` è più necessaria e i relativi moduli non esistono.
-> La refertazione usa esclusivamente API-Football (`settlement_apifootball.py`),
-> le quote/CLV esclusivamente the-odds-api. `auto_bet` è SIM-only.
+> **Refertazione risultati = the-odds-api** (`odds_api.fetch_scores`, la
+> stessa chiave delle quote restituisce i risultati finiti della stagione
+> corrente); quote/CLV = the-odds-api. API-Football serve SOLO allo storico
+> ratings 2022-2024 (`football_hist.py`): il piano free NON dà accesso alla
+> stagione corrente (verificato 04/09), quindi non può saldare le partite
+> del 2026. `auto_bet` è SIM-only.
 
 Questo è il **secondo servizio API non esiste più**: l'API è servita dallo
 stesso container del bot sulla porta `PORT` iniettata da Railway.
@@ -102,12 +106,13 @@ eliminare la dipendenza dall'account Exchange. Moduli rimossi:
 `betfair_enabled: false` per compatibilità frontend.
 
 Architettura attuale:
-- **Refertazione**: API-Football (`settlement_apifootball.py`) — fixtures
-  finite abbinate per nome ai match_id the-odds-api, mappa lega→league_id
-  ~50 campionati. Limite free plan: 100 richieste/giorno (si scaricano solo
-  le leghe con match/cassa aperti).
+- **Refertazione**: the-odds-api (`odds_api.fetch_scores` +
+  `match_scores_by_name`) — risultati finiti della stagione corrente, 1
+  credito per sport, aggancio ai match_id the-odds-api già in `matches`.
 - **Quote + CLV**: the-odds-api (`odds_api.py`).
 - **Puntate automatiche**: SIM-only (paper trading con la quota del segnale).
+- **Storico ratings**: API-Football (`football_hist.py`, stagioni 2022-2024
+  coperte dal piano free).
 
 > ⚠️ **Requisiti Betfair e setup certificato sono stati RIMOSSI il 04/09**
 > insieme all'integrazione: nessuna credenziale/certificato Exchange è più
@@ -152,8 +157,8 @@ curl https://<vercel-url>/api/backend/api/health   # via proxy
 - **Rate limit**: il free plan di the-odds-api ha 500 req/mese; quello di
   API-Football 100 req/giorno. I job del bot sono già tarati per rientrare.
 - **Betfair (rimosso 04/09)**: nessuna chiamata Exchange — refertazione
-  esclusivamente API-Football (100 req/giorno free plan: il settlement
-  scarica solo le leghe con match/cassa aperti), quote/CLV the-odds-api.
+  esclusivamente the-odds-api (fetch_scores della stagione corrente),
+  quote/CLV the-odds-api, API-Football solo storico ratings 2022-2024.
 - **Long polling Telegram** funziona su Railway senza webhook; per webhook
   serve esporre una route HTTP dedicata.
 - Il file `.env` locale non viene deployato: configura le variabili nella
