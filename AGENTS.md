@@ -380,7 +380,7 @@ cd webapp && npm run build            # build Next.js
   timestamp con microsecondi. Usato da backup_data_job (03:30 UTC + avvio)
   e comando `/backup` (solo admin). VERIFICATO IN PRODUZIONE: integrity ok,
   56 CLV, dataset ML, 78 file data/.
-- **Test**: 528 test verdi (la suite completa richiede ~8 min).
+- **Test**: 529 test verdi (la suite completa richiede ~8 min).
 
 ## Moduli avanzati (Settembre 2026)
 
@@ -460,7 +460,7 @@ cd webapp && npm run build            # build Next.js
   timestamp con microsecondi. Usato da backup_data_job (03:30 UTC + avvio)
   e comando `/backup` (solo admin). VERIFICATO IN PRODUZIONE: integrity ok,
   56 CLV, dataset ML, 78 file data/.
-- **Test**: 528 test verdi (la suite completa richiede ~8 min).
+- **Test**: 529 test verdi (la suite completa richiede ~8 min).
 - **Sicurezza**: rotazioni token 01/09, 02/09 e **04/09** verificate
   (Telegram `@Calcifrrbot`, ID 8372645521). Rotazione 04/09 completata
   con Opzione A: token esposto in chat REVOCATO (getMe col vecchio → 401)
