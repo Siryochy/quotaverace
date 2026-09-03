@@ -12,10 +12,13 @@ from secure_logging import SensitiveDataFilter, collect_secrets, setup
 
 
 def test_scrub_maschera_token_telegram():
-    msg = ("HTTP Request: POST https://api.telegram.org/bot"
-           "8372645521:AAEOEM3lSXAT4e3wTpqMKnhjsa5OZFpv-2U/getUpdates")
+    # Token FAKE di prova (mai una credenziale reale): la maschera si attiva
+    # sul FORMATO del token, non sul valore.
+    fake_token = "123456789:AAfake-test-token-xxxxxxxxxxxxxxxxxxxxxx-00"
+    msg = (f"HTTP Request: POST https://api.telegram.org/bot"
+           f"{fake_token}/getUpdates")
     out = SensitiveDataFilter.scrub(msg, set())
-    assert "AAEOEM3lSX" not in out
+    assert "AAfake" not in out
     assert out.startswith("HTTP Request: POST https://api.telegram.org/bot***")
 
 

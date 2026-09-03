@@ -23,6 +23,7 @@ tracker.py          → DB SQLite (schema + helper): segnali, analisi, cassa, ra
 fixture_engine.py   → analisi partite: modello vs mercato (CUORE STRATEGICO)
 market_calib.py     → devigging + blend dinamico + CLV vig-free + longshot bias
 ml_ensemble.py      → ensemble Poisson + Logistic Regression (numpy-only)
+probability_calibration.py → calibrazione isotonica PAVA numpy-only dell'ensemble
 line_movement.py    → price snapshots, RLM detection, steam moves
 bookmaker_advantage.py → soft book lag detection vs Pinnacle
 adaptive_staking.py → Kelly frazionato dinamico + drawdown protection
@@ -110,6 +111,15 @@ cd webapp && npm run build            # build Next.js
   `secrets/` (`iterdir`) — le sottocartelle tipo `secrets/betfair/` (cert SSL
   client) non vengono toccate. MAI mettere `*.key`/`*.pem` direttamente in
   `secrets/`: verrebbero trattati come segreti e cancellati dal commit.
+- **Tripwire igiene segreti** (`test_secret_hygiene.py`): la suite ROMPE se un
+  sorgente .py contiene una credenziale in chiaro (formati noti: token
+  Telegram, GitHub PAT, Google API key, AWS, Slack, Stripe, PEM, Bearer;
+  assegnazioni a nomi credential-like; URL user:password) o se `.env*`/
+  `secrets/` finiscono tracciati in git. Tutte le chiavi si leggono SOLO da
+  env (`.env` gitignored + vault): audit completato con zero valori hardcoded.
+  Rimossa da `test_secure_logging.py` una credenziale Telegram REALE ma
+  rotata (era finita lì come esempio nel fix del 01/09): lo scrub maschera
+  sul FORMATO, quindi ora il test usa un fake marcato `fake/test`.
 
 ## Push automatico (credenziali GitHub)
 
@@ -120,8 +130,46 @@ cd webapp && npm run build            # build Next.js
 - Il token va rinnovato quando scade o dopo l'esposizione in chat (flusso:
   fine-grained PAT → Contents RW → va nel VAULT, non più nel `.env`).
 
-## Stato attuale (aggiornato al 03/09/2026)
+## Stato attuale (aggiornato al 04/09/2026)
 
+- **Calibrazione isotonica dell'ensemble** (04/09, `probability_calibration.py`):
+  PAVA numpy-only (zero deps, coerente col progetto) che mappa gli score
+  grezzi di XGBoost/LR sulle frequenze EMPIRICHE del dataset storico.
+  Fit su split OUT-OF-SAMPLE (30% riservato, seed fisso — mai sui dati di
+  training, altrimenti impara l'overfit e non corregge nulla); attiva con
+  >=60 campioni chiusi (MIN_CALIB_SAMPLES). Integrata in `ml_ensemble.py`
+  (train/predict/save/load + flag `calibrated` nel predict) e metriche
+  Brier/ECE pre/post nel report di training (`metrics["calibration"]`).
+  Oggi 9 previsioni chiuse → si attiva da sola col ledger che cresce.
+- **CLV → staking WIRED** (04/09, auto_bet.py): `has_clv_positive` veniva
+  letto ma MAI passato ad `adaptive_stake` (il parametro esisteva da
+  sempre) — ora arriva dal CLV rolling di `clv_history`: CLV positivo =
+  conferma dell'edge → frazione Kelly piu' alta. Test di wiring dedicati.
+- **Cap esposizione totale** (04/09, auto_bet.py): `TOTAL_EXPOSURE_CAP_PCT`
+  = 0.40, applicato in FASE 2 DOPO il correlation cap — il portafoglio del
+  giorno non supera il 40% del bankroll (varianza additiva tra pick
+  indipendenti), scaling proporzionale che preserva il ranking EV.
+- **Test motore Poisson/Dixon-Coles** (test_poisson_engine.py): verifica
+  della correzione rho (rho<0 → draw piu' alto del Poisson puro),
+  coerenza 1X2/OU/BTTS/AH (somma 1), integrazione `expected_goals`.
+- **Correlation risk cap** (03/09, auto_bet.py): Kelly assume indipendenza
+  tra le puntate ma esiti correlati nello stesso blocco temporale (stessa
+  partita 1X2+OU, oppure stessa lega con kickoff entro 90') condividono la
+  varianza → `apply_correlation_cap` riduce PROPORZIONALMENTE gli stake
+  quando l'esposizione del blocco supera il 30% del bankroll (mantiene il
+  ranking EV, non taglia esiti). Gruppamento per LEGA + finestra temporale
+  greedy (match_id uguale = sempre stesso blocco). Test dedicati in
+  test_auto_bet.py (blocchi disgiunti senza cap, ranking preservato, flusso
+  SIM completo).
+- **Drift monitor del modello** (03/09, drift_monitor.py): Brier/LogLoss
+  ROLLING sulle ultime 30 previsioni chiuse vs baseline storica; alert
+  `drift` se il Brier rolling supera 1.30x la baseline o +0.03 in valore
+  assoluto → raccomanda il retraining dell'ensemble ML. Sezione 🧠 nel
+  report giornaliero (bot.py, fail-safe try/except) + CLI
+  `venv/bin/python drift_monitor.py [--json]`. Stato "insufficient" sotto
+  le 15 previsioni chiuse (oggi ~8: si attiva da solo col ledger che cresce).
+  Migrazione idempotente `settled_at` su predictions/bets in tracker.py
+  (stessa convenzione della cassa).
 - **Sanity check settlement** (03/09): tripwire anti-contraddizione nei tre
   settle (bets/predictions/cassa): gol negativi/non numerici/`result`
   incoerente → la riga NON si chiude (resta aperta + log); verdetto 'won'
@@ -320,7 +368,7 @@ cd webapp && npm run build            # build Next.js
   timestamp con microsecondi. Usato da backup_data_job (03:30 UTC + avvio)
   e comando `/backup` (solo admin). VERIFICATO IN PRODUZIONE: integrity ok,
   56 CLV, dataset ML, 78 file data/.
-- **Test**: 536 test verdi (la suite completa richiede ~10 min).
+- **Test**: 631 test verdi (la suite completa richiede ~9 min).
 
 ## Moduli avanzati (Settembre 2026)
 
@@ -328,6 +376,12 @@ cd webapp && npm run build            # build Next.js
   combina le probabilità Poisson con un classificatore addestrato sul
   dataset storico. Peso dinamico basato sul Brier score. Save/load in
   `data/ensemble_model.json`. Integrato in `fixture_engine._analyze_match`.
+- **Calibrazione isotonica** (`probability_calibration.py`, 04/09): PAVA
+  numpy-only che corregge l'overconfidence di XGBoost/LR mappando gli
+  score sulle frequenze empiriche. Fit su split out-of-sample (mai sui
+  dati di training), attiva con ≥60 campioni chiusi, metriche
+  Brier/ECE pre-post nel report. Integrata in `ml_ensemble.py`
+  (train/predict/save/load, flag `calibrated`).
 - **Line Movement Tracking** (`line_movement.py`): tabella `price_snapshots`
   registra i prezzi ad ogni analisi. RLM detection (reverse line movement =
   segnale sharp money quando il prezzo si muove contro il pubblico) e steam
@@ -394,7 +448,7 @@ cd webapp && npm run build            # build Next.js
   timestamp con microsecondi. Usato da backup_data_job (03:30 UTC + avvio)
   e comando `/backup` (solo admin). VERIFICATO IN PRODUZIONE: integrity ok,
   56 CLV, dataset ML, 78 file data/.
-- **Test**: 536 test verdi (la suite completa richiede ~10 min).
+- **Test**: 631 test verdi (la suite completa richiede ~9 min).
 - **Sicurezza**: rotazioni token 01/09 e 02/09 verificate (Telegram
   `@Calcifrrbot`, ID 8372645521: `getMe` 200, notifica consegnata al Chat ID
   proprietario 7718157436; GitHub PAT fine-grained nel vault). Token del
