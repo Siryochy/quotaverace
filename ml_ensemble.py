@@ -27,6 +27,14 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from probability_calibration import (
+    IsotonicCalibrator,
+    calibration_report,
+    MIN_CALIB_SAMPLES,
+    CALIB_FRACTION,
+    CALIB_RANDOM_STATE,
+)
+
 logger = logging.getLogger(__name__)
 
 # --- Config ---
@@ -317,6 +325,7 @@ class EnsemblePredictor:
         self.ensemble_weight: float = 0.4  # peso ML nell'ensemble (0-1)
         self.trained: bool = False
         self.train_metrics: Dict = {}
+        self.calibrator: Optional[IsotonicCalibrator] = None  # isotonica
 
     def train(self, dataset: List[Dict]) -> Dict:
         """Allena il modello ML sul dataset storico.
@@ -351,18 +360,8 @@ class EnsemblePredictor:
         y = np.array(y_list)
 
         # Seleziona il modello: XGBoost se disponibile, altrimenti LR
-        if HAS_XGBOOST and len(X_list) >= 50:
-            logger.info("Ensemble: uso XGBoost (%d campioni)", len(X_list))
-            self.lr_model = XGBoostClassifier(
-                n_estimators=100, max_depth=4, learning_rate=0.1)
-            metrics = self.lr_model.fit(X, y, feature_names=FEATURE_NAMES)
-            self.model_type = "xgboost"
-        else:
-            logger.info("Ensemble: uso Logistic Regression (%d campioni)",
-                        len(X_list))
-            self.lr_model = LogisticRegressor(lr=0.01, epochs=500, l2=0.1)
-            metrics = self.lr_model.fit(X, y, feature_names=FEATURE_NAMES)
-            self.model_type = "logistic"
+        self.lr_model, self.model_type = self._build_model(len(X_list))
+        metrics = self.lr_model.fit(X, y, feature_names=FEATURE_NAMES)
 
         # Calcola ensemble weight: basato sul Brier score
         brier = metrics.get("brier_score", 0.25)
@@ -373,10 +372,53 @@ class EnsemblePredictor:
         metrics["model_type"] = self.model_type
         metrics["status"] = "trained"
 
+        # Calibrazione isotonica: fit su score OUT-OF-SAMPLE (split
+        # train/calibrazione) per correggere l'overconfidence del modello
+        # senza imparare l'overfit. Il modello base resta fit su TUTTI i
+        # dati; il calibratore mappa score -> frequenze empiriche.
+        self.calibrator = None
+        if len(X_list) >= MIN_CALIB_SAMPLES:
+            rng = np.random.RandomState(CALIB_RANDOM_STATE)
+            idx = rng.permutation(len(X_list))
+            n_cal = max(15, int(len(X_list) * CALIB_FRACTION))
+            cal_idx = idx[-n_cal:]
+            train_idx = idx[:-n_cal]
+            try:
+                cal_model, _ = self._build_model(len(train_idx))
+                cal_model.fit(X[train_idx], y[train_idx],
+                              feature_names=FEATURE_NAMES)
+                cal_scores = cal_model.predict_proba(X[cal_idx])
+                self.calibrator = IsotonicCalibrator().fit(
+                    cal_scores, y[cal_idx])
+                metrics["calibration"] = calibration_report(
+                    cal_scores, y[cal_idx], self.calibrator)
+                logger.info(
+                    "Calibrazione isotonica: %d campioni OOF, "
+                    "Brier %.4f -> %.4f", n_cal,
+                    metrics["calibration"]["pre_brier"],
+                    metrics["calibration"].get("post_brier", 0.0))
+            except Exception as e:
+                logger.warning("Calibrazione fallita: %s", e)
+                self.calibrator = None
+                metrics["calibration"] = {"status": "error", "msg": str(e)}
+        else:
+            metrics["calibration"] = {
+                "status": "skipped", "n": len(X_list),
+                "min_required": MIN_CALIB_SAMPLES,
+            }
+
         logger.info(f"Ensemble ML addestrato: acc={metrics['accuracy']:.3f}, "
                     f"brier={brier:.4f}, weight={self.ensemble_weight:.2f}")
 
         return metrics
+
+    def _build_model(self, n_samples: int):
+        """Istanzia il modello base: XGBoost se disponibile e abbastanza
+        campioni, altrimenti LogisticRegressor numpy-only."""
+        if HAS_XGBOOST and n_samples >= 50:
+            return (XGBoostClassifier(
+                n_estimators=100, max_depth=4, learning_rate=0.1), "xgboost")
+        return (LogisticRegressor(lr=0.01, epochs=500, l2=0.1), "logistic")
 
     def predict(self, row: Dict) -> Dict:
         """Predice la probabilità di un singolo evento.
@@ -401,6 +443,13 @@ class EnsemblePredictor:
         features = np.array([_build_features(row)])
         ml_prob = float(self.lr_model.predict_proba(features)[0])
 
+        # Calibrazione isotonica: corregge l'overconfidence del classificatore
+        # mappando lo score grezzo sulla frequenza empirica storica.
+        calibrated = False
+        if self.calibrator is not None and self.calibrator.fitted_:
+            ml_prob = float(self.calibrator.predict(np.array([ml_prob]))[0])
+            calibrated = True
+
         # Ensemble: media ponderata
         w = self.ensemble_weight
         ensemble_prob = w * ml_prob + (1.0 - w) * poisson_prob
@@ -415,6 +464,7 @@ class EnsemblePredictor:
             "ensemble_prob": round(ensemble_prob, 4),
             "confidence": round(confidence, 3),
             "ml_available": True,
+            "calibrated": calibrated,
             "ensemble_weight": round(w, 3),
         }
 
@@ -428,6 +478,8 @@ class EnsemblePredictor:
             "lr_model": self.lr_model.to_dict(),
             "ensemble_weight": self.ensemble_weight,
             "train_metrics": self.train_metrics,
+            "calibrator": (self.calibrator.to_dict()
+                            if self.calibrator is not None else None),
         }
         path.write_text(json.dumps(data, indent=2))
         logger.info("Ensemble salvato: %s (%s)", path, self.model_type)
@@ -455,6 +507,8 @@ class EnsemblePredictor:
 
             self.ensemble_weight = data.get("ensemble_weight", 0.4)
             self.train_metrics = data.get("train_metrics", {})
+            self.calibrator = IsotonicCalibrator.from_dict(
+                data.get("calibrator"))
             self.trained = True
             return True
         except Exception as e:

@@ -85,6 +85,12 @@ def _get_conn():
         status TEXT, esito_finale TEXT, profit REAL,
         created_at TEXT, settled_at TEXT,
         UNIQUE(match_id, mercato, esito))''')
+    # Migrazione idempotente per DB nati prima di settled_at (usato da
+    # settle_predictions, settle_bets e drift_monitor): stessa convenzione
+    # delle colonne di saldo su cassa.
+    _pred_cols = [r[1] for r in c.execute("PRAGMA table_info(predictions)")]
+    if "settled_at" not in _pred_cols:
+        c.execute("ALTER TABLE predictions ADD COLUMN settled_at TEXT")
     # Puntate automatiche su Betfair (auto_bet.py): ordini reali o dry-run,
     # saldati a fine partita come le previsioni.
     c.execute('''CREATE TABLE IF NOT EXISTS bets (
@@ -95,6 +101,9 @@ def _get_conn():
         esito_finale TEXT, profit REAL,
         created_at TEXT, settled_at TEXT,
         UNIQUE(match_id, esito))''')
+    _bet_cols = [r[1] for r in c.execute("PRAGMA table_info(bets)")]
+    if "settled_at" not in _bet_cols:
+        c.execute("ALTER TABLE bets ADD COLUMN settled_at TEXT")
     _ensure_unique_constraints(c)
     conn.commit()
     return conn

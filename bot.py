@@ -941,6 +941,15 @@ def format_daily_report(since: str, label: str) -> str:
     except Exception as e:
         logger.warning("streak/bankroll nel report falliti: %s", e)
 
+    # Concept drift del modello: Brier/LogLoss rolling vs baseline sulle
+    # previsioni chiuse. Se la calibrazione sta degradando, il report
+    # segnala il retraining dell'ensemble (monitoraggio periodico).
+    try:
+        from drift_monitor import check_drift, format_drift_report
+        lines.extend(format_drift_report(check_drift()))
+    except Exception as e:
+        logger.warning("drift monitor nel report fallito: %s", e)
+
     missing = _missing_env_keys()
     if missing:
         lines.append("\n⚠️ *Job saltati per chiavi mancanti:*\n   " + "\n   ".join(missing))

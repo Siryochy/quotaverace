@@ -145,6 +145,61 @@ class TestEnsemblePredictor:
         # Brier basso → peso ML alto
         assert ens.ensemble_weight > 0.15
 
+    def test_train_attiva_calibrazione_con_60_campioni(self):
+        """Con >= MIN_CALIB_SAMPLES il calibratore isotonico viene fit su
+        score out-of-sample e il report di calibrazione e' nelle metriche."""
+        ds = self._make_dataset(100)
+        ens = EnsemblePredictor()
+        metrics = ens.train(ds)
+        assert ens.calibrator is not None
+        assert ens.calibrator.fitted_
+        cal = metrics.get("calibration", {})
+        assert "pre_brier" in cal and "post_brier" in cal
+        assert cal["post_brier"] <= cal["pre_brier"] + 1e-6
+
+    def test_calibrazione_skippata_con_pochi_campioni(self):
+        ds = self._make_dataset(40)
+        ens = EnsemblePredictor()
+        metrics = ens.train(ds)
+        assert ens.calibrator is None
+        assert metrics["calibration"]["status"] == "skipped"
+
+    def test_predict_applica_calibrazione(self):
+        ds = self._make_dataset(100)
+        ens = EnsemblePredictor()
+        ens.train(ds)
+        row = ds[0]
+        result = ens.predict(row)
+        assert result["calibrated"] is True
+        assert 0.0 <= result["ensemble_prob"] <= 1.0
+
+    def test_save_load_preserva_calibratore(self):
+        ds = self._make_dataset(100)
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "model.json"
+            ens = EnsemblePredictor()
+            ens.train(ds)
+            ens.save(path)
+            ens2 = EnsemblePredictor()
+            assert ens2.load(path)
+            assert ens2.calibrator is not None
+            assert ens2.calibrator.fitted_
+            row = ds[0]
+            r1 = ens.predict(row)
+            r2 = ens2.predict(row)
+            assert abs(r1["ensemble_prob"] - r2["ensemble_prob"]) < 0.001
+
+    def test_calibrazione_mantiene_prob_in_range(self):
+        """Dopo la calibrazione le prob restano in [0,1] anche su score
+        estremi (estrapolazione piatta ai bordi)."""
+        ds = self._make_dataset(100)
+        ens = EnsemblePredictor()
+        ens.train(ds)
+        for prob in (0.01, 0.5, 0.99):
+            row = dict(ds[0], prob=prob)
+            r = ens.predict(row)
+            assert 0.0 <= r["ensemble_prob"] <= 1.0
+
 
 # --- train_ensemble shortcut ---
 
