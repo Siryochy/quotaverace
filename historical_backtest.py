@@ -14,10 +14,13 @@ Valida lo stack di produzione corrente su 4 stagioni di calcio europeo
      partite gia' chiuse.
   6. FILTRO VALUE: is_sane (EV 3-15%, quota 1.50-5.00, edge >= +3pp,
      strong_value >= +5pp).
-  7. STAKING: Kelly 1/4 (kelly_euro, cap 3% bankroll), 1 bet per partita
+  7. ANTI-OVERCONFIDENCE (04/09): shrink verso il mercato dopo il blend,
+     cap sull'edge e sotto-peso dei pareggi (vedi costanti SHRINK_TO_MARKET /
+     MAX_EDGE / DRAW_PENALTY).
+  8. STAKING: Kelly 1/4 (kelly_euro, cap 3% bankroll), 1 bet per partita
      (miglior EV tra i candidati value/strong_value — niente correlazioni
      intra-partita).
-  8. CLV: entry = opening odds dell'esito giocato, closing = Pinnacle
+  9. CLV: entry = opening odds dell'esito giocato, closing = Pinnacle
      closing -> clv_raw + clv_vig_free (con l'intero mercato closing).
 
 Metriche: ROI, Max Drawdown (curva bankroll), hit rate, P/L, CLV medio
@@ -29,6 +32,11 @@ CLI:
   venv/bin/python historical_backtest.py --limit 500     # test rapido
   venv/bin/python historical_backtest.py --json          # solo JSON
   venv/bin/python historical_backtest.py --no-download   # usa CSV in cache
+  venv/bin/python historical_backtest.py --shrink 0.3 --edge-cap 0.08 \
+      --draw-penalty 0.7     # override anti-overconfidence
+
+Flag anti-overconfidence (default: shrink=0.50, edge-cap=0.10,
+draw-penalty=0.80): usali per misurare l'impatto di ogni correzione.
 """
 from __future__ import annotations
 
@@ -73,6 +81,24 @@ BANKROLL0 = 1000.0        # euro
 KELLY_FRACTION = 0.25     # 1/4 Kelly (come value_filter)
 STAKE_CAP = 0.03          # cap 3% bankroll (MAX_STAKE_PCT)
 MIN_STAKE = 0.0           # nessun floor: l'edge va misurato su TUTTE le pick
+
+# --- Anti-overconfidence (dal primo run: il modello sovrastimava 7-18pp ---
+# --- a ogni bucket di probabilita' e il CLV era negativo ovunque) --------
+# 1) SHRINK: dopo il blend modello+mercato, la deviazione dal mercato viene
+#    ridotta (0.50 = meta' strada verso il mercato). Il mercato e' la stima
+#    piu' calibrata: meno fiducia nel modello = meno falsi segnali.
+SHRINK_TO_MARKET = 0.50
+# 2) CAP sull'edge: l'edge finale sul mercato non supera MAI +10pp
+#    (gli edge enormi sono quasi sempre errore del modello: winner's curse).
+MAX_EDGE = 0.10
+# 3) DRAW PENALTY: i pareggi sono sistematicamente sovrastimati dal modello
+#    Poisson/DC -> sotto-peso la probabilita' X prima di normalizzare.
+DRAW_PENALTY = 0.80
+# 4) MAX ODDS: i longshot 4.0-5.0 perdono -24% (winner's curse sui
+#    longshot); il pocket 3.0-4.0 e' l'unico positivo. Coerente con
+#    LONG_SHOT_ODDS=3.5 di produzione.
+MAX_ODDS = 5.0
+
 RETRAIN_EVERY = 1000      # retrain ensemble ogni N partite chiuse
 MAX_TRAIN_ROWS = 8000     # tetto righe di training per il retrain
 MIN_MATCHES = 6           # soglia rating (coerente con rating_engine)
@@ -302,11 +328,40 @@ def expected_goals_bt(home_rating: Optional[Dict], away_rating: Optional[Dict],
 # ---------------------------------------------------------------------------
 
 def model_probs(lam_h: float, lam_a: float) -> Dict:
-    """Probabilita' Poisson/Dixon-Coles: 1X2 + over/under 2.5."""
+    """Probabilita' Poisson/Dixon-Coles: 1X2 + over/under 2.5.
+
+    Applica il DRAW_PENALTY ai pareggi (sovrastimati dal modello) e
+    rinormalizza il mercato 1X2.
+    """
     from poisson_engine import prob_1x2, prob_over_under
     p1, px, p2 = prob_1x2(lam_h, lam_a)
+    px *= DRAW_PENALTY
+    tot = p1 + px + p2
+    if tot > 0:
+        p1, px, p2 = p1 / tot, px / tot, p2 / tot
     p_over, _ = prob_over_under(lam_h, lam_a, 2.5)
     return {"prob_1": p1, "prob_X": px, "prob_2": p2, "prob_over": p_over}
+
+
+def final_prob(model_prob: float, market_prob: Optional[float],
+               league: str, odds: float) -> float:
+    """Probabilita' finale anti-overconfidence, in 3 passi:
+
+    1. BLEND dinamico modello+mercato (blend_probability, peso per lega);
+    2. SHRINK verso il mercato: la deviazione residua dal mercato viene
+       ridotta del fattore SHRINK_TO_MARKET;
+    3. CAP sull'edge: mai piu' di MAX_EDGE sopra la probabilita' di mercato
+       (gli edge estremi sono il sintomo del winner's curse).
+    """
+    from market_calib import blend_probability
+    pb = blend_probability(model_prob, market_prob, league=league, odds=odds)
+    if market_prob is None:
+        return pb
+    # shrink: muovi meta' strada verso il mercato
+    pb = market_prob + SHRINK_TO_MARKET * (pb - market_prob)
+    # cap: mai piu' di MAX_EDGE sopra il mercato
+    pb = min(pb, market_prob + MAX_EDGE)
+    return max(0.01, min(0.99, pb))
 
 
 def market_probs(odds: List[Optional[float]], n_outcomes: int = 3) -> Optional[List[float]]:
@@ -418,7 +473,7 @@ def _esito_ok(match: Dict, cand: Dict) -> bool:
 
 def run_backtest(matches: List[Dict], ensemble: bool = True) -> Dict:
     """Esegue il backtest walk-forward. Ritorna il report completo."""
-    from market_calib import blend_probability, clv_raw, clv_vig_free
+    from market_calib import clv_raw, clv_vig_free
     from value_filter import is_sane
 
     ratings = WalkForwardRatings()
@@ -458,9 +513,11 @@ def run_backtest(matches: List[Dict], ensemble: bool = True) -> Dict:
         for cand in cands:
             if not cand["quota"] or cand["quota"] <= 1.0:
                 continue
-            # prob finale: blend modello+mercato
-            pb = blend_probability(cand["model_prob"], cand["market_prob"],
-                                   league=match["league"], odds=cand["quota"])
+            if cand["quota"] > MAX_ODDS:
+                continue
+            # prob finale: blend + shrink verso il mercato + cap edge
+            pb = final_prob(cand["model_prob"], cand["market_prob"],
+                            match["league"], cand["quota"])
             # ensemble (se disponibile)
             row = {
                 "prob_1": probs["prob_1"], "prob_X": probs["prob_X"],
@@ -474,9 +531,14 @@ def run_backtest(matches: List[Dict], ensemble: bool = True) -> Dict:
             if ensemble:
                 p_ens = ens.predict(row)
                 if p_ens is not None:
-                    row["prob"] = p_ens
-                    row["ev"] = p_ens * cand["quota"] - 1.0
-                    row["market_edge"] = p_ens - cand["market_prob"]
+                    # anche l'ensemble passa dallo shrink/cap (era ancora
+                    # sovraconfidente: bucket 0.6-0.7 -> hit 52% vs 65% atteso)
+                    p_fin = min(p_ens, cand["market_prob"] + MAX_EDGE)
+                    p_fin = cand["market_prob"] + SHRINK_TO_MARKET * (p_fin - cand["market_prob"])
+                    p_fin = max(0.01, min(0.99, p_fin))
+                    row["prob"] = p_fin
+                    row["ev"] = p_fin * cand["quota"] - 1.0
+                    row["market_edge"] = p_fin - cand["market_prob"]
             prob = row["prob"]
             ev = row["ev"]
             sane, _ = is_sane(prob, cand["quota"], ev,
@@ -538,8 +600,10 @@ def run_backtest(matches: List[Dict], ensemble: bool = True) -> Dict:
         for cand in cands:
             if not cand["quota"] or cand["quota"] <= 1.0:
                 continue
-            pb = blend_probability(cand["model_prob"], cand["market_prob"],
-                                   league=match["league"], odds=cand["quota"])
+            if cand["quota"] > MAX_ODDS:
+                continue
+            pb = final_prob(cand["model_prob"], cand["market_prob"],
+                            match["league"], cand["quota"])
             row = {
                 "prob_1": probs["prob_1"], "prob_X": probs["prob_X"],
                 "prob_2": probs["prob_2"], "prob_over": probs["prob_over"],
@@ -584,6 +648,79 @@ def _clv_stats(bets: List[Dict]) -> Dict:
         if raw else None,
         "pct_positive_vf": round(sum(1 for x in vf if x > 0) / len(vf) * 100, 1)
         if vf else None,
+    }
+
+
+def _diagnostics(bets: List[Dict]) -> Dict:
+    """Diagnosi di calibrazione del run (stessa struttura del primo report):
+    hit rate per bucket di probabilita' del modello, ROI flat se le bet
+    fossero pagate a quota CLOSING (controllo "la selezione batte il
+    mercato?") e CLV vig-free medio per bucket di edge.
+    """
+    # bucket di calibrazione
+    buckets = {}
+    for b in bets:
+        p = b["prob"]
+        if p < 0.2:
+            key = "0.0-0.2"
+        elif p < 0.3:
+            key = "0.2-0.3"
+        elif p < 0.4:
+            key = "0.3-0.4"
+        elif p < 0.5:
+            key = "0.4-0.5"
+        elif p < 0.6:
+            key = "0.5-0.6"
+        elif p < 0.7:
+            key = "0.6-0.7"
+        else:
+            key = "0.7-1.0"
+        g = buckets.setdefault(key, {"n": 0, "won": 0})
+        g["n"] += 1
+        g["won"] += 1 if b["won"] else 0
+    expected = {"0.0-0.2": 10, "0.2-0.3": 25, "0.3-0.4": 35, "0.4-0.5": 45,
+                "0.5-0.6": 55, "0.6-0.7": 65, "0.7-1.0": 85}
+    calib = [{"bucket": k, "n": g["n"],
+              "hit_pct": round(g["won"] / g["n"] * 100.0, 1),
+              "expected_pct": expected.get(k)}
+             for k, g in sorted(buckets.items()) if g["n"] > 0]
+
+    # ROI flat se pagate a quota CLOSING (ricostruita da clv_raw)
+    closing_roi = None
+    c_vals = []
+    for b in bets:
+        if b.get("clv_raw") is None or b.get("stake", 0) <= 0:
+            continue
+        closing = b["quota"] / (1.0 + b["clv_raw"])
+        if closing <= 1.0:
+            continue
+        profit = b["stake"] * (closing - 1.0) if b["won"] else -b["stake"]
+        c_vals.append(profit / b["stake"] * 100.0)
+    if c_vals:
+        closing_roi = round(sum(c_vals) / len(c_vals), 2)
+
+    # CLV vig-free medio per bucket di edge
+    edge_buckets = {}
+    for b in bets:
+        if b.get("clv_vig_free") is None:
+            continue
+        e = b["market_edge"]
+        if e < 0.05:
+            key = "0.03-0.05"
+        elif e < 0.08:
+            key = "0.05-0.08"
+        else:
+            key = "0.08+"
+        g = edge_buckets.setdefault(key, [])
+        g.append(b["clv_vig_free"] * 100.0)
+    clv_edge = [{"edge_bucket": k, "n": len(v),
+                 "clv_vf_avg": round(sum(v) / len(v), 2)}
+                for k, v in sorted(edge_buckets.items())]
+
+    return {
+        "calibrazione_modello": calib,
+        "roi_flat_a_quota_closing_pct": closing_roi,
+        "clv_vf_per_bucket_edge": clv_edge,
     }
 
 
@@ -634,6 +771,7 @@ def _build_report(bets: List[Dict], max_dd: float, bankroll0: float) -> Dict:
         "by_market": _group("mercato"),
         "by_status": _group("status"),
         "by_esito": _group("esito"),
+        "diagnosi": _diagnostics(bets),
     }
 
 
@@ -703,11 +841,32 @@ def format_report(res: Dict, n_matches: int = 0,
         if g:
             lines.append(f"   {k}: {g['n']} bet | ROI {pct(g['roi'], sign=True)}")
     lines.append("━" * 34)
+    dg = res.get("diagnosi") or {}
+    lines.append("🔬 *DIAGNOSI (controlli di calibrazione)*")
+    c_roi = dg.get("roi_flat_a_quota_closing_pct")
+    if c_roi is not None:
+        lines.append(f"   Controllo: ROI flat se pagate a quota CLOSING: "
+                     f"{pct(c_roi, sign=True)}"
+                     f"  (entry {pct(res['roi_flat'], sign=True)})"
+                     f"  -> selezione batte il mercato? "
+                     + ("✅ sì" if c_roi > 0 else "❌ no"))
+    for row in (dg.get("calibrazione_modello") or [])[:7]:
+        exp = row.get("expected_pct")
+        gap = (row["hit_pct"] - exp) if exp is not None else None
+        lines.append(f"   prob {row['bucket']}: n={row['n']:>4} "
+                     f"hit {row['hit_pct']:.0f}%"
+                     + (f" (atteso ~{exp}%, gap {gap:+.0f}pp)" if exp is not None else ""))
+    for row in (dg.get("clv_vf_per_bucket_edge") or []):
+        lines.append(f"   edge {row['edge_bucket']}: n={row['n']:>4} "
+                     f"CLV vf {pct(row['clv_vf_avg'], sign=True)}")
+    lines.append("━" * 34)
     lines.append("📌 Metodo: walk-forward senza look-ahead (rating, ensemble e "
                  "mercato solo da partite/quote passate). Entry = opening odds, "
-                 "CLV vs closing Pinnacle. Ensemble: "
+                 "CLV vs closing. Ensemble: "
                  + ("XGBoost+PAVA" if ensemble_on else "disattivato (solo blend)")
-                 + ". Kelly 1/4 con cap 3%.")
+                 + f". Anti-overconfidence: shrink={SHRINK_TO_MARKET}, "
+                 + f"edge-cap={MAX_EDGE:.2f}, draw-penalty={DRAW_PENALTY}. "
+                 + "Kelly 1/4 con cap 3%.")
     return "\n".join(lines)
 
 
@@ -723,11 +882,32 @@ def main(argv=None) -> int:
                     help="Usa i CSV già in cache")
     ap.add_argument("--no-ensemble", action="store_true",
                     help="Disattiva l'ensemble ML (solo Poisson+blend)")
+    ap.add_argument("--shrink", type=float, default=None,
+                    help="Shrink verso il mercato dopo il blend (default 0.50)")
+    ap.add_argument("--edge-cap", type=float, default=None,
+                    help="Cap sull'edge in pp (default 0.10 = 10pp)")
+    ap.add_argument("--draw-penalty", type=float, default=None,
+                    help="Sotto-peso dei pareggi (default 0.80)")
+    ap.add_argument("--max-odds", type=float, default=None,
+                    help="Quota massima accettata (default 5.0)")
     ap.add_argument("--json", action="store_true",
                     help="Stampa solo il JSON del report")
     ap.add_argument("--save", action="store_true",
                     help="Salva report JSON e CSV delle bet in data/")
     args = ap.parse_args(argv)
+
+    global SHRINK_TO_MARKET, MAX_EDGE, DRAW_PENALTY, MAX_ODDS
+    if args.shrink is not None:
+        SHRINK_TO_MARKET = args.shrink
+    if args.edge_cap is not None:
+        MAX_EDGE = args.edge_cap
+    if args.draw_penalty is not None:
+        DRAW_PENALTY = args.draw_penalty
+    if args.max_odds is not None:
+        MAX_ODDS = args.max_odds
+    print(f"⚙️  Anti-overconfidence: shrink={SHRINK_TO_MARKET}, "
+          f"edge-cap={MAX_EDGE:.2f}, draw-penalty={DRAW_PENALTY}, "
+          f"max-odds={MAX_ODDS}")
 
     print("⬇️  Caricamento dati football-data.co.uk (4 stagioni × 10 leghe)...")
     matches = load_matches(no_download=args.no_download)
