@@ -14,8 +14,9 @@ Valida lo stack di produzione corrente su 4 stagioni di calcio europeo
      partite gia' chiuse.
   6. FILTRO VALUE: is_sane (EV 3-15%, quota 1.50-5.00, edge >= +3pp,
      strong_value >= +5pp).
-  7. ANTI-OVERCONFIDENCE (04/09): shrink verso il mercato dopo il blend,
-     cap sull'edge e sotto-peso dei pareggi (vedi costanti SHRINK_TO_MARKET /
+  7. ANTI-OVERCONFIDENCE (04/09): shrink ASIMMETRICO verso il mercato
+     (solo sopra quota SHRINK_ODDS_MIN, i favoriti restano pieni),
+     cap sull'edge e sotto-peso dei pareggi (vedi costanti SHRINK_LONG_SHOT /
      MAX_EDGE / DRAW_PENALTY).
   8. STAKING: Kelly 1/4 (kelly_euro, cap 3% bankroll), 1 bet per partita
      (miglior EV tra i candidati value/strong_value — niente correlazioni
@@ -35,8 +36,9 @@ CLI:
   venv/bin/python historical_backtest.py --shrink 0.3 --edge-cap 0.08 \
       --draw-penalty 0.7     # override anti-overconfidence
 
-Flag anti-overconfidence (default: shrink=0.50, edge-cap=0.10,
-draw-penalty=0.80): usali per misurare l'impatto di ogni correzione.
+Flag anti-overconfidence (default: shrink=0.40 sopra quota 2.50,
+edge-cap=0.10, draw-penalty=0.80): usali per misurare l'impatto di ogni
+correzione. --no-ensemble disattiva XGBoost/PAVA (solo Poisson+blend).
 """
 from __future__ import annotations
 
@@ -84,19 +86,22 @@ MIN_STAKE = 0.0           # nessun floor: l'edge va misurato su TUTTE le pick
 
 # --- Anti-overconfidence (dal primo run: il modello sovrastimava 7-18pp ---
 # --- a ogni bucket di probabilita' e il CLV era negativo ovunque) --------
-# 1) SHRINK: dopo il blend modello+mercato, la deviazione dal mercato viene
-#    ridotta (0.50 = meta' strada verso il mercato). Il mercato e' la stima
-#    piu' calibrata: meno fiducia nel modello = meno falsi segnali.
-SHRINK_TO_MARKET = 0.50
+# 1) SHRINK ASIMMETRICO: il modello e' calibrato sui FAVORITI (quota bassa)
+#    ma sovrastima sistematicamente i LONGSHOT. Quindi lo shrink verso il
+#    mercato scatta SOLO sopra SHRINK_ODDS_MIN e cresce linearmente fino a
+#    SHRINK_LONG_SHOT a quota >= SHRINK_ODDS_MAX. Sotto la soglia nessuno
+#    shrink (fattore 1.0 = piena fiducia al blend).
+SHRINK_LONG_SHOT = 0.40   # fattore di shrink massimo sui longshot
+SHRINK_ODDS_MIN = 2.50    # quota da cui inizia lo shrink
+SHRINK_ODDS_MAX = 4.50    # quota a cui lo shrink raggiunge il massimo
 # 2) CAP sull'edge: l'edge finale sul mercato non supera MAI +10pp
 #    (gli edge enormi sono quasi sempre errore del modello: winner's curse).
 MAX_EDGE = 0.10
 # 3) DRAW PENALTY: i pareggi sono sistematicamente sovrastimati dal modello
 #    Poisson/DC -> sotto-peso la probabilita' X prima di normalizzare.
 DRAW_PENALTY = 0.80
-# 4) MAX ODDS: i longshot 4.0-5.0 perdono -24% (winner's curse sui
-#    longshot); il pocket 3.0-4.0 e' l'unico positivo. Coerente con
-#    LONG_SHOT_ODDS=3.5 di produzione.
+# 4) MAX ODDS: hard cap opzionale (--max-odds) per escludere i longshot
+#    estremi; default 5.0 = nessun taglio ulteriore oltre al filtro base.
 MAX_ODDS = 5.0
 
 RETRAIN_EVERY = 1000      # retrain ensemble ogni N partite chiuse
@@ -343,25 +348,47 @@ def model_probs(lam_h: float, lam_a: float) -> Dict:
     return {"prob_1": p1, "prob_X": px, "prob_2": p2, "prob_over": p_over}
 
 
+def shrink_factor(odds: float) -> float:
+    """Fattore di shrink asimmetrico in base alla quota.
+
+    - quota <= SHRINK_ODDS_MIN: 1.0 (nessuno shrink, fiducia piena al
+      blend: il modello e' calibrato sui favoriti);
+    - quota >= SHRINK_ODDS_MAX: SHRINK_LONG_SHOT (shrink massimo sui
+      longshot, dove il modello sovrastima sistematicamente);
+    - in mezzo: rampa lineare.
+    """
+    if odds <= SHRINK_ODDS_MIN:
+        return 1.0
+    if odds >= SHRINK_ODDS_MAX:
+        return SHRINK_LONG_SHOT
+    span = SHRINK_ODDS_MAX - SHRINK_ODDS_MIN
+    t = (odds - SHRINK_ODDS_MIN) / span if span > 0 else 1.0
+    return 1.0 - (1.0 - SHRINK_LONG_SHOT) * t
+
+
+def shrink_prob(p: float, market_prob: Optional[float], odds: float) -> float:
+    """Applica lo shrink asimmetrico + cap edge + clip."""
+    if market_prob is None:
+        return max(0.01, min(0.99, p))
+    f = shrink_factor(odds)
+    p = market_prob + f * (p - market_prob)
+    p = min(p, market_prob + MAX_EDGE)
+    return max(0.01, min(0.99, p))
+
+
 def final_prob(model_prob: float, market_prob: Optional[float],
                league: str, odds: float) -> float:
     """Probabilita' finale anti-overconfidence, in 3 passi:
 
     1. BLEND dinamico modello+mercato (blend_probability, peso per lega);
-    2. SHRINK verso il mercato: la deviazione residua dal mercato viene
-       ridotta del fattore SHRINK_TO_MARKET;
+    2. SHRINK ASIMMETRICO verso il mercato: solo sopra SHRINK_ODDS_MIN
+       (i favoriti restano con la fiducia piena del blend);
     3. CAP sull'edge: mai piu' di MAX_EDGE sopra la probabilita' di mercato
        (gli edge estremi sono il sintomo del winner's curse).
     """
     from market_calib import blend_probability
     pb = blend_probability(model_prob, market_prob, league=league, odds=odds)
-    if market_prob is None:
-        return pb
-    # shrink: muovi meta' strada verso il mercato
-    pb = market_prob + SHRINK_TO_MARKET * (pb - market_prob)
-    # cap: mai piu' di MAX_EDGE sopra il mercato
-    pb = min(pb, market_prob + MAX_EDGE)
-    return max(0.01, min(0.99, pb))
+    return shrink_prob(pb, market_prob, odds)
 
 
 def market_probs(odds: List[Optional[float]], n_outcomes: int = 3) -> Optional[List[float]]:
@@ -531,11 +558,9 @@ def run_backtest(matches: List[Dict], ensemble: bool = True) -> Dict:
             if ensemble:
                 p_ens = ens.predict(row)
                 if p_ens is not None:
-                    # anche l'ensemble passa dallo shrink/cap (era ancora
-                    # sovraconfidente: bucket 0.6-0.7 -> hit 52% vs 65% atteso)
-                    p_fin = min(p_ens, cand["market_prob"] + MAX_EDGE)
-                    p_fin = cand["market_prob"] + SHRINK_TO_MARKET * (p_fin - cand["market_prob"])
-                    p_fin = max(0.01, min(0.99, p_fin))
+                    # anche l'ensemble passa dallo shrink asimmetrico/cap
+                    # (era ancora sovraconfidente sui longshot)
+                    p_fin = shrink_prob(p_ens, cand["market_prob"], cand["quota"])
                     row["prob"] = p_fin
                     row["ev"] = p_fin * cand["quota"] - 1.0
                     row["market_edge"] = p_fin - cand["market_prob"]
@@ -864,7 +889,8 @@ def format_report(res: Dict, n_matches: int = 0,
                  "mercato solo da partite/quote passate). Entry = opening odds, "
                  "CLV vs closing. Ensemble: "
                  + ("XGBoost+PAVA" if ensemble_on else "disattivato (solo blend)")
-                 + f". Anti-overconfidence: shrink={SHRINK_TO_MARKET}, "
+                 + f". Anti-overconfidence: shrink asimmetrico "
+                 + f"({SHRINK_LONG_SHOT:.2f} sopra quota {SHRINK_ODDS_MIN:.1f}), "
                  + f"edge-cap={MAX_EDGE:.2f}, draw-penalty={DRAW_PENALTY}. "
                  + "Kelly 1/4 con cap 3%.")
     return "\n".join(lines)
@@ -883,7 +909,9 @@ def main(argv=None) -> int:
     ap.add_argument("--no-ensemble", action="store_true",
                     help="Disattiva l'ensemble ML (solo Poisson+blend)")
     ap.add_argument("--shrink", type=float, default=None,
-                    help="Shrink verso il mercato dopo il blend (default 0.50)")
+                    help="Shrink massimo sui longshot (default 0.40)")
+    ap.add_argument("--shrink-odds-min", type=float, default=None,
+                    help="Quota da cui inizia lo shrink (default 2.50)")
     ap.add_argument("--edge-cap", type=float, default=None,
                     help="Cap sull'edge in pp (default 0.10 = 10pp)")
     ap.add_argument("--draw-penalty", type=float, default=None,
@@ -896,16 +924,19 @@ def main(argv=None) -> int:
                     help="Salva report JSON e CSV delle bet in data/")
     args = ap.parse_args(argv)
 
-    global SHRINK_TO_MARKET, MAX_EDGE, DRAW_PENALTY, MAX_ODDS
+    global SHRINK_LONG_SHOT, SHRINK_ODDS_MIN, MAX_EDGE, DRAW_PENALTY, MAX_ODDS
     if args.shrink is not None:
-        SHRINK_TO_MARKET = args.shrink
+        SHRINK_LONG_SHOT = args.shrink
+    if args.shrink_odds_min is not None:
+        SHRINK_ODDS_MIN = args.shrink_odds_min
     if args.edge_cap is not None:
         MAX_EDGE = args.edge_cap
     if args.draw_penalty is not None:
         DRAW_PENALTY = args.draw_penalty
     if args.max_odds is not None:
         MAX_ODDS = args.max_odds
-    print(f"⚙️  Anti-overconfidence: shrink={SHRINK_TO_MARKET}, "
+    print(f"⚙️  Anti-overconfidence: shrink asimmetrico "
+          f"({SHRINK_LONG_SHOT:.2f} sopra quota {SHRINK_ODDS_MIN:.1f}), "
           f"edge-cap={MAX_EDGE:.2f}, draw-penalty={DRAW_PENALTY}, "
           f"max-odds={MAX_ODDS}")
 
