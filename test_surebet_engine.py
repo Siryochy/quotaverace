@@ -314,6 +314,11 @@ class TestDelivery:
         assert payload["outcomes"][0]["bookmaker"] == "Snai"
         assert payload["outcomes"][0]["stake"] > 0
         assert payload["margin"] < 0
+        # deep link inclusi nel payload (pronto per n8n)
+        assert len(payload["links"]) == 2
+        assert payload["links"][0]["bookmaker"] == "Snai"
+        assert payload["links"][0]["url"].startswith("https://")
+        assert payload["links"][1]["url"].startswith("https://")
         # deve essere serializzabile JSON (pronto per il webhook)
         json.dumps(payload)
 
@@ -351,6 +356,78 @@ class TestDelivery:
         tg, wh = se.deliver_alert(_opp())
         assert tg is True
         assert wh is False  # webhook non configurato → non attivo
+
+
+# ---------------------------------------------------------------------------
+# Deep linking: Inline Keyboard con bottoni e URL bookmaker
+# ---------------------------------------------------------------------------
+
+class TestDeepLink:
+    def test_url_snai(self):
+        assert se.bookmaker_url("Snai") == "https://www.snai.it/sport"
+
+    def test_url_goldbet(self):
+        assert se.bookmaker_url("GoldBet") == "https://www.goldbet.it/sport"
+
+    def test_url_sottostringa_normalizzata(self):
+        # "Winamax (DE)" (titolo reale the-odds-api con regione) → Winamax
+        assert se.bookmaker_url("Winamax (DE)") == "https://www.winamax.it/"
+        assert se.bookmaker_url("Marathon Bet") == "https://www.marathonbet.it/"
+
+    def test_url_pinnacle_sharp(self):
+        assert se.bookmaker_url("Pinnacle") == "https://www.pinnacle.com/"
+
+    def test_url_sconosciuto_none(self):
+        assert se.bookmaker_url("BookmakerStrano") is None
+        assert se.bookmaker_url("") is None
+
+    def test_inline_keyboard_due_bottoni_con_stake(self):
+        """Un bottone per esito, testo con stake calcolato + URL diretto."""
+        kb = se.build_inline_keyboard(_opp())
+        rows = kb["inline_keyboard"]
+        assert len(rows) == 2
+        labels = [b["text"] for row in rows for b in row]
+        assert labels == ["Piazza €54.17 su Snai", "Piazza €45.83 su Pinnacle"]
+        urls = [b["url"] for row in rows for b in row]
+        assert urls[0] == "https://www.snai.it/sport"
+        assert urls[1] == "https://www.pinnacle.com/"
+
+    def test_inline_keyboard_fallback_ricerca_web(self):
+        """Bookmaker fuori tabella: link di ricerca (bottone mai morto)."""
+        opp = _opp(bookmaker_a="BookmakerStrano")
+        kb = se.build_inline_keyboard(opp)
+        url = kb["inline_keyboard"][0][0]["url"]
+        assert url.startswith("https://www.google.com/search?q=")
+
+    def test_telegram_invia_reply_markup(self, monkeypatch):
+        """_send_telegram include la inline keyboard nel payload."""
+        monkeypatch.setattr(se, "TELEGRAM_BOT_TOKEN", "fake-token")
+        monkeypatch.setattr(se, "ADMIN_CHAT_IDS", [1])
+        sent = {}
+
+        def fake_post(url, json=None, timeout=None):
+            sent["url"] = url
+            sent["json"] = json
+            return type("R", (), {"status_code": 200})()
+
+        monkeypatch.setattr(se.requests, "post", fake_post)
+        assert se._send_telegram(_opp()) is True
+        kb = sent["json"]["reply_markup"]["inline_keyboard"]
+        assert len(kb) == 2
+        # ogni bottone ha testo con stake e URL http(s) valido per Telegram
+        for row in kb:
+            assert row[0]["text"].startswith("Piazza €")
+            assert row[0]["url"].startswith("https://")
+        # il testo piatto resta HTML (parse_mode invariato)
+        assert sent["json"]["parse_mode"] == "HTML"
+
+    def test_telegram_stake_arrotondato_nel_bottone(self, monkeypatch):
+        """Il bottone guida l'esecuzione con lo stake esatto calcolato."""
+        opp = _opp(stake_a=54.16666, stake_b=45.83333)
+        kb = se.build_inline_keyboard(opp)
+        labels = [b["text"] for row in kb["inline_keyboard"] for b in row]
+        assert labels[0] == "Piazza €54.17 su Snai"
+        assert labels[1] == "Piazza €45.83 su Pinnacle"
 
 
 # ---------------------------------------------------------------------------

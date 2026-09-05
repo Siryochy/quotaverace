@@ -24,3 +24,4 @@ data/historical_backtest_report.json
 data/bets_*.csv
 data/report_*.json
 data/confronto_correzioni.json
+data/surebet/

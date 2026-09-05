@@ -16,8 +16,10 @@ Vincoli architetturali (come da specifica):
         (1/Quota_A) + (1/Quota_B) < 1
 - Stake: allocazione esatta per bilanciare il profitto, basata sull'env
   SUREBET_BUDGET (es. 100).
-- Consegna: Telegram con formato dedicato; funzione di delivery predisposta
-  per un futuro invio JSON via webhook (n8n).
+- Consegna: Telegram con formato dedicato + INLINE KEYBOARD (deep linking:
+  un bottone per esito "Piazza €X su Bookmaker" che apre l'URL diretto al
+  palinsesto del bookmaker); funzione di delivery predisposta per un
+  futuro invio JSON via webhook (n8n).
 
 Uso (loop separato dal bot — crontab o processo dedicato):
     venv/bin/python surebet_engine.py            # scan singolo + notifica
@@ -36,6 +38,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 import requests
 
@@ -92,6 +95,43 @@ SOFT_BOOKS = [b.strip().lower() for b in os.getenv(
     "Betway,Paddy Power,Coral,betsson,betclic,tipico,winamax,1xbet,"
     "leovegas,nordic bet,gtbets,pmu,williamhill",
 ).split(",") if b.strip()]
+
+# URL diretti al palinsesto per il deep linking (Inline Keyboard).
+# Chiave = sottostringa normalizzata del nome bookmaker (stessa logica di
+# SOFT_BOOKS): "winamax" copre "Winamax (DE)", "marathon" copre
+# "Marathon Bet"/"Marathonbet". L'ordine conta (chiavi specifiche prima).
+# NB: the-odds-api non espone URL evento per evento, quindi il link porta
+# al palinsesto/sport del bookmaker: l'utente arriva a un tap dall'esito.
+BOOKMAKER_LINKS: Dict[str, str] = {
+    "snai": "https://www.snai.it/sport",
+    "goldbet": "https://www.goldbet.it/sport",
+    "bet365": "https://www.bet365.it/",
+    "william hill": "https://sports.williamhill.it/",
+    "williamhill": "https://sports.williamhill.it/",
+    "bwin": "https://sports.bwin.it/",
+    "unibet": "https://www.unibet.it/sport",
+    "sisal": "https://www.sisal.it/scommesse",
+    "eurobet": "https://www.eurobet.it/sport",
+    "betflag": "https://www.betflag.it/sport",
+    "novibet": "https://www.novibet.it/",
+    "stanleybet": "https://www.stanleybet.it/",
+    "888": "https://www.888sport.it/",
+    "marathon": "https://www.marathonbet.it/",
+    "10bet": "https://www.10bet.it/",
+    "betway": "https://sports.betway.it/",
+    "paddy power": "https://www.paddypower.com/",
+    "coral": "https://sports.coral.co.uk/",
+    "betsson": "https://www.betsson.com/",
+    "betclic": "https://www.betclic.it/",
+    "tipico": "https://www.tipico.it/",
+    "winamax": "https://www.winamax.it/",
+    "1xbet": "https://1xbet.it/",
+    "leovegas": "https://www.leovegas.it/",
+    "nordic": "https://www.nordicbet.com/",
+    "gtbets": "https://www.gtbets.com/",
+    "pmu": "https://www.pmu.fr/",
+    "pinnacle": "https://www.pinnacle.com/",
+}
 
 # Webhook n8n (futuro): se impostato, il delivery invia anche il payload
 # JSON a questo URL (es. istanza n8n esterna). Vuoto = solo Telegram.
@@ -443,6 +483,49 @@ def log_opportunity(opp: SurebetOpportunity) -> None:
 # Delivery: Telegram (formato dedicato) + webhook n8n predisposto
 # ---------------------------------------------------------------------------
 
+def bookmaker_url(title: str) -> Optional[str]:
+    """URL diretto al palinsesto per un bookmaker supportato.
+
+    Match per sottostringa normalizzata (stessa logica di SOFT_BOOKS):
+    "Winamax (DE)" → URL Winamax, "Marathon Bet" → URL Marathonbet.
+    Ritorna None per bookmaker non in tabella.
+    """
+    t = (title or "").strip().lower()
+    for key, url in BOOKMAKER_LINKS.items():
+        if key in t:
+            return url
+    return None
+
+
+def build_inline_keyboard(opp: SurebetOpportunity) -> dict:
+    """Inline Keyboard Telegram: un bottone cliccabile per esito.
+
+    Deep linking: il testo del bottone contiene lo STAKE CALCOLATO
+    ("Piazza €54.17 su Snai") e il tap apre l'URL diretto al palinsesto
+    del bookmaker — guida l'esecuzione umana in un solo tap. Per i
+    bookmaker fuori tabella, fallback su ricerca web (link comunque
+    cliccabile, nessun bottone morto).
+
+    Ritorna il dict `inline_keyboard` pronto per reply_markup Telegram.
+    NB: il testo dei bottoni e' PLAIN TEXT (Telegram non applica HTML
+    nei bottoni) quindi non va escaped.
+    """
+    rows: List[List[dict]] = []
+    for esito, book, stake in (
+        (opp.esito_a, opp.bookmaker_a, opp.stake_a),
+        (opp.esito_b, opp.bookmaker_b, opp.stake_b),
+    ):
+        url = bookmaker_url(book)
+        if not url:
+            url = (f"https://www.google.com/search?q="
+                   f"{quote(f'{book} scommesse palinsesto')}")
+        rows.append([{
+            "text": f"Piazza €{stake:.2f} su {book}",
+            "url": url,
+        }])
+    return {"inline_keyboard": rows}
+
+
 def format_telegram_alert(opp: SurebetOpportunity) -> str:
     """Formato dedicato per il segnale surebet su Telegram.
 
@@ -508,6 +591,10 @@ def build_json_payload(opp: SurebetOpportunity) -> dict:
         "profit": opp.profit,
         "roi_pct": opp.roi_pct,
         "pair_type": opp.tipo,
+        "links": [
+            {"bookmaker": opp.bookmaker_a, "url": bookmaker_url(opp.bookmaker_a)},
+            {"bookmaker": opp.bookmaker_b, "url": bookmaker_url(opp.bookmaker_b)},
+        ],
     }
 
 
@@ -523,7 +610,8 @@ def _send_telegram(opp: SurebetOpportunity) -> bool:
         try:
             r = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                json={"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                       "reply_markup": build_inline_keyboard(opp)},
                 timeout=20,
             )
             if r.status_code != 200:
