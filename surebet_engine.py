@@ -55,6 +55,10 @@ logger = logging.getLogger(__name__)
 SUREBET_DATA_DIR = Path(os.getenv("SUREBET_DATA_DIR", str(DATA_DIR / "surebet")))
 CACHE_DIR = SUREBET_DATA_DIR / "cache"
 LOG_FILE = SUREBET_DATA_DIR / "opportunities.jsonl"
+# Heartbeat scritto a OGNI run (anche quando non ci sono opportunita'):
+# prova tangibile su volume che il cron scatta davvero e con che frequenza
+# (i log delle esecuzioni cron Railway non sempre sono esposti via CLI).
+HEARTBEAT_FILE = SUREBET_DATA_DIR / "heartbeat.json"
 
 # Crediti the-odds-api: budget CONSERVATIVO. La chiave e' CONDIVISA col
 # bot Value Bet (piano free ~500/mese, il calendario value ne consuma
@@ -719,6 +723,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             for opp in scan_all_sports():
                 print(json.dumps(opp.to_dict(), ensure_ascii=False))
             return
+        try:
+            HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+            HEARTBEAT_FILE.write_text(json.dumps({
+                "ts": time.time(), "sports": SPORTS, "pid": os.getpid(),
+            }))
+        except Exception as e:
+            logger.warning("surebet heartbeat: %s", e)
         new = run_scan(notify=not args.dry_run, log=not args.dry_run)
         if args.dry_run:
             for opp in new:
@@ -728,7 +739,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             if not new:
                 print("  nessuna opportunita' valida")
 
+    logger.info("surebet cron: run avviato (sports=%s)", ",".join(SPORTS))
     _one_pass()
+    logger.info("surebet cron: run completato")
     if args.loop:
         logger.info("surebet loop avviato: ogni %ds (CTRL+C per fermare)", args.loop)
         try:
