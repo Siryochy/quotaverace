@@ -11,8 +11,9 @@ odds_api e compute_ratings di rating_engine).
 """
 
 import asyncio
+import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -62,9 +63,6 @@ def _patch_fetch_scores(monkeypatch, payload_per_sport):
     monkeypatch.setitem(sys.modules, "odds_api", odds_api)
 
 
-import sys  # noqa: E402  (usato da _patch_fetch_scores)
-
-
 def _patch_ratings(monkeypatch):
     import rating_engine
     monkeypatch.setattr(rating_engine, "compute_ratings", lambda: None)
@@ -77,6 +75,14 @@ def _patch_admin(monkeypatch):
     monkeypatch.setattr(t, "get_subscribers", lambda *a, **k: [])
 
 
+def _recent_iso(days_ago: int = 2) -> str:
+    """commence_time recente (entro la finestra -3gg di
+    get_leagues_with_signals): date hardcoded tipo 2026-09-01 restano
+    valide solo il giorno in cui il test e' scritto e poi escono dalla
+    finestra (settlement mai eseguito → bet aperte per sempre)."""
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago, hours=3)).isoformat()
+
+
 MATCH = {"id": "mX", "home_team": "Inter", "away_team": "Napoli",
          "scores": [{"name": "Inter", "score": "2"},
                     {"name": "Napoli", "score": "1"}],
@@ -85,8 +91,7 @@ MATCH = {"id": "mX", "home_team": "Inter", "away_team": "Napoli",
 
 def test_watchdog_salda_bet_pendente_flusso_reale(temp_db, monkeypatch):
     """Bet aperta + risultato scaricato -> saldatura automatica completa."""
-    tracker.save_match("mX", "Serie A", "Inter", "Napoli",
-                       "2026-09-01T13:00:00Z")
+    tracker.save_match("mX", "Serie A", "Inter", "Napoli", _recent_iso())
     tracker.save_analysis("mX", 1.7, 1.0, 0.5, 0.27, 0.23, 0.55,
                           0.10, "1", 2.10, "Pinnacle", "value")
     tracker.save_bet("mX", "1X2", "1", "1.100", 101, 2.10, 10.0)
@@ -105,8 +110,7 @@ def test_watchdog_salda_bet_pendente_flusso_reale(temp_db, monkeypatch):
 
 def test_watchdog_notifica_verdetti_nuovi(temp_db, monkeypatch):
     """Quando il watchdog stesso chiude una bet, il verdetto va a iscritti+admin."""
-    tracker.save_match("mX", "Serie A", "Inter", "Napoli",
-                       "2026-09-01T13:00:00Z")
+    tracker.save_match("mX", "Serie A", "Inter", "Napoli", _recent_iso())
     tracker.save_analysis("mX", 1.7, 1.0, 0.5, 0.27, 0.23, 0.55,
                           0.10, "1", 2.10, "Pinnacle", "value")
     tracker.save_bet("mX", "1X2", "1", "1.100", 101, 2.10, 10.0)
@@ -151,8 +155,7 @@ def test_watchdog_saldatura_differita(temp_db, monkeypatch):
     """Scenario completo 01/09: bet piazzata, risultato NON ancora
     disponibile -> resta aperta; al giro successivo (risultato presente,
     anche a 12h di distanza) viene saldata senza intervento manuale."""
-    tracker.save_match("mZ", "Serie A", "Inter", "Napoli",
-                       "2026-09-01T13:00:00Z")
+    tracker.save_match("mZ", "Serie A", "Inter", "Napoli", _recent_iso())
     tracker.save_analysis("mZ", 1.7, 1.0, 0.5, 0.27, 0.23, 0.55,
                           0.10, "1", 2.10, "Pinnacle", "value")
     tracker.save_bet("mZ", "1X2", "1", "1.100", 101, 2.10, 10.0)

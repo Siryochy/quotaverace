@@ -255,10 +255,12 @@ class XGBoostClassifier:
         m.accuracy = d.get("accuracy", 0.0)
         if d.get("booster") and HAS_XGBOOST:
             booster_raw = d["booster"].encode("latin-1")
-            booster = xgb.Booster()
-            booster.load_model(bytearray(booster_raw))
+            # load_model pubblico (non `_Booster = ...`): ricarica anche gli
+            # attributi sklearn (n_classes_, objective...) dal config del
+            # booster — con xgboost>=3.x predict_proba fallirebbe senza
+            # n_classes_ (AttributeError su modelli appena caricati)
             m.model = xgb.XGBClassifier()
-            m.model._Booster = booster
+            m.model.load_model(bytearray(booster_raw))
         return m
 
 

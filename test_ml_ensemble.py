@@ -204,11 +204,14 @@ class TestEnsemblePredictor:
 # --- train_ensemble shortcut ---
 
 def test_train_ensemble_con_lista():
+    # 50 righe con ENTRAMBE le classi: 30 vinte + 20 perse. Con tutte le
+    # label a 1 il training set resta a classe singola e XGBoost fallisce
+    # ("Invalid classes inferred from unique values of y").
     ds = [{"prob_1": 0.5, "prob_X": 0.25, "prob_2": 0.25,
             "prob_over": 0.5, "lam_h": 1.5, "lam_a": 1.2,
             "quota": 2.0, "market_prob": 0.45, "market_edge": 0.05,
-            "ev": 0.10, "prob": 0.5, "label_ml": 1}
-          for _ in range(50)]
+            "ev": 0.10, "prob": 0.5, "label_ml": 1 if i < 30 else 0}
+          for i in range(50)]
     metrics = train_ensemble(ds)
     assert metrics.get("status") == "trained"
 
