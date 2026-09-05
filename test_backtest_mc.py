@@ -34,7 +34,11 @@ def _seed_rows(n=40, win_rate=0.55, quota=2.10, edge=0.08):
                               f"H{i}", quota, "Pinnacle", "value",
                               market_prob=0.45, market_edge=edge)
         tracker.save_prediction(mid, "1X2", f"H{i}", quota, 0.55, edge)
-        won = (i % 100) < int(win_rate * 100)
+        # Spread delle vincite pseudo-casuale (moltiplicatore primo): con i
+        # consecutivi il pattern `i % 100` concentra TUTTE le vincite in testa
+        # (es. 60 righe a win_rate .60 = 60/60 vinte) e il fold di training
+        # resta a classe singola → XGBoost non si addestra.
+        won = (i * 7) % 100 < int(win_rate * 100)
         tracker.save_result(mid, "Serie A", f"H{i}", f"A{i}", 2 if won else 0, 1,
                             (base + timedelta(hours=2, minutes=i)).isoformat())
         tracker.settle_predictions()

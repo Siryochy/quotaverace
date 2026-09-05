@@ -86,14 +86,25 @@ MIN_STAKE = 0.0           # nessun floor: l'edge va misurato su TUTTE le pick
 
 # --- Anti-overconfidence (dal primo run: il modello sovrastimava 7-18pp ---
 # --- a ogni bucket di probabilita' e il CLV era negativo ovunque) --------
-# 1) SHRINK ASIMMETRICO: il modello e' calibrato sui FAVORITI (quota bassa)
-#    ma sovrastima sistematicamente i LONGSHOT. Quindi lo shrink verso il
-#    mercato scatta SOLO sopra SHRINK_ODDS_MIN e cresce linearmente fino a
-#    SHRINK_LONG_SHOT a quota >= SHRINK_ODDS_MAX. Sotto la soglia nessuno
-#    shrink (fattore 1.0 = piena fiducia al blend).
+# 1) SHRINK ASIMMETRICO (05/09, esteso ai favoriti): il modello e'
+#    sovraconfidente su TUTTI i bucket ma con un bias strutturale piu'
+#    marcato sui LONGSHOT (quota alta) e, come emerso dalla diagnostica
+#    del 05/09, anche sugli UNDER (96% delle bet a quota <= 2.5 dove lo
+#    shrink NON scattava -> leak -10%).
+#    La rampa ora copre entrambi i lati della quota:
+#      - sotto SHRINK_FAV_ODDS_LOW (favoritissimi): fattore 1.0 (piena
+#        fiducia al blend, dove il modello e' calibrato);
+#      - tra SHRINK_FAV_ODDS_LOW e SHRINK_ODDS_MIN: rampa lineare da 1.0
+#        a SHRINK_FAVORITE (lo shrink "lato favoriti" chiude il leak degli
+#        Under, default 1.0 = nessuno shrink, retrocompatibile);
+#      - sopra SHRINK_ODDS_MIN: rampa lineare da SHRINK_FAVORITE a
+#        SHRINK_LONG_SHOT a quota >= SHRINK_ODDS_MAX.
 SHRINK_LONG_SHOT = 0.40   # fattore di shrink massimo sui longshot
-SHRINK_ODDS_MIN = 2.50    # quota da cui inizia lo shrink
+SHRINK_ODDS_MIN = 2.50    # quota da cui inizia la rampa longshot
 SHRINK_ODDS_MAX = 4.50    # quota a cui lo shrink raggiunge il massimo
+SHRINK_FAVORITE = 1.00    # shrink massimo lato favoriti (1.0 = nessuno)
+SHRINK_FAV_ODDS_LOW = 1.30  # sotto questa quota nessuno shrink (favoritissimi)
+SHRINK_OU_ONLY = False    # True = applica lo shrink lato favoriti SOLO all'OU
 # 2) CAP sull'edge: l'edge finale sul mercato non supera MAI +10pp
 #    (gli edge enormi sono quasi sempre errore del modello: winner's curse).
 MAX_EDGE = 0.10
@@ -349,13 +360,39 @@ def model_probs(lam_h: float, lam_a: float) -> Dict:
 
 
 def shrink_factor(odds: float) -> float:
-    """Fattore di shrink asimmetrico in base alla quota.
+    """Fattore di shrink ASIMMETRICO in base alla quota (esteso 05/09).
 
-    - quota <= SHRINK_ODDS_MIN: 1.0 (nessuno shrink, fiducia piena al
-      blend: il modello e' calibrato sui favoriti);
+    Rampa a due lati:
+    - quota <= SHRINK_FAV_ODDS_LOW: 1.0 (fiducia piena al blend: il
+      modello e' calibrato sui favoritissimi);
+    - tra SHRINK_FAV_ODDS_LOW e SHRINK_ODDS_MIN: rampa lineare da 1.0 a
+      SHRINK_FAVORITE (lato favoriti: chiude il leak degli Under);
     - quota >= SHRINK_ODDS_MAX: SHRINK_LONG_SHOT (shrink massimo sui
       longshot, dove il modello sovrastima sistematicamente);
-    - in mezzo: rampa lineare.
+    - in mezzo: rampa lineare da SHRINK_FAVORITE a SHRINK_LONG_SHOT.
+    """
+    if odds <= SHRINK_FAV_ODDS_LOW:
+        return 1.0
+    if odds < SHRINK_ODDS_MIN:
+        span = SHRINK_ODDS_MIN - SHRINK_FAV_ODDS_LOW
+        t = (odds - SHRINK_FAV_ODDS_LOW) / span if span > 0 else 1.0
+        return 1.0 - (1.0 - SHRINK_FAVORITE) * t
+    if odds >= SHRINK_ODDS_MAX:
+        return min(SHRINK_FAVORITE, SHRINK_LONG_SHOT)
+    span = SHRINK_ODDS_MAX - SHRINK_ODDS_MIN
+    t = (odds - SHRINK_ODDS_MIN) / span if span > 0 else 1.0
+    # clamp: la fiducia sui longshot non supera MAI quella dei favoriti
+    # (con SHRINK_FAVORITE < SHRINK_LONG_SHOT la rampa resterebbe a salire)
+    return min(SHRINK_FAVORITE - (SHRINK_FAVORITE - SHRINK_LONG_SHOT) * t,
+               SHRINK_FAVORITE)
+
+
+def shrink_factor_legacy(odds: float) -> float:
+    """Fattore di shrink PRE-estensione (solo longshot, favoriti pieni).
+
+    Usato quando SHRINK_OU_ONLY e il mercato NON e' OU: i favoriti 1X2
+    restano con fiducia piena al blend (fattore 1.0 sotto SHRINK_ODDS_MIN)
+    e la rampa longshot parte da 1.0.
     """
     if odds <= SHRINK_ODDS_MIN:
         return 1.0
@@ -366,29 +403,39 @@ def shrink_factor(odds: float) -> float:
     return 1.0 - (1.0 - SHRINK_LONG_SHOT) * t
 
 
-def shrink_prob(p: float, market_prob: Optional[float], odds: float) -> float:
-    """Applica lo shrink asimmetrico + cap edge + clip."""
+def shrink_prob(p: float, market_prob: Optional[float], odds: float,
+                mercato: Optional[str] = None) -> float:
+    """Applica lo shrink asimmetrico + cap edge + clip.
+
+    mercato: se SHRINK_OU_ONLY, lo shrink lato favoriti scatta SOLO sui
+    mercati OU (il leak degli Under) e i favoriti 1X2 restano pieni.
+    """
     if market_prob is None:
         return max(0.01, min(0.99, p))
     f = shrink_factor(odds)
+    if SHRINK_OU_ONLY and mercato != "OVER_UNDER_25":
+        # fuori dall'OU: comportamento legacy (favoriti pieni, rampa
+        # longshot da 1.0) — lo shrink lato favoriti scatta SOLO sull'OU
+        f = shrink_factor_legacy(odds)
     p = market_prob + f * (p - market_prob)
     p = min(p, market_prob + MAX_EDGE)
     return max(0.01, min(0.99, p))
 
 
 def final_prob(model_prob: float, market_prob: Optional[float],
-               league: str, odds: float) -> float:
+               league: str, odds: float,
+               mercato: Optional[str] = None) -> float:
     """Probabilita' finale anti-overconfidence, in 3 passi:
 
     1. BLEND dinamico modello+mercato (blend_probability, peso per lega);
-    2. SHRINK ASIMMETRICO verso il mercato: solo sopra SHRINK_ODDS_MIN
-       (i favoriti restano con la fiducia piena del blend);
+    2. SHRINK ASIMMETRICO verso il mercato: rampa lato favoriti (chiude
+       il leak degli Under) + rampa longshot;
     3. CAP sull'edge: mai piu' di MAX_EDGE sopra la probabilita' di mercato
        (gli edge estremi sono il sintomo del winner's curse).
     """
     from market_calib import blend_probability
     pb = blend_probability(model_prob, market_prob, league=league, odds=odds)
-    return shrink_prob(pb, market_prob, odds)
+    return shrink_prob(pb, market_prob, odds, mercato=mercato)
 
 
 def market_probs(odds: List[Optional[float]], n_outcomes: int = 3) -> Optional[List[float]]:
@@ -401,8 +448,15 @@ def market_probs(odds: List[Optional[float]], n_outcomes: int = 3) -> Optional[L
 
 
 def build_candidates(match: Dict, probs: Dict, mkt: List[float],
-                     mkt_ou: Optional[List[float]]) -> List[Dict]:
-    """Candidati (esito, quota entry, market_prob) per 1X2 e OU2.5."""
+                     mkt_ou: Optional[List[float]],
+                     no_ou: bool = False,
+                     no_under: bool = False) -> List[Dict]:
+    """Candidati (esito, quota entry, market_prob) per 1X2 e OU2.5.
+
+    no_ou=True: esclude l'intero mercato OU2.5 (diagnostica per misurare
+    l'impatto di escludere i mercati OU, es. leak degli Under).
+    no_under=True: esclude SOLO il lato Under dell'OU (leak specifico).
+    """
     cands = []
     labels = [("1", probs["prob_1"], 0, mkt[0] if mkt else None),
               ("X", probs["prob_X"], 1, mkt[1] if mkt else None),
@@ -413,13 +467,15 @@ def build_candidates(match: Dict, probs: Dict, mkt: List[float],
             continue
         cands.append({"mercato": "MATCH_ODDS", "esito": esito, "quota": quota,
                       "model_prob": p_model, "market_prob": mp})
-    ov_e, un_e = match["ou_entry"][0], match["ou_entry"][1]
-    if mkt_ou and ov_e and ov_e > 1.0 and un_e and un_e > 1.0:
-        p_over = probs["prob_over"]
-        cands.append({"mercato": "OVER_UNDER_25", "esito": "over", "quota": ov_e,
-                      "model_prob": p_over, "market_prob": mkt_ou[0]})
-        cands.append({"mercato": "OVER_UNDER_25", "esito": "under", "quota": un_e,
-                      "model_prob": 1.0 - p_over, "market_prob": mkt_ou[1]})
+    if not no_ou:
+        ov_e, un_e = match["ou_entry"][0], match["ou_entry"][1]
+        if mkt_ou and ov_e and ov_e > 1.0 and un_e and un_e > 1.0:
+            p_over = probs["prob_over"]
+            cands.append({"mercato": "OVER_UNDER_25", "esito": "over", "quota": ov_e,
+                          "model_prob": p_over, "market_prob": mkt_ou[0]})
+            if not no_under:
+                cands.append({"mercato": "OVER_UNDER_25", "esito": "under", "quota": un_e,
+                              "model_prob": 1.0 - p_over, "market_prob": mkt_ou[1]})
     return cands
 
 
@@ -498,8 +554,18 @@ def _esito_ok(match: Dict, cand: Dict) -> bool:
     return (match["sh"] + match["sa"] > 2.5) == (cand["esito"] == "over")
 
 
-def run_backtest(matches: List[Dict], ensemble: bool = True) -> Dict:
-    """Esegue il backtest walk-forward. Ritorna il report completo."""
+def run_backtest(matches: List[Dict], ensemble: bool = True,
+                 flat_stake: Optional[float] = None,
+                 no_ou: bool = False,
+                 no_under: bool = False) -> Dict:
+    """Esegue il backtest walk-forward. Ritorna il report completo.
+
+    flat_stake: se non None, stake FISSO per ogni bet (in euro) invece di
+    Kelly 1/4 — diagnostica: il run non va in bancarotta e copre tutte le
+    stagioni. La selezione delle pick non cambia.
+    no_ou: esclude il mercato OU2.5 dai candidati (diagnostica).
+    no_under: esclude SOLO il lato Under dell'OU (diagnostica).
+    """
     from market_calib import clv_raw, clv_vig_free
     from value_filter import is_sane
 
@@ -533,7 +599,8 @@ def run_backtest(matches: List[Dict], ensemble: bool = True) -> Dict:
         mkt = market_probs(match["op"], 3)
         mkt_ou = market_probs(match["ou_entry"], 2)
 
-        cands = build_candidates(match, probs, mkt, mkt_ou)
+        cands = build_candidates(match, probs, mkt, mkt_ou, no_ou=no_ou,
+                                 no_under=no_under)
 
         best = None
         best_prob = None
@@ -544,7 +611,8 @@ def run_backtest(matches: List[Dict], ensemble: bool = True) -> Dict:
                 continue
             # prob finale: blend + shrink verso il mercato + cap edge
             pb = final_prob(cand["model_prob"], cand["market_prob"],
-                            match["league"], cand["quota"])
+                            match["league"], cand["quota"],
+                            mercato=cand["mercato"])
             # ensemble (se disponibile)
             row = {
                 "prob_1": probs["prob_1"], "prob_X": probs["prob_X"],
@@ -560,7 +628,8 @@ def run_backtest(matches: List[Dict], ensemble: bool = True) -> Dict:
                 if p_ens is not None:
                     # anche l'ensemble passa dallo shrink asimmetrico/cap
                     # (era ancora sovraconfidente sui longshot)
-                    p_fin = shrink_prob(p_ens, cand["market_prob"], cand["quota"])
+                    p_fin = shrink_prob(p_ens, cand["market_prob"], cand["quota"],
+                                        mercato=cand["mercato"])
                     row["prob"] = p_fin
                     row["ev"] = p_fin * cand["quota"] - 1.0
                     row["market_edge"] = p_fin - cand["market_prob"]
@@ -578,48 +647,61 @@ def run_backtest(matches: List[Dict], ensemble: bool = True) -> Dict:
                 best_prob = prob
 
         # --- 1 bet per partita: il miglior candidato value/strong_value ---
-        # Bankrupt: bankroll sotto il minimo -> stop (come in produzione)
-        if best is not None and bankroll >= 2.0:
-            stake = _kelly_stake(bankroll, best["prob"], best["quota"])
-            if stake > MIN_STAKE and stake <= bankroll:
-                won = _esito_ok(match, best)
-                profit = stake * (best["quota"] - 1.0) if won else -stake
-                bankroll += profit
-                peak = max(peak, bankroll)
-                dd = (peak - bankroll) / peak * 100.0 if peak > 0 else 0.0
-                max_dd = max(max_dd, dd)
+        # Bankrupt: bankroll sotto il minimo -> stop (come in produzione).
+        # Con --flat-stake-pct la puntata e' fissa (diagnostica): il run
+        # NON va in bancarotta e produce bet su tutte le stagioni, ma la
+        # SELEZIONE delle pick e' identica (dipende solo da EV/edge).
+        if best is not None:
+            if flat_stake is not None:
+                # diagnostica: stake fisso, si punta SEMPRE (nessun gate
+                # di bancarotta) per coprire tutte le stagioni
+                stake = flat_stake
+                if stake <= 0:
+                    continue
+            elif bankroll >= 2.0:
+                stake = _kelly_stake(bankroll, best["prob"], best["quota"])
+                if stake <= MIN_STAKE or stake > bankroll:
+                    continue
+            else:
+                continue
+            won = _esito_ok(match, best)
+            profit = stake * (best["quota"] - 1.0) if won else -stake
+            bankroll += profit
+            peak = max(peak, bankroll)
+            dd = (peak - bankroll) / peak * 100.0 if peak > 0 else 0.0
+            max_dd = max(max_dd, dd)
 
-                # CLV: entry = opening (o soft per OU), closing = Pinnacle
-                clv_r = None
-                clv_vf = None
-                if best["mercato"] == "MATCH_ODDS":
-                    idx = {"1": 0, "X": 1, "2": 2}[best["esito"]]
-                    closing = match["cl"][idx]
-                    all_cl = [o for o in match["cl"] if o and o > 1.0]
-                    if closing and closing > 1.0:
-                        clv_r = clv_raw(best["quota"], closing)
-                        clv_vf = clv_vig_free(best["quota"], closing,
-                                              all_closing_odds=all_cl)
-                else:
-                    idx = 0 if best["esito"] == "over" else 1
-                    closing = match["ou_closing"][idx]
-                    if closing and closing > 1.0:
-                        clv_r = clv_raw(best["quota"], closing)
-                        clv_vf = clv_vig_free(best["quota"], closing,
-                                              all_closing_odds=None)
+            # CLV: entry = opening (o soft per OU), closing = Pinnacle
+            clv_r = None
+            clv_vf = None
+            if best["mercato"] == "MATCH_ODDS":
+                idx = {"1": 0, "X": 1, "2": 2}[best["esito"]]
+                closing = match["cl"][idx]
+                all_cl = [o for o in match["cl"] if o and o > 1.0]
+                if closing and closing > 1.0:
+                    clv_r = clv_raw(best["quota"], closing)
+                    clv_vf = clv_vig_free(best["quota"], closing,
+                                          all_closing_odds=all_cl)
+            else:
+                idx = 0 if best["esito"] == "over" else 1
+                closing = match["ou_closing"][idx]
+                if closing and closing > 1.0:
+                    clv_r = clv_raw(best["quota"], closing)
+                    clv_vf = clv_vig_free(best["quota"], closing,
+                                          all_closing_odds=None)
 
-                bets.append({
-                    "date": match["date"].isoformat(),
-                    "season": match["season"],
-                    "league": match["league"],
-                    "home": match["home"], "away": match["away"],
-                    "mercato": best["mercato"], "esito": best["esito"],
-                    "quota": best["quota"], "prob": best["prob"],
-                    "ev": best["ev"], "status": best["status"],
-                    "market_edge": best["market_edge"],
-                    "stake": round(stake, 2), "profit": round(profit, 2),
-                    "won": won, "clv_raw": clv_r, "clv_vig_free": clv_vf,
-                })
+            bets.append({
+                "date": match["date"].isoformat(),
+                "season": match["season"],
+                "league": match["league"],
+                "home": match["home"], "away": match["away"],
+                "mercato": best["mercato"], "esito": best["esito"],
+                "quota": best["quota"], "prob": best["prob"],
+                "ev": best["ev"], "status": best["status"],
+                "market_edge": best["market_edge"],
+                "stake": round(stake, 2), "profit": round(profit, 2),
+                "won": won, "clv_raw": clv_r, "clv_vig_free": clv_vf,
+            })
 
         # --- training dell'ensemble: riga per ogni esito con label reale ---
         for cand in cands:
@@ -628,7 +710,8 @@ def run_backtest(matches: List[Dict], ensemble: bool = True) -> Dict:
             if cand["quota"] > MAX_ODDS:
                 continue
             pb = final_prob(cand["model_prob"], cand["market_prob"],
-                            match["league"], cand["quota"])
+                            match["league"], cand["quota"],
+                            mercato=cand["mercato"])
             row = {
                 "prob_1": probs["prob_1"], "prob_X": probs["prob_X"],
                 "prob_2": probs["prob_2"], "prob_over": probs["prob_over"],
@@ -908,10 +991,29 @@ def main(argv=None) -> int:
                     help="Usa i CSV già in cache")
     ap.add_argument("--no-ensemble", action="store_true",
                     help="Disattiva l'ensemble ML (solo Poisson+blend)")
+    ap.add_argument("--flat-stake-pct", type=float, default=None,
+                    help="Stake fisso in %% del bankroll iniziale (default "
+                         "None = Kelly 1/4). Diagnostica: il run non va in "
+                         "bancarotta e copre tutte le stagioni.")
+    ap.add_argument("--no-ou", action="store_true",
+                    help="Esclude i mercati OU2.5 (diagnostica: impatto di "
+                         "rimuovere gli Over/Under)")
+    ap.add_argument("--no-under", action="store_true",
+                    help="Esclude SOLO il lato Under dell'OU (diagnostica: "
+                         "leak specifico degli Under)")
     ap.add_argument("--shrink", type=float, default=None,
                     help="Shrink massimo sui longshot (default 0.40)")
     ap.add_argument("--shrink-odds-min", type=float, default=None,
-                    help="Quota da cui inizia lo shrink (default 2.50)")
+                    help="Quota da cui inizia lo shrink longshot (default 2.50)")
+    ap.add_argument("--shrink-fav", type=float, default=None,
+                    help="Shrink massimo lato favoriti (default 1.0 = nessuno; "
+                         "0.5 = chiude il leak degli Under)")
+    ap.add_argument("--shrink-fav-odds-low", type=float, default=None,
+                    help="Quota sotto cui nessuno shrink lato favoriti "
+                         "(default 1.30)")
+    ap.add_argument("--shrink-ou-only", action="store_true",
+                    help="Applica lo shrink lato favoriti SOLO all'OU "
+                         "(i favoriti 1X2 restano pieni)")
     ap.add_argument("--edge-cap", type=float, default=None,
                     help="Cap sull'edge in pp (default 0.10 = 10pp)")
     ap.add_argument("--draw-penalty", type=float, default=None,
@@ -924,11 +1026,18 @@ def main(argv=None) -> int:
                     help="Salva report JSON e CSV delle bet in data/")
     args = ap.parse_args(argv)
 
-    global SHRINK_LONG_SHOT, SHRINK_ODDS_MIN, MAX_EDGE, DRAW_PENALTY, MAX_ODDS
+    global SHRINK_LONG_SHOT, SHRINK_ODDS_MIN, MAX_EDGE, DRAW_PENALTY
+    global MAX_ODDS, SHRINK_FAVORITE, SHRINK_FAV_ODDS_LOW, SHRINK_OU_ONLY
     if args.shrink is not None:
         SHRINK_LONG_SHOT = args.shrink
     if args.shrink_odds_min is not None:
         SHRINK_ODDS_MIN = args.shrink_odds_min
+    if args.shrink_fav is not None:
+        SHRINK_FAVORITE = args.shrink_fav
+    if args.shrink_fav_odds_low is not None:
+        SHRINK_FAV_ODDS_LOW = args.shrink_fav_odds_low
+    if args.shrink_ou_only:
+        SHRINK_OU_ONLY = True
     if args.edge_cap is not None:
         MAX_EDGE = args.edge_cap
     if args.draw_penalty is not None:
@@ -936,7 +1045,9 @@ def main(argv=None) -> int:
     if args.max_odds is not None:
         MAX_ODDS = args.max_odds
     print(f"⚙️  Anti-overconfidence: shrink asimmetrico "
-          f"({SHRINK_LONG_SHOT:.2f} sopra quota {SHRINK_ODDS_MIN:.1f}), "
+          f"(longshot {SHRINK_LONG_SHOT:.2f} sopra quota {SHRINK_ODDS_MIN:.1f}, "
+          f"favoriti {SHRINK_FAVORITE:.2f} sotto quota {SHRINK_ODDS_MIN:.1f}"
+          + (" SOLO OU" if SHRINK_OU_ONLY else "") + "), "
           f"edge-cap={MAX_EDGE:.2f}, draw-penalty={DRAW_PENALTY}, "
           f"max-odds={MAX_ODDS}")
 
@@ -948,12 +1059,23 @@ def main(argv=None) -> int:
         matches = matches[:args.limit]
         print(f"   (limit: {args.limit} partite)")
 
+    flat_stake = None
+    if args.flat_stake_pct is not None:
+        flat_stake = BANKROLL0 * args.flat_stake_pct
+        print(f"⚙️  Staking: FLAT €{flat_stake:.2f} per bet (diagnostica, "
+              f"nessuna bancarotta)")
     print("🧮 Backtest walk-forward (rating + Poisson/DC + devig + blend"
           + (" + ensemble XGB/PAVA" if not args.no_ensemble else "")
           + " + Kelly 1/4 + CLV)...")
-    res = run_backtest(matches, ensemble=not args.no_ensemble)
+    res = run_backtest(matches, ensemble=not args.no_ensemble,
+                       flat_stake=flat_stake, no_ou=args.no_ou,
+                       no_under=args.no_under)
     res["n_matches"] = len(matches)
     res["ensemble_on"] = not args.no_ensemble
+    if args.no_ou:
+        print(f"⚙️  Mercati OU2.5 ESCLUSI (diagnostica)")
+    if args.no_under:
+        print(f"⚙️  Lato UNDER dell'OU ESCLUSO (diagnostica)")
 
     if args.save:
         out = DATA_DIR.parent / "historical_backtest_report.json"
