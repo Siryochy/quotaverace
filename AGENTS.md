@@ -147,8 +147,29 @@ cd webapp && npm run build            # build Next.js
 - Il token va rinnovato quando scade o dopo l'esposizione in chat (flusso:
   fine-grained PAT → Contents RW → va nel VAULT, non più nel `.env`).
 
-## Stato attuale (aggiornato al 04/09/2026)
+## Stato attuale (aggiornato al 05/09/2026)
 
+- **Audit crediti the-odds-api + PROFILO SETTEMBRE SOTTO-BUDGET (05/09)**:
+  misura live del 05/09 ~16:10 UTC → **239/500 usati, ~260 residui** per
+  ~25 giorni (~10,3/giorno sostenibili). Il vincolo originale (~460/mese)
+  conteggiava SOLO la rotazione quote: i costi `fetch_scores` del
+  settlement (~12-16/giorno) e del surebet NON erano mai stati conteggiati.
+  Tagli applicati per arrivare a fine mese SENZA interrompere il bot:
+  1) settlement mirato (`get_leagues_with_open_rows`, solo leghe con
+     scommesse attive/chiuse da <48h su partite iniziate) + watchdog da 2h
+     a 4h (commit 6603920);
+  2) rotazione value ridotta a ~3,5/giorno: SOLO i top campionati a 3gg
+     (Serie A, PL, La Liga, Bundesliga, Ligue 1, Eredivisie, Serie B, EFL
+     Champ) + coppe europee/mercati maggiori a 7gg (CL, EL, MLS,
+     Brasileirao, Liga MX, Saudi); TUTTO il resto a 30gg (dormiente fino a
+     ottobre, cache del 1° settembre ancora fresca);
+  3) surebet: solo MLB a settembre (in stagione, partite ogni giorno =
+     campo-test continuo) con TTL 6h invariato; NBA off-season riattivata
+     il 1° ottobre.
+  Budget atteso: settlement ~2-3 + surebet ~4 + value ~3,5 ≈ **10-10,5
+  crediti/giorno** → copre settembre. ⚠️ **RIPRISTINARE il 1° ottobre**:
+  tabella SPORTS_INTERVAL_DAYS completa (git log) + `SUREBET_SPORTS`
+  `"baseball_mlb"` → `"basketball_nba,baseball_mlb"` (reset crediti + stagione NBA).
 - **Calibrazione isotonica dell'ensemble** (04/09, `probability_calibration.py`):
   PAVA numpy-only (zero deps, coerente col progetto) che mappa gli score
   grezzi di XGBoost/LR sulle frequenze EMPIRICHE del dataset storico.

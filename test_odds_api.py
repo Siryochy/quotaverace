@@ -50,9 +50,11 @@ def test_rotazione_crediti():
     """Ogni lega ha un intervallo esplicito e il costo mensile sta nel
     piano free the-odds-api (500 crediti/mese)."""
     from odds_api import interval_for_sport, SPORTS_INTERVAL_DAYS
-    assert interval_for_sport("soccer_epl") == 2
-    assert interval_for_sport("soccer_turkey_super_league") == 7
-    assert interval_for_sport("soccer_uefa_nations_league") == 14
+    # Profilo SETTEMBRE 2026 sotto-budget: top campionati a 3gg, il resto
+    # (es. Turkey Super Lig, UEFA Nations League) a 30gg = dormiente.
+    assert interval_for_sport("soccer_epl") == 3
+    assert interval_for_sport("soccer_turkey_super_league") == 30
+    assert interval_for_sport("soccer_uefa_nations_league") == 30
     # ogni lega in SPORTS_MAP deve avere un intervallo ESPLICITO
     # (niente default silenziosi: prima "Chile Primera" finiva a 1 = 30/mese)
     for league, key in SPORTS_MAP.items():

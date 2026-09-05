@@ -51,7 +51,11 @@ export default defineRailway(() => {
     env: {
       ...sharedEnv,
       SUREBET_BUDGET: "100",
-      SUREBET_SPORTS: "basketball_nba,baseball_mlb",
+      // SETTEMBRE 2026 sotto-budget: solo MLB (in stagione, partite ogni
+      // giorno = campo-test continuo del modulo). NBA e' off-season a
+      // settembre: riattivare "basketball_nba,baseball_mlb" il 1° ottobre
+      // (inizio stagione NBA + reset dei 500 crediti mensili).
+      SUREBET_SPORTS: "baseball_mlb",
       SUREBET_ODDS_TTL: "21600",
       SUREBET_MIN_REMAINING: "50",
       SUREBET_MIN_MARGIN: "0.005",

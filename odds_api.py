@@ -146,40 +146,49 @@ SPORTS_MAP = {
 # settimana di calendario).
 QUERY_WINDOW_DAYS = 7
 
-# Rotazione interrogazioni (giorni) calibrata sul piano free the-odds-api:
-# 500 crediti/mese (reset il 1°). Costo totale ~407/mese (13,6/giorno):
-#   ogni 2gg (15/mese): 10 leghe = 150   | ogni 3gg (10/mese): 12 = 120
-#   ogni 7gg (~4/mese): 24 leghe = 103   | ogni 14gg (~2/mese): 12 = 26
-#   ogni 30gg (1/mese): 8 leghe = 8      | TOTALE ~407
+# Rotazione interrogazioni (giorni) — PROFILO SETTEMBRE 2026 SOTTO-BUDGET.
+# Audit crediti 05/09: 239/500 gia' consumati al giorno 5 (settlement + surebet
+# NON erano stati conteggiati nel ~407/mese originale) → restano ~260 crediti
+# per ~25 giorni (~10,3/giorno). Ripartizione del resto del mese:
+#   settlement mirato ~2-3/giorno (fetch_scores solo leghe con righe aperte)
+#   surebet MLB ~4/giorno (cron 15' + TTL 6h, 1 sport in stagione: NBA e'
+#     off-season a settembre, riattivare a ottobre col reset crediti)
+#   calendario value ~3,5/giorno = SOLO i top campionati (3gg) + coppe
+#     europee/mercati maggiori (7gg); tutto il resto a 30gg = DORMIENTE.
+# Costo mensile di questo profilo ~158/mese (test test_budget_mensile ok);
+# nel resto di settembre le leghe a 30gg erano gia' state interrogate il 1°
+# (cache fresca fino a ottobre) → costo residuo reale ~85-95 crediti.
+# ⚠️ RIPRISTINARE il profilo completo il 1° ottobre (stagione NBA + reset
+# crediti): commit precedente / git log per la tabella a 66 leghe.
 # Con la finestra a 7 giorni, anche le leghe interrogate 1 volta a settimana
 # non perdono partite: vedono tutto il calendario della settimana.
 SPORTS_INTERVAL_DAYS = {
-    # ogni 2 giorni: i mercati principali (freschezza quote vicino al calcio
-    # d'inizio, meglio per il CLV)
-    "Serie A": 2, "Premier League": 2, "La Liga": 2, "Bundesliga": 2,
-    "Ligue 1": 2, "Eredivisie": 2, "EFL Championship": 2, "Serie B": 2,
-    "Champions League": 2, "Europa League": 2,
-    # ogni 3 giorni: coppe + mercati maggiori
-    "Conference League": 3, "Coppa Italia": 3, "Copa del Rey": 3,
-    "Coupe de France": 3, "DFB Pokal": 3, "FA Cup": 3, "EFL Cup": 3,
-    "Swiss Super League": 3, "MLS": 3, "Brasileirao": 3,
-    "Liga MX": 3, "Saudi Pro League": 3,
-    # ogni 7 giorni: campionati secondari e resto del mondo
-    "Primeira Liga": 7, "Allsvenskan": 7, "Eliteserien": 7,
-    "Superliga Danimarca": 7, "Veikkausliiga": 7, "J1 League": 7,
-    "K League 1": 7, "A-League": 7, "Argentina Primera": 7,
-    "Chile Primera": 7, "Copa Libertadores": 7, "Copa Sudamericana": 7,
-    "Ligue 2": 7, "Bundesliga 2": 7, "La Liga 2": 7, "League One": 7,
-    "League Two": 7, "Scottish Premiership": 7, "Austrian Bundesliga": 7,
-    "Belgian First Div": 7, "Greek Super League": 7, "Polish Ekstraklasa": 7,
-    "Turkey Super Lig": 7, "Russian Premier League": 7,
-    # ogni 14 giorni: tornei con calendario rado
-    "3. Liga": 14, "Brazil Serie B": 14, "Sweden Superettan": 14,
-    "China Super League": 14, "League of Ireland": 14, "Frauen-Bundesliga": 14,
-    "FIFA Club World Cup": 14, "UCL Qualification": 14,
-    "UEFA Women's Champions League": 14, "UEFA Nations League": 14,
-    "Copa America": 14, "CONCACAF Leagues Cup": 14,
-    # ogni 30 giorni: nazionali e tornei rari
+    # ogni 3 giorni: i top campionati (freschezza quote vicino al calcio
+    # d'inizio, meglio per il CLV + copertura schedina/auto-bet)
+    "Serie A": 3, "Premier League": 3, "La Liga": 3, "Bundesliga": 3,
+    "Ligue 1": 3, "Eredivisie": 3, "EFL Championship": 3, "Serie B": 3,
+    # ogni 7 giorni: coppe europee + mercati maggiori extra-Europa
+    "Champions League": 7, "Europa League": 7,
+    "MLS": 7, "Brasileirao": 7, "Liga MX": 7, "Saudi Pro League": 7,
+    # ogni 30 giorni (dormienti a settembre, riattivare a ottobre): coppe
+    # nazionali, campionati secondari, resto del mondo e nazionali
+    "Conference League": 30, "Coppa Italia": 30, "Copa del Rey": 30,
+    "Coupe de France": 30, "DFB Pokal": 30, "FA Cup": 30, "EFL Cup": 30,
+    "Swiss Super League": 30, "Primeira Liga": 30, "Allsvenskan": 30,
+    "Eliteserien": 30, "Superliga Danimarca": 30, "Veikkausliiga": 30,
+    "J1 League": 30, "K League 1": 30, "A-League": 30,
+    "Argentina Primera": 30, "Chile Primera": 30, "Copa Libertadores": 30,
+    "Copa Sudamericana": 30, "Ligue 2": 30, "Bundesliga 2": 30,
+    "La Liga 2": 30, "League One": 30, "League Two": 30,
+    "Scottish Premiership": 30, "Austrian Bundesliga": 30,
+    "Belgian First Div": 30, "Greek Super League": 30,
+    "Polish Ekstraklasa": 30, "Turkey Super Lig": 30,
+    "Russian Premier League": 30, "3. Liga": 30, "Brazil Serie B": 30,
+    "Sweden Superettan": 30, "China Super League": 30,
+    "League of Ireland": 30, "Frauen-Bundesliga": 30,
+    "FIFA Club World Cup": 30, "UCL Qualification": 30,
+    "UEFA Women's Champions League": 30, "UEFA Nations League": 30,
+    "Copa America": 30, "CONCACAF Leagues Cup": 30,
     "FIFA World Cup": 30, "FIFA World Cup Qualifiers Europe": 30,
     "FIFA World Cup Qualifiers S.America": 30, "FIFA Women's World Cup": 30,
     "UEFA Euro": 30, "UEFA Euro Qualifiers": 30,
