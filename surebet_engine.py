@@ -49,10 +49,14 @@ SUREBET_DATA_DIR = Path(os.getenv("SUREBET_DATA_DIR", str(DATA_DIR / "surebet"))
 CACHE_DIR = SUREBET_DATA_DIR / "cache"
 LOG_FILE = SUREBET_DATA_DIR / "opportunities.jsonl"
 
-# Crediti the-odds-api: budget conservativo (piano free ~500/mese, il bot
-# Value Bet ne consuma ~407). Lo scanner usa cache TTL e si ferma sotto
-# SUREBET_MIN_REMAINING.
-ODDS_TTL = int(os.getenv("SUREBET_ODDS_TTL", "3600"))          # 1h per sport
+# Crediti the-odds-api: budget CONSERVATIVO. La chiave e' CONDIVISA col
+# bot Value Bet (piano free ~500/mese, il calendario value ne consuma
+# ~407-460): ogni chiamata odds costa 1 credito per sport. Con TTL 6h e
+# 2 sport core (NBA+MLB) si arriva a ~8 crediti/giorno (~240/mese) — gia'
+# vicino al tetto; il tennis (chiavi per torneo) va abilitato SOLO per i
+# tornei in corso via SUREBET_SPORTS. Sotto SUREBET_MIN_REMAINING lo
+# scanner si ferma per non intaccare il budget del value bot.
+ODDS_TTL = int(os.getenv("SUREBET_ODDS_TTL", "21600"))         # 6h per sport
 SUREBET_MIN_REMAINING = int(os.getenv("SUREBET_MIN_REMAINING", "50"))
 
 # Budget per il calcolo degli stake (importo totale da distribuire)
@@ -63,17 +67,14 @@ SUREBET_BUDGET = float(os.getenv("SUREBET_BUDGET", "100"))
 # rumore delle quote arrotondate a 2 decimali).
 MIN_MARGIN = float(os.getenv("SUREBET_MIN_MARGIN", "0.005"))
 
-# Chiavi sport The Odds API. Il tennis non ha una chiave unica: sono chiavi
-# per torneo (tennis_atp_*, tennis_wta_*), configurabili via env.
+# Chiavi sport The Odds API. Default credito-conservativo: SOLO i 2 sport
+# core (NBA + MLB). Il tennis NON ha una chiave unica: sono chiavi per
+# torneo (tennis_atp_*, tennis_wta_*), ognuna costa 1 credito per chiamata:
+# abilitare solo i tornei IN CORSO via env, es.
+#   SUREBET_SPORTS="basketball_nba,baseball_mlb,tennis_atp_us_open,tennis_wta_us_open"
 SPORTS = [s.strip() for s in os.getenv(
     "SUREBET_SPORTS",
-    "basketball_nba,baseball_mlb,"
-    "tennis_atp_us_open,tennis_wta_us_open,tennis_atp_canadian_open,"
-    "tennis_wta_canadian_open,tennis_atp_cincinnati_open,"
-    "tennis_wta_cincinnati_open,tennis_atp_wimbledon,tennis_wta_wimbledon,"
-    "tennis_atp_french_open,tennis_wta_french_open,"
-    "tennis_atp_aus_open_singles,tennis_wta_aus_open_singles,"
-    "tennis_atp_washington_open,tennis_wta_washington_open",
+    "basketball_nba,baseball_mlb",
 ).split(",") if s.strip()]
 
 # Bookmaker SHARP (benchmark di mercato). Default: Pinnacle.

@@ -467,7 +467,10 @@ cd webapp && npm run build            # build Next.js
 - **Surebet engine indipendente** (`surebet_engine.py`, 05/09): scanner di
   arbitraggio su mercati h2h a 2 esiti per NBA (`basketball_nba`), MLB
   (`baseball_mlb`) e Tennis (chiavi per torneo `tennis_*`, configurabili via
-  `SUREBET_SPORTS`). Trigger matematico (1/A)+(1/B)<1 su coppie di bookmaker
+  `SUREBET_SPORTS`). Default CREDITO-CONSERVATIVO: solo NBA+MLB con TTL 6h
+  (~8 crediti/giorno, ~240/mese — la chiave e' CONDIVISA col calendario
+  value che ne usa ~407-460 su 500 del piano free: NON aggiungere tornei
+  tennis se i crediti residui sono bassi). Trigger matematico (1/A)+(1/B)<1 su coppie di bookmaker
   con ALMENO un SOFT (`SUREBET_SOFT_BOOKS`: Snai, GoldBet, Bet365, William
   Hill, Bwin, Unibet, Sisal, Eurobet, Betflag, Novibet, Stanleybet, 888,
   Marathonbet, 10bet, Betway, Paddy Power, Coral, betsson) contro SHARP
