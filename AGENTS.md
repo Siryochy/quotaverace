@@ -528,6 +528,17 @@ cd webapp && npm run build            # build Next.js
   trigger matematico — coppie con quote sporche/mercati illiquidi (es. reale
   Arizona @85.00 vs @1.03: (1/85+1/1.03)<1 scatta per artefatto aritmetico)
   scartate da `is_sane_odds()`. Test dedicati (TestMaxOddsFilter).
+  **VERIFICA CRON IN PRODUZIONE (05/09)**: il cron */15 gira davvero. I log
+  delle esecuzioni dei cron job Railway NON sono esposti dal CLI (si vede
+  solo "Mounting volume/Starting Container") → il "0 log" era un falso
+  allarme. Cattura live via `railway ssh -s surebet` durante un run (con
+  hold temporaneo): heartbeat.json scritto da pid 1, cache MLB aggiornata
+  (remaining 263, 15 match) e 69 opportunita' gia' loggate sul volume.
+  Aggiunti: heartbeat.json a ogni run (ts/sports/pid), log INFO
+  avvio/completamento, hold opzionale `SUREBET_CRON_HOLD_SECONDS` (default
+  0, usato solo per diagnosi) per tenere il container attivo qualche
+  secondo ed ssh-are durante il run. Config attiva 05/09: MLB-only (NBA
+  off-season), TTL 6h, cron */15.
 - **Test**: 547+ test verdi (la suite completa richiede ~9 min).
 - **Sicurezza**: rotazioni token 01/09, 02/09 e **04/09** verificate
   (Telegram `@Calcifrrbot`, ID 8372645521). Rotazione 04/09 completata
