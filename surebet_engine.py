@@ -741,6 +741,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     logger.info("surebet cron: run avviato (sports=%s)", ",".join(SPORTS))
     _one_pass()
+    # Hold opzionale a fine scan singolo (cron): tiene il container attivo
+    # qualche secondo in piu' per diagnosi/ssh (env SUREBET_CRON_HOLD_SECONDS,
+    # default 0 = disattivato). Innocuo col ciclo a 15' del cron.
+    hold = int(os.getenv("SUREBET_CRON_HOLD_SECONDS", "0") or 0)
+    if hold and not args.loop and not args.json:
+        logger.info("surebet: hold %ds per diagnostica", hold)
+        time.sleep(hold)
     logger.info("surebet cron: run completato")
     if args.loop:
         logger.info("surebet loop avviato: ogni %ds (CTRL+C per fermare)", args.loop)
