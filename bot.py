@@ -564,7 +564,7 @@ def _update_results():
       3. Aggiorna rating
     """
     from odds_api import SPORTS_MAP, fetch_scores, match_scores_by_name
-    from tracker import (save_result, get_results_stats, get_leagues_with_signals,
+    from tracker import (save_result, get_results_stats, get_leagues_with_open_rows,
                           settle_cassa, settle_predictions, settle_bets)
     from rating_engine import compute_ratings
     # --- STEP 1: scarica risultati PRIMA di saldare ---
@@ -572,7 +572,10 @@ def _update_results():
     # chiave delle quote restituisce anche i risultati FINITI delle partite
     # correnti. API-Football resta SOLO per lo storico ratings (football_hist,
     # stagioni 2022-2024 coperte dal piano free).
-    leagues = get_leagues_with_signals(days=3)
+    # Refertazione MIRATA (risparmio crediti piano free): si interrogano SOLO
+    # le leghe con scommesse attive (o chiuse da <48h) su partite già iniziate
+    # — zero righe aperte = zero chiamate fetch_scores per quella lega.
+    leagues = get_leagues_with_open_rows()
     updated = 0
     for lg in leagues:
         sport = SPORTS_MAP.get(lg)
@@ -1201,12 +1204,14 @@ async def results_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def settlement_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
-    """Self-healing pendenze: ogni 2h (dopo la finestra dei match job)
+    """Self-healing pendenze: ogni 4h (dopo la finestra dei match job)
     scarica i risultati e salda cassa/previsioni/puntate rimaste aperte.
 
     Copre i buchi della copertura job (es. redeploy alle 23:13 che salta il
     results_job delle 21:30, come il 01/09): al prossimo tick le bet delle
     16:40 vengono saldate automaticamente, senza intervento manuale.
+    Frequenza 4h (era 2h): il referto non serve istantaneo per il ROI e
+    ogni chiamata in meno aiuta il budget crediti del piano free.
     """
     try:
         updated, stats, settlements, sanity = _update_results()
@@ -1391,10 +1396,12 @@ def main() -> None:
         job_queue.run_daily(afternoon_job, time=time(hour=14 - IT_OFFSET, minute=0))
         job_queue.run_daily(evening_job, time=time(hour=20 - IT_OFFSET, minute=0))
         job_queue.run_daily(results_job, time=time(hour=21, minute=30 - IT_OFFSET))
-        # Self-healing pendenze: ogni 2h scarica risultati e salda bet/
+        # Self-healing pendenze: ogni 4h scarica risultati e salda bet/
         # previsioni/cassa rimaste aperte (copre redeploy che saltano i job
         # serali, cache stantie, API lente). Silenzioso se non c'e' nulla.
-        job_queue.run_repeating(settlement_watchdog_job, interval=7200,
+        # Frequenza 4h (era 2h): risparmio crediti, il referto non serve
+        # istantaneo (i risultati serali li coprono i job 21:30/EOD).
+        job_queue.run_repeating(settlement_watchdog_job, interval=14400,
                                 first=1200)  # primo giro dopo 20 min
         # Riepilogo a fine ultima partita: check ogni 15' dalle 21:00 ITA
         # (fallback notturno 23:50 ITA se la giornata non si chiude da sola).
@@ -1418,7 +1425,7 @@ def main() -> None:
                     "08:30 sync / 08:50 auto-bet (SIM) / 14:00 pomeriggio / "
                     "14:00-23:50 RLM alert (5') / 17:00 free / 20:00 sera / "
                     "21:30 risultati / 21:00-23:50 EOD (ogni 15') / "
-                    "watchdog settlement (ogni 2h)")
+                    "watchdog settlement (ogni 4h)")
     else: logger.warning("JobQueue non disponibile")
     logger.info("QuotaVerace Pro avviato.")
     application.run_polling()

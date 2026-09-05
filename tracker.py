@@ -1209,6 +1209,83 @@ def get_leagues_with_signals(days=3):
     rows = c.fetchall(); conn.close()
     return [r[0] for r in rows]
 
+
+def _parse_ts_utc(s):
+    """ISO-8601 → datetime naive UTC (None se non parsabile)."""
+    from datetime import timezone
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def get_leagues_with_open_rows(recent_settled_hours: int = 48,
+                               days_back: int = 5) -> list:
+    """Leghe con scommesse ATTIVE (o chiuse da poco) da refertare.
+
+    Refertazione MIRATA del settlement (risparmio crediti the-odds-api): si
+    scaricano i risultati SOLO per le leghe che hanno davvero righe da
+    seguire su partite GIÀ INIZIATE di recente:
+      - predictions/bets APERTE (esito_finale IS NULL);
+      - predictions/bets chiuse da meno di `recent_settled_hours` (finestra
+        di verifica: se l'API corregge un punteggio dopo la chiusura, il
+        sanity check/heal del watchdog deve poterlo vedere e ri-saldare);
+      - solo partite iniziate da non piu' di `days_back` giorni (la API
+        scores the-odds-api copre ~2 giorni di risultati).
+
+    Zero scommesse attive = zero chiamate fetch_scores per quella lega.
+    Prima si interrogavano TUTTE le leghe con un segnale value negli ultimi
+    3 giorni (get_leagues_with_signals): leghe con sole partite FUTURE o con
+    righe chiuse da giorni venivano comunque interrogate ogni giorno,
+    bruciando crediti senza saldare nulla.
+    """
+    from datetime import timedelta, timezone
+    conn = _get_conn(); c = conn.cursor()
+    try:
+        # UNION ALL per non perdere le leghe presenti solo in uno dei ledger.
+        c.execute('''SELECT m.league, m.commence_time,
+                            p.esito_finale, p.settled_at
+                     FROM predictions p JOIN matches m ON m.id = p.match_id
+                     UNION ALL
+                     SELECT m.league, m.commence_time,
+                            b.esito_finale, b.settled_at
+                     FROM bets b JOIN matches m ON m.id = b.match_id''')
+        rows = c.fetchall()
+    finally:
+        conn.close()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    start = now - timedelta(days=days_back)
+    # Le righe chiuse da tracker usano datetime.now() NAIVE LOCALE (non UTC):
+    # sui container l'offset e' ~0, ma in locale (es. CEST +2) la stringa
+    # naive risulta "nel futuro" rispetto a UTC. Tolleranza simmetrica per
+    # non perdere la finestra di verifica/heal per un mero skew di fuso.
+    recent = now - timedelta(hours=recent_settled_hours + 12)
+    recent_max = now + timedelta(hours=36)
+    needed = set()
+    for league, commence, esito_finale, settled_at in rows:
+        ts = _parse_ts_utc(commence)
+        if ts is None:
+            # Data non interpretabile: prudenza, la teniamo (come prima).
+            needed.add(league)
+            continue
+        # Solo partite già iniziate di recente: quelle future non hanno
+        # ancora un risultato da scaricare, quelle vecchie sono fuori dalla
+        # finestra scores dell'API.
+        if not (start <= ts <= now):
+            continue
+        if esito_finale is None:
+            needed.add(league)   # riga aperta da saldare
+            continue
+        st = _parse_ts_utc(settled_at)
+        if st is not None and recent <= st <= recent_max:
+            needed.add(league)   # chiusa da poco: finestra di verifica/heal
+    return sorted(needed)
+
 def get_results_stats():
     conn = _get_conn(); _create_results_table(conn); c = conn.cursor()
     c.execute('''SELECT r.home_team, r.away_team, r.score_home, r.score_away,

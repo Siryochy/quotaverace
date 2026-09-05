@@ -16,6 +16,7 @@ registrati dicono vittoria della squadra di casa. Copre:
 import asyncio
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -23,6 +24,14 @@ import pytest
 
 import tracker
 import odds_api
+
+
+def _started_iso(days_ago: int = 1, hours_ago: int = 2) -> str:
+    """commence_time RECENTE: la refertazione mirata (get_leagues_with_open_rows)
+    interroga solo partite già iniziate di recente — le date hardcoded
+    escono dalla finestra e il flusso _update_results non parte mai."""
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago,
+                                                   hours=hours_ago)).isoformat()
 import bot
 
 
@@ -296,12 +305,13 @@ class TestUpdateResultsSanity:
         casa 2-1) → match_results corretto → sanity check rileva la
         contraddizione e ri-salda la bet a lost."""
         tracker.save_match("m1", "J1 League", "FC Machida Zelvia",
-                           "Kawasaki Frontale", "2026-09-02T05:00:00Z")
+                           "Kawasaki Frontale", _started_iso())
         tracker.save_analysis("m1", 1.2, 1.6, 0.28, 0.26, 0.46, 0.52,
                               0.14, "2", 4.0, "Pinnacle", "value")
         # Stato pre-fix: punteggio INVERTITO salvato (vittoria trasferta)
         tracker.save_result("m1", "J1 League", "FC Machida Zelvia",
-                            "Kawasaki Frontale", 1, 2, "2026-09-02T13:53:49Z")
+                            "Kawasaki Frontale", 1, 2,
+                            (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat())
         tracker.save_bet("m1", "1X2", "2", None, None, 4.0, 5.0)
         tracker.settle_bets()
         rows = tracker.get_bets(limit=10)

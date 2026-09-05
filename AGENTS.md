@@ -192,7 +192,7 @@ cd webapp && npm run build            # build Next.js
   incoerente → la riga NON si chiude (resta aperta + log); verdetto 'won'
   impossibile coi gol (es. esito 2 con vittoria casa) → bloccato. Inoltre
   `settlement_sanity_check()` + `heal_settled_contradictions()` nel job di
-  settlement (`_update_results`, watchdog 2h + job serali): se una riga già
+  settlement (`_update_results`, watchdog 4h + job serali): se una riga già
   chiusa ha un verdetto che contraddice i gol CORRENTI (caso Machida: bet
   marcata won dopo correzione punteggio), viene riaperta e ri-saldata
   automaticamente, con alert Telegram `🔔 SANITY CHECK SETTLEMENT`.
@@ -220,11 +220,21 @@ cd webapp && npm run build            # build Next.js
   restituisce i verdetti appena emessi e i job (pomeriggio/sera/23:30 e
   `/risultati`) inviano la notifica `🔔 ESITO PUNTATE AUTOMATICHE`
   (✅ VINTA/❌ PERSA/⚪ PUSH con P/L) a iscritti+admin.
-- **Settlement watchdog / self-healing** (`bot.py`, ogni 2h): scarica i
-  risultati e salda bet/previsioni/cassa aperte anche fuori dai job serali,
-  con notifica verdetti. Copre redeploy che saltano i job, cache stantie,
-  API lente. VERIFICATO IN PRODUZIONE (01/09): 3 bet pendenti (Birmingham,
-  Wycombe, Tranmere) saldate automaticamente al primo giro, zero interventi.
+- **Settlement watchdog / self-healing** (`bot.py`, ogni 4h dal 05/09, era
+  2h): scarica i risultati e salda bet/previsioni/cassa aperte anche fuori
+  dai job serali, con notifica verdetti. Copre redeploy che saltano i job,
+  cache stantie, API lente. VERIFICATO IN PRODUZIONE (01/09): 3 bet
+  pendenti (Birmingham, Wycombe, Tranmere) saldate al primo giro.
+- **Refertazione credit-saving (05/09, `_update_results`)**: il settlement
+  interroga `fetch_scores` SOLO per le leghe con scommesse ATTIVE
+  (predictions/bets con `esito_finale IS NULL`, o chiuse da <48h per la
+  finestra di verifica/heal) su partite GIÀ INIZIATE (5 giorni). Prima si
+  interrogavano tutte le leghe con un segnale value negli ultimi 3 giorni:
+  leghe con sole partite future o righe chiuse da giorni bruciavano crediti
+  senza saldare nulla. Zero scommesse attive = zero chiamate per quella
+  lega. Helper `tracker.get_leagues_with_open_rows` + test dedicati in
+  test_settlement_watchdog.py. Watchdog da 2h a 4h (il referto non serve
+  istantaneo).
 - **Fix cache punteggi** (`odds_api.fetch_scores`): la cache non serve più
   partite iniziate da >3h con `completed=False` (cache scritta a partita in
   corso = stantia): refresh forzato, fallback cache solo se l'API fallisce

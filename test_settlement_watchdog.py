@@ -1,9 +1,13 @@
 """Test settlement_watchdog_job: self-healing delle pendenze.
 
 Scenario 01/09: bet piazzate alle 16:40, redeploy alle 23:13 salta il
-results_job delle 21:30 -> le bet restano aperte. Il watchdog (ogni 2h)
+results_job delle 21:30 -> le bet restano aperte. Il watchdog (ogni 4h)
 deve scaricare i risultati, saldare le bet e inviare i verdetti senza
 intervento manuale.
+
+Refertazione MIRATA (risparmio crediti the-odds-api): fetch_scores viene
+chiamato SOLO per le leghe con scommesse attive (o chiuse da <48h) su
+partite già iniziate — zero righe aperte = zero chiamate per quella lega.
 
 I test usano il FLUSSO REALE di _update_results (nessun mock della logica
 di saldatura): si monkeypatcha solo il confine esterno (fetch_scores di
@@ -75,12 +79,13 @@ def _patch_admin(monkeypatch):
     monkeypatch.setattr(t, "get_subscribers", lambda *a, **k: [])
 
 
-def _recent_iso(days_ago: int = 2) -> str:
-    """commence_time recente (entro la finestra -3gg di
-    get_leagues_with_signals): date hardcoded tipo 2026-09-01 restano
-    valide solo il giorno in cui il test e' scritto e poi escono dalla
-    finestra (settlement mai eseguito → bet aperte per sempre)."""
-    return (datetime.now(timezone.utc) - timedelta(days=days_ago, hours=3)).isoformat()
+def _recent_iso(days_ago: int = 1, hours_ago: int = 3) -> str:
+    """commence_time recente (entro la finestra di get_leagues_with_open_rows):
+    date hardcoded tipo 2026-09-01 restano valide solo il giorno in cui il
+    test e' scritto e poi escono dalla finestra (settlement mai eseguito →
+    bet aperte per sempre)."""
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago,
+                                                   hours=hours_ago)).isoformat()
 
 
 MATCH = {"id": "mX", "home_team": "Inter", "away_team": "Napoli",
@@ -180,3 +185,79 @@ def test_watchdog_saldatura_differita(temp_db, monkeypatch):
     rows = tracker.get_bets(limit=10)
     assert rows[0]["esito_finale"] == "won"
     assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Refertazione MIRATA: fetch_scores SOLO per leghe con scommesse attive
+# ---------------------------------------------------------------------------
+
+def _recording_fetch(monkeypatch, payload_per_sport):
+    """fetch_scores finto che registra gli sport interrogati."""
+    requested = []
+
+    def fake_fetch(sport=None, days_from=2):
+        requested.append(sport)
+        return payload_per_sport.get(sport, [])
+
+    monkeypatch.setattr(odds_api, "fetch_scores", fake_fetch)
+    monkeypatch.setitem(sys.modules, "odds_api", odds_api)
+    return requested
+
+
+def test_watchdog_fetch_solo_leghe_con_righe_aperte(temp_db, monkeypatch):
+    """Leghe con SOLO un segnale value (nessuna scommessa aperta) NON
+    vengono interrogate: zero righe attive = zero chiamate fetch_scores."""
+    # Serie A: bet APERTA su partita appena iniziata -> va refertata
+    tracker.save_match("mSerieA", "Serie A", "Inter", "Napoli", _recent_iso())
+    tracker.save_bet("mSerieA", "1X2", "1", "1.100", 101, 2.10, 10.0)
+    # J1 League: segnale value ma NESSUNA prediction/bet -> NON va refertata
+    tracker.save_match("mJ1", "J1 League", "FC Machida Zelvia",
+                       "Kawasaki Frontale", _recent_iso())
+    tracker.save_analysis("mJ1", 1.2, 1.6, 0.28, 0.26, 0.46, 0.52,
+                          0.14, "2", 4.0, "Pinnacle", "value")
+
+    _patch_ratings(monkeypatch)
+    _patch_admin(monkeypatch)
+    requested = _recording_fetch(
+        monkeypatch, {"soccer_italy_serie_a": [dict(MATCH, id="mSerieA")]})
+
+    asyncio.run(bot.settlement_watchdog_job(_fake_context()))
+    # Solo la lega con la scommessa attiva è stata interrogata
+    assert requested == ["soccer_italy_serie_a"]
+    rows = tracker.get_bets(limit=10)
+    assert rows[0]["esito_finale"] == "won"   # la bet aperta è stata saldata
+
+
+def test_watchdog_niente_fetch_per_partite_non_iniziate(temp_db, monkeypatch):
+    """Bet aperta su partita FUTURA (non ancora iniziata): non c'è alcun
+    risultato da scaricare -> zero chiamate API per quella lega."""
+    future = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    tracker.save_match("mFut", "La Liga", "Osasuna", "Getafe", future)
+    tracker.save_bet("mFut", "1X2", "1", None, None, 2.1, 10.0)
+
+    _patch_ratings(monkeypatch)
+    _patch_admin(monkeypatch)
+    requested = _recording_fetch(monkeypatch, {})
+
+    asyncio.run(bot.settlement_watchdog_job(_fake_context()))
+    assert requested == []
+    # La bet resta aperta (il match non è ancora iniziato)
+    rows = tracker.get_bets(limit=10)
+    assert rows[0]["esito_finale"] is None
+
+
+def test_tracker_get_leagues_with_open_rows_finestra(temp_db):
+    """Helper: solo leghe con righe aperte/chiuse-da-poco su partite
+    già iniziate (mai partite future né leghe senza scommesse)."""
+    # aperta su partita iniziata -> inclusa
+    tracker.save_match("m1", "Serie A", "Inter", "Napoli", _recent_iso())
+    tracker.save_bet("m1", "1X2", "1", None, None, 2.1, 10.0)
+    # futura -> esclusa
+    future = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    tracker.save_match("m2", "La Liga", "Osasuna", "Getafe", future)
+    tracker.save_bet("m2", "1X2", "1", None, None, 2.1, 10.0)
+    # nessuna scommessa -> esclusa
+    tracker.save_match("m3", "J1 League", "A", "B", _recent_iso())
+
+    leagues = tracker.get_leagues_with_open_rows()
+    assert leagues == ["Serie A"]

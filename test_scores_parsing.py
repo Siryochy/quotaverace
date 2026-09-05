@@ -14,6 +14,7 @@ Questi test coprono:
 """
 import asyncio
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -23,6 +24,15 @@ import tracker
 import odds_api
 import bot
 import repair_scores
+
+
+def _started_iso(days_ago: int = 1, hours_ago: int = 2) -> str:
+    """commence_time RECENTE (partita gia' iniziata): la refertazione
+    mirata (get_leagues_with_open_rows) interroga solo partite iniziate
+    negli ultimi giorni — date hardcoded escono dalla finestra e il
+    settlement non parte mai."""
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago,
+                                                   hours=hours_ago)).isoformat()
 
 
 @pytest.fixture()
@@ -128,7 +138,7 @@ class TestUpdateResultsAwayFirst:
 
     def _setup(self, temp_db):
         tracker.save_match("machida", "J1 League", "FC Machida Zelvia",
-                           "Kawasaki Frontale", "2026-09-02T05:00:00Z")
+                           "Kawasaki Frontale", _started_iso())
         tracker.save_analysis("machida", 1.2, 1.6, 0.28, 0.26, 0.46, 0.52,
                               0.14, "2", 4.0, "Pinnacle", "value")
         tracker.save_bet("machida", "1X2", "2", None, None, 4.0, 5.0)
