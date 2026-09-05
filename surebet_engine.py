@@ -14,6 +14,9 @@ Vincoli architetturali (come da specifica):
 - Confronto: bookmaker SOFT (Snai, GoldBet, altri EU) vs SHARP (Pinnacle)
   oppure soft-vs-soft. Trigger puramente matematico:
         (1/Quota_A) + (1/Quota_B) < 1
+  con filtro anti-garbage SUREBET_MAX_ODDS (default 30): le coppie con
+  quote fuori range (esiti impossibili/mercati illiquidi) sono scartate
+  prima del trigger.
 - Stake: allocazione esatta per bilanciare il profitto, basata sull'env
   SUREBET_BUDGET (es. 100).
 - Consegna: Telegram con formato dedicato + INLINE KEYBOARD (deep linking:
@@ -70,6 +73,15 @@ SUREBET_BUDGET = float(os.getenv("SUREBET_BUDGET", "100"))
 # (default 0.005 = servono almeno 0.5% di margine per segnalare; evita il
 # rumore delle quote arrotondate a 2 decimali).
 MIN_MARGIN = float(os.getenv("SUREBET_MIN_MARGIN", "0.005"))
+
+# Filtro max-odds (anti garbage/mercati illiquidi): le coppie con una
+# quota oltre questa soglia vengono scartate PRIMA del trigger matematico.
+# Verificato sui dati reali 05/09: quote tipo "Arizona @85.00 vs @1.03"
+# sono prezzi sporchi dell'API (esiti quasi impossibili o mercati senza
+# liquidita'), non arbitraggi eseguibili: (1/85+1/1.03) < 1 scatta per
+# puro artefatto aritmetico. Default 30 (su h2h 2 esiti una quota sana
+# raramente supera 10-15; 30 e' gia' tollerante). Env: SUREBET_MAX_ODDS.
+MAX_ODDS = float(os.getenv("SUREBET_MAX_ODDS", "30"))
 
 # Chiavi sport The Odds API. Default credito-conservativo: SOLO i 2 sport
 # core (NBA + MLB). Il tennis NON ha una chiave unica: sono chiavi per
@@ -194,6 +206,16 @@ def is_arbitrage(quota_a: float, quota_b: float,
     """Trigger matematico: (1/A)+(1/B) < 1 - min_margin."""
     inv = inverse_sum(quota_a, quota_b)
     return inv is not None and inv <= 1.0 - min_margin
+
+
+def is_sane_odds(quota: float, max_odds: float = MAX_ODDS) -> bool:
+    """Filtro anti garbage: True se la quota e' entro il range ammesso.
+
+    Scarta quote irrealistiche (> max_odds) tipiche di esiti quasi
+    impossibili o mercati illiquidi: l'arbitraggio su quei prezzi e'
+    un artefatto aritmetico, non eseguibile. Soglia via SUREBET_MAX_ODDS.
+    """
+    return 1.0 < quota <= max_odds
 
 
 def compute_stakes(quota_a: float, quota_b: float,
@@ -327,6 +349,9 @@ def scan_match(match: dict, sport_key: str) -> List[SurebetOpportunity]:
             seen_pairs.add(pair)
             ptype = _pair_type(bka, bkb)
             if ptype is None:
+                continue
+            # filtro max-odds: quote sporche/mercati illiquidi fuori range
+            if not is_sane_odds(qa) or not is_sane_odds(qb):
                 continue
             if not is_arbitrage(qa, qb):
                 continue

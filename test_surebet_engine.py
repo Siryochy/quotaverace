@@ -79,6 +79,72 @@ class TestComputeStakes:
 
 
 # ---------------------------------------------------------------------------
+# Filtro max-odds (anti garbage / mercati illiquidi)
+# ---------------------------------------------------------------------------
+
+class TestMaxOddsFilter:
+    def test_is_sane_odds_range_ammesso(self):
+        assert se.is_sane_odds(1.05)
+        assert se.is_sane_odds(30.0)   # = soglia (incluso)
+        assert se.is_sane_odds(15.0)
+
+    def test_is_sane_odds_fuori_range(self):
+        assert not se.is_sane_odds(85.0)   # il caso reale visto nei dati
+        assert not se.is_sane_odds(30.01)
+        assert not se.is_sane_odds(1.0)    # quota non valida (<= 1)
+        assert not se.is_sane_odds(0.5)
+
+    def test_soglia_configurabile(self):
+        assert se.is_sane_odds(25.0, max_odds=20.0) is False
+        assert se.is_sane_odds(19.99, max_odds=20.0) is True
+
+    def test_quote_garbage_scartate_dallo_scan(self):
+        """Il caso reale (Arizona @85.00 vs @1.03) NON deve generare
+        una surebet: e' un artefatto aritmetico su prezzo sporco."""
+        # home: Pinnacle 1.03 (sano), Snai 85.00 (garbage)
+        # away: Pinnacle 1.03, Snai 85.00
+        m = _make_match(books=(("Pinnacle", 1.03), ("Snai", 85.00)),
+                        away_books=(("Pinnacle", 85.00), ("Snai", 1.03)))
+        # 1/85 + 1/1.03 = 0.0118 + 0.9709 = 0.9827 < 1 → senza filtro scatta
+        assert se.is_arbitrage(85.0, 1.03)
+        # ma con il filtro max-odds la coppia viene scartata
+        assert se.scan_match(m, "basketball_nba") == []
+
+    def test_quota_alta_ma_sana_ammessa(self):
+        """Quote sotto la soglia restano arbitrabili normalmente."""
+        # NB: _make_match ignora il titolo del bookmaker away (zip by index),
+        # quindi il payload qui e' costruito a mano per avere bookmaker
+        # DISTINTI su ogni esito (Snai home, GoldBet away).
+        m = {
+            "id": "m-max-ok", "home_team": "Celtics", "away_team": "Lakers",
+            "commence_time": "2026-09-10T01:00:00Z",
+            "bookmakers": [
+                {"title": "Pinnacle", "markets": [{"key": "h2h", "outcomes": [
+                    {"name": "Celtics", "price": 1.15},
+                    {"name": "Lakers", "price": 1.15}]}]},
+                {"title": "Snai", "markets": [{"key": "h2h", "outcomes": [
+                    {"name": "Celtics", "price": 2.30},
+                    {"name": "Lakers", "price": 1.70}]}]},
+                {"title": "GoldBet", "markets": [{"key": "h2h", "outcomes": [
+                    {"name": "Celtics", "price": 1.60},
+                    {"name": "Lakers", "price": 25.00}]}]},
+            ],
+        }
+        # Snai 2.30 vs GoldBet 25.00: 1/2.30+1/25.00 = 0.4748 < 1 (25 < 30)
+        opps = se.scan_match(m, "basketball_nba")
+        assert len(opps) >= 1
+        assert any(o.quota_a == 25.0 or o.quota_b == 25.0 for o in opps)
+        assert all(o.quota_a <= se.MAX_ODDS and o.quota_b <= se.MAX_ODDS
+                   for o in opps)
+
+    def test_payload_webhook_non_include_quote_garbage(self):
+        """Il filtro opera a monte del delivery: nessun payload su garbage."""
+        m = _make_match(books=(("Pinnacle", 85.00), ("Snai", 1.03)),
+                        away_books=(("Pinnacle", 1.03), ("Snai", 85.00)))
+        assert se.scan_match(m, "basketball_nba") == []
+
+
+# ---------------------------------------------------------------------------
 # Classificazione bookmaker
 # ---------------------------------------------------------------------------
 

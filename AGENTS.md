@@ -493,6 +493,10 @@ cd webapp && npm run build            # build Next.js
   NESSUNA Pinnacle/sharp per NBA in eu/uk (tutte le coppie sono soft-soft):
   la copertura sharp dipende dallo sport — verificare per MLB/tennis.
   Fix delivery: parse_mode HTML (Markdown legacy dava 400 su nomi reali).
+  Fix anti-garbage 05/09: filtro `SUREBET_MAX_ODDS` (default 30) PRIMA del
+  trigger matematico — coppie con quote sporche/mercati illiquidi (es. reale
+  Arizona @85.00 vs @1.03: (1/85+1/1.03)<1 scatta per artefatto aritmetico)
+  scartate da `is_sane_odds()`. Test dedicati (TestMaxOddsFilter).
 - **Test**: 547+ test verdi (la suite completa richiede ~9 min).
 - **Sicurezza**: rotazioni token 01/09, 02/09 e **04/09** verificate
   (Telegram `@Calcifrrbot`, ID 8372645521). Rotazione 04/09 completata
