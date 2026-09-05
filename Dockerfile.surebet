@@ -1,0 +1,17 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Installa dipendenze
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copia tutto il codice
+COPY . .
+
+# Servizio CRON dedicato per lo scanner surebet (indipendente dal bot
+# Value Bet: stesso repo, stessa immagine di base, entrypoint diverso).
+# Railway esegue questo comando a ogni scatto del Cron Schedule; il
+# processo DEVE terminare (scan singolo + uscita) — mai --loop qui, o il
+# cron salta le esecuzioni successive (vedi docs.railway.com/cron-jobs).
+CMD ["python", "surebet_engine.py"]
