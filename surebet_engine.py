@@ -27,6 +27,7 @@ Uso (loop separato dal bot — crontab o processo dedicato):
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -87,8 +88,9 @@ SHARP_BOOKS = [b.strip().lower() for b in os.getenv(
 SOFT_BOOKS = [b.strip().lower() for b in os.getenv(
     "SUREBET_SOFT_BOOKS",
     "Snai,GoldBet,Bet365,William Hill,Bwin,Unibet,Sisal,Eurobet,"
-    "Betflag,Novibet,Stanleybet,888sport,Marathonbet,10bet,Betway,"
-    "Paddy Power,Coral,betsson",
+    "Betflag,Novibet,Stanleybet,888sport,Marathonbet,marathon bet,10bet,"
+    "Betway,Paddy Power,Coral,betsson,betclic,tipico,winamax,1xbet,"
+    "leovegas,nordic bet,gtbets,pmu,williamhill",
 ).split(",") if b.strip()]
 
 # Webhook n8n (futuro): se impostato, il delivery invia anche il payload
@@ -348,9 +350,14 @@ def fetch_odds_sport(sport_key: str) -> List[dict]:
         logger.warning("surebet: ODDS_API_KEY mancante")
         return []
     try:
+        # regions eu,uk: piu' bookmaker europei/UK a costo zero (la stessa
+        # chiamata copre entrambe le regioni). Verificato 05/09 su NBA:
+        # con solo "eu" non arrivano Pinnacle/Snai/GoldBet, ma si vedono
+        # 1xBet, Betclic, Betsson, GTbets, LeoVegas, Marathon Bet, Nordic
+        # Bet, PMU, Tipico, Unibet, Winamax, 888sport...
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
-            params={"apiKey": key, "regions": "eu", "markets": "h2h",
+            params={"apiKey": key, "regions": "eu,uk", "markets": "h2h",
                     "oddsFormat": "decimal"},
             timeout=30,
         )
@@ -437,30 +444,40 @@ def log_opportunity(opp: SurebetOpportunity) -> None:
 # ---------------------------------------------------------------------------
 
 def format_telegram_alert(opp: SurebetOpportunity) -> str:
-    """Formato dedicato per il segnale surebet su Telegram."""
+    """Formato dedicato per il segnale surebet su Telegram.
+
+    Usa parse_mode HTML (non Markdown legacy: gli asterischi spaiati nei
+    nomi reali fanno fallire il parse con 400). I campi dati sono escaped.
+    """
+    ev = html.escape(opp.evento)
+    ea = html.escape(opp.esito_a)
+    eb = html.escape(opp.esito_b)
+    ba = html.escape(opp.bookmaker_a)
+    bb = html.escape(opp.bookmaker_b)
+    sk = html.escape(opp.sport_key)
     lines = [
-        f"⚡ *ARBITRAGGIO CONFERMATO* ⚡",
+        f"⚡ <b>ARBITRAGGIO CONFERMATO</b> ⚡",
         f"━━━━━━━━━━━━━━━━━━━━━━",
         f"",
-        f"💰 *ROI netto: +{opp.roi_pct:.2f}%*",
+        f"💰 <b>ROI netto: +{opp.roi_pct:.2f}%</b>",
         f"   Profitto: €{opp.profit:.2f} su €{opp.budget:.0f}",
         f"",
-        f"🏟 *{opp.evento}*",
-        f"   Sport: {opp.sport_key}",
+        f"🏟 <b>{ev}</b>",
+        f"   Sport: {sk}",
         f"   Inizio: {opp.commence_time[:16]} UTC",
         f"   Mercato: 2 esiti (h2h)",
         f"",
-        f"📊 *Quote e stake (SUREBET_BUDGET=€{opp.budget:.0f}):*",
-        f"   • {opp.esito_a} @ {opp.quota_a:.2f} → "
-        f"*€{opp.stake_a:.2f}* su *{opp.bookmaker_a}*",
-        f"   • {opp.esito_b} @ {opp.quota_b:.2f} → "
-        f"*€{opp.stake_b:.2f}* su *{opp.bookmaker_b}*",
+        f"📊 <b>Quote e stake (SUREBET_BUDGET=€{opp.budget:.0f}):</b>",
+        f"   • {ea} @ {opp.quota_a:.2f} → "
+        f"<b>€{opp.stake_a:.2f}</b> su <b>{ba}</b>",
+        f"   • {eb} @ {opp.quota_b:.2f} → "
+        f"<b>€{opp.stake_b:.2f}</b> su <b>{bb}</b>",
         f"",
-        f"🧮 Somma inversi: {opp.inverse_sum:.4f} (< 1 ✅)",
+        f"🧮 Somma inversi: {opp.inverse_sum:.4f} (&lt; 1 ✅)",
         f"🔀 Coppia: {opp.tipo}",
         f"",
-        f"⚠️ *NOTA*: profitto teorico garantito SOLO se entrambe le quote "
-        f"restano disponibili al momento della puntata. Verifica la "
+        f"⚠️ <b>NOTA</b>: profitto teorico garantito SOLO se entrambe le "
+        f"quote restano disponibili al momento della puntata. Verifica la "
         f"disponibilita' effettiva. Gioca responsabilmente.",
     ]
     return "\n".join(lines)
@@ -506,7 +523,7 @@ def _send_telegram(opp: SurebetOpportunity) -> bool:
         try:
             r = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+                json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
                 timeout=20,
             )
             if r.status_code != 200:

@@ -293,6 +293,18 @@ class TestDelivery:
         assert "0.8608" in text
         assert "Gioca responsabilmente" in text
 
+    def test_formato_html_valido_per_telegram(self):
+        """Il formato usa HTML (parse_mode=HTML): il vecchio Markdown legacy
+        falliva con 400 ('can't parse entities') su nomi con caratteri
+        speciali. Qui: tag bilanciati + campi dati escaped."""
+        opp = _opp(evento="Boston Celtics vs Detroit & Pistons")
+        text = se.format_telegram_alert(opp)
+        # amp escaped (non rompe il parse HTML)
+        assert "&amp;" in text and "& Pistons" not in text
+        # tag <b> bilanciati
+        assert text.count("<b>") == text.count("</b>")
+        assert "&lt; 1" in text
+
     def test_json_payload_n8n_strutturato(self):
         payload = se.build_json_payload(_opp())
         assert payload["type"] == "surebet"
