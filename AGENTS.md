@@ -36,7 +36,11 @@ market_diagnose.py  → diagnosi calibrazione per mercato (ROI vs EV)
 odds_ingest.py      → ingestione quote da odds API (cache in data/)
 odds_api.py         → client the-odds-api (rate limit, quota giornaliera) — quote E CLV
 football_hist.py    → storico risultati (2022-2024, piano free API-Football) per le ratings
-surebet_scanner.py  → scanner arbitraggi tra bookmaker (quote the-odds-api)
+surebet_scanner.py  → prototipo scanner arbitraggi (solo mock, NON in produzione)
+surebet_engine.py   → scanner arbitraggi INDIPENDENTE (05/09): h2h a 2 esiti
+                      NBA/MLB/Tennis, soft vs sharp via the-odds-api, cache e
+                      log propri (data/surebet/), mai import da tracker/bot
+                      (loop separato: venv/bin/python surebet_engine.py --loop N)
 data/               → cache JSON + DB sqlite + modello ensemble
 backtest_mc.py      → backtest walk-forward ensemble+Kelly con Monte Carlo (ROI, MaxDD)
 backup_manager.py   → backup DB+dataset ML (integrity check, rotazione, /backup)
@@ -460,7 +464,27 @@ cd webapp && npm run build            # build Next.js
   timestamp con microsecondi. Usato da backup_data_job (03:30 UTC + avvio)
   e comando `/backup` (solo admin). VERIFICATO IN PRODUZIONE: integrity ok,
   56 CLV, dataset ML, 78 file data/.
-- **Test**: 529 test verdi (la suite completa richiede ~8 min).
+- **Surebet engine indipendente** (`surebet_engine.py`, 05/09): scanner di
+  arbitraggio su mercati h2h a 2 esiti per NBA (`basketball_nba`), MLB
+  (`baseball_mlb`) e Tennis (chiavi per torneo `tennis_*`, configurabili via
+  `SUREBET_SPORTS`). Trigger matematico (1/A)+(1/B)<1 su coppie di bookmaker
+  con ALMENO un SOFT (`SUREBET_SOFT_BOOKS`: Snai, GoldBet, Bet365, William
+  Hill, Bwin, Unibet, Sisal, Eurobet, Betflag, Novibet, Stanleybet, 888,
+  Marathonbet, 10bet, Betway, Paddy Power, Coral, betsson) contro SHARP
+  (`SUREBET_SHARP_BOOKS`, default Pinnacle) o soft-vs-soft. Stake esatti
+  proporzionali agli inversi su `SUREBET_BUDGET` (default €100), profit/ROI
+  netto garantito. **INDIPENDENZA totale dal bot Value Bet**: cache propria
+  (data/surebet/cache), log JSONL proprio (data/surebet/opportunities.jsonl,
+  dedup 24h), nessun import da tracker/bot (test dedicato lo verifica),
+  loop separato `venv/bin/python surebet_engine.py --loop N` (non toccare
+  run_all.py: il bot resta sul volume unico). Delivery: Telegram con formato
+  dedicato (ROI, evento, quote, stake per bookmaker) via POST diretto
+  all'API Telegram + webhook n8n già predisposto (`SUREBET_WEBHOOK_URL`,
+  payload JSON via `build_json_payload`). Crediti: TTL 1h per sport, stop
+  sotto `SUREBET_MIN_REMAINING` (default 50; il piano free ~500/mese è già
+  quasi tutto consumato dal calendario value → monitorare crediti).
+  Tripwire: nessun riferimento al vecchio exchange nel codice del modulo.
+- **Test**: 547+ test verdi (la suite completa richiede ~9 min).
 - **Sicurezza**: rotazioni token 01/09, 02/09 e **04/09** verificate
   (Telegram `@Calcifrrbot`, ID 8372645521). Rotazione 04/09 completata
   con Opzione A: token esposto in chat REVOCATO (getMe col vecchio → 401)
@@ -471,6 +495,11 @@ cd webapp && npm run build            # build Next.js
 
 ## Prossimi passi possibili (non urgenti)
 
+- Surebet engine: schedulare il loop in produzione (crontab/cron Railway o
+  secondo servizio) e monitorare i crediti the-odds-api (il piano free è
+  quasi saturo col calendario value). Verificare su dati reali quali
+  bookmaker soft the-odds-api copre davvero per NBA/MLB/Tennis (il match
+  per sottostringa è estensibile via env).
 - Quando il ledger avrà 100+ previsioni chiuse: usare `market_diagnose.py`
   per identificare mercati critici e ajustare blend/devig/soglie.
 - Eseguire `/backtest_mc` con 15+ previsioni chiuse (oggi 8): le metriche
