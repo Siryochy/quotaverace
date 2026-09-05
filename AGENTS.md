@@ -487,6 +487,12 @@ cd webapp && npm run build            # build Next.js
   sotto `SUREBET_MIN_REMAINING` (default 50; il piano free ~500/mese è già
   quasi tutto consumato dal calendario value → monitorare crediti).
   Tripwire: nessun riferimento al vecchio exchange nel codice del modulo.
+  **COLLAUDO REALE 05/09 su Railway** (chiave API vera): scansione NBA → 41
+  match, 39 con h2h a 2 esiti, **3 surebet reali trovate** (es. Rockets vs
+  Mavericks: Dallas @4.25 1xBet vs Houston @1.34 Nordic Bet, ROI +1.88%).
+  NESSUNA Pinnacle/sharp per NBA in eu/uk (tutte le coppie sono soft-soft):
+  la copertura sharp dipende dallo sport — verificare per MLB/tennis.
+  Fix delivery: parse_mode HTML (Markdown legacy dava 400 su nomi reali).
 - **Test**: 547+ test verdi (la suite completa richiede ~9 min).
 - **Sicurezza**: rotazioni token 01/09, 02/09 e **04/09** verificate
   (Telegram `@Calcifrrbot`, ID 8372645521). Rotazione 04/09 completata
