@@ -44,19 +44,24 @@ surebet_engine.py   → scanner arbitraggi INDIPENDENTE (05/09): h2h a 2 esiti
 data/               → cache JSON + DB sqlite + modello ensemble
 backtest_mc.py      → backtest walk-forward ensemble+Kelly con Monte Carlo (ROI, MaxDD)
 backup_manager.py   → backup DB+dataset ML (integrity check, rotazione, /backup)
+execution_engine.py → ESECUZIONE ordini via aggregatore professionale (BetInAsia BLACK /
+                      MollyBet, protocollo Betfair-compatible JSON-RPC): provider
+                      interface + DryRun + probe a stake minimo (1€) latenza/slippage
 webapp/             → Next.js (Vercel): dashboard, cassa, schedina, calendario, backtest, value...
 ```
 
-**Betfair è stato RIMOSSO dall'architettura il 04/09**: moduli
-`betfair_client.py`, `daily_scanner.py`, `daily_scan_job.py`,
-`surebet_pipeline.py` e i relativi test non esistono più. Refertazione =
-the-odds-api (`odds_api.fetch_scores`, risultati stagione corrente — la
-stessa chiave delle quote); quote/CLV = the-odds-api. API-Football serve
-SOLO allo storico ratings 2022-2024 (`football_hist.py`): il piano free
-NON copre la stagione corrente (verificato 04/09), quindi non può saldare
-le partite del 2026. auto_bet è SIM-only permanente. Tripwire
-`test_betfair_removed.py`: reintrodurre Betfair (o spostare il settlement
-su API-Football) rompe la suite.
+**Il tripwire Betfair è stato RIMOSSO il 06/09**: i moduli `betfair_client.py`,
+`daily_scanner.py`, `daily_scan_job.py`, `surebet_pipeline.py` non esistono più,
+ma la direzione è cambiata — l'ESECUZIONE passa ora da un aggregatore
+professionale (`execution_engine.py`: BetInAsia BLACK / MollyBet, protocollo
+Betfair-compatible). Refertazione = the-odds-api (`odds_api.fetch_scores`,
+risultati stagione corrente — la stessa chiave delle quote); quote/CLV =
+the-odds-api. API-Football serve SOLO allo storico ratings 2022-2024
+(`football_hist.py`): il piano free NON copre la stagione corrente (verificato
+04/09), quindi non può saldare le partite del 2026. auto_bet è SIM-only
+permanente. Il vincolo "settlement = the-odds-api" resta garantito da
+`test_settlement_source.py`; il vincolo "nessuna credenziale in chiaro" da
+`test_secret_hygiene.py`.
 
 **Backend e bot stanno nello STESSO container Railway** (volume unico su
 `/app/data`). Niente servizi separati con volumi divisi.
@@ -156,11 +161,11 @@ cd webapp && npm run build            # build Next.js
   0.6-0.7: 56% vs 65; 0.7-1.0: 67% vs 85), CLV vig-free negativo ovunque
   e leak sistematico sull'OU2.5 (-6,8% su 924 bet, under -7,3%). Tre
   azioni eseguite (commit in corso):
-  1) **OU2.5 ESCLUSO dalle selezioni (emergency, in produzione)** — `fixture_engine`
-     non genera piu' candidati Over/Under (env `ENABLE_OU_MARKET=1` per
-     riattivare quando il leak sara' corretto). Il ledger previsioni
-     smette di imparare dal mercato perdente. In produzione il bottone
-     value resta 1X2-only finche' non si ristudia il mercato OU.
+  1) **OU2.5 ESCLUSO DEFINITIVAMENTE dalle selezioni (06/09)** — `fixture_engine`
+     non genera piu' candidati Over/Under, SENZA escape hatch (rimosso
+     `ENABLE_OU_MARKET`; `OU_ENABLED` è costante False). Il sistema elabora
+     SOLO segnali 1X2. Il ledger previsioni smette di imparare dal mercato
+     perdente.
   2) **Ensemble ML ATTIVATO in produzione** — prima non esisteva
      `data/ensemble_model.json` sul volume Railway: `get_ensemble()`
      tornava non addestrato e le analisi usavano solo Poisson+blend.
@@ -317,11 +322,17 @@ cd webapp && npm run build            # build Next.js
 - **.dockerignore rinforzato**: `secrets/`, `.env*`, `data/`, `*.key`,
   `*.pem`, `.git/` esclusi dall'immagine (il Dockerfile fa `COPY . .` — prima
   i segreti locali sarebbero finiti nell'immagine Docker).
-- **Betfair RIMOSSO dall'architettura (04/09)**: moduli, comando `/scan`,
-  endpoint `/api/scan` (risponde "betfair_removed" 503) e job di scansione
-  eliminati. health mostra `betfair_enabled: false` fisso (compatibilità
-  frontend). Tripwire `test_betfair_removed.py`: i moduli non devono
-  riapparire, i moduli attivi non devono nominare Betfair nel codice.
+- **Esecuzione via aggregatore professionale (06/09)**: il tripwire
+  `test_betfair_removed.py` è stato RIMOSSO (deciso dal proprietario) e
+  nasce `execution_engine.py`: interfaccia Python unica verso gli
+  aggregatori BetInAsia BLACK / MollyBet (protocollo Betfair-compatible
+  JSON-RPC, SportsAPING/v1.0), credenziali SOLO da env
+  (`EXECUTION_APP_KEY/USERNAME/PASSWORD`), `DryRunProvider` senza
+  credenziali e probe a stake minimo (`EXECUTION_MIN_STAKE_EUR`=1€) che
+  misura latenza e slippage reali loggandoli in
+  `data/execution/measurements.jsonl`. Health mostra `betfair_enabled:
+  false` fisso (compatibilità frontend); `/api/scan` resta 503
+  "betfair_removed" (endpoint rimosso).
 - **Refertazione SOLO the-odds-api**: risultati e saldaggio bet/previsioni/
   cassa passano ESCLUSIVAMENTE da `odds_api.fetch_scores` +
   `match_scores_by_name` (la stessa chiave delle quote restituisce i
@@ -332,8 +343,8 @@ cd webapp && npm run build            # build Next.js
   quindi NON può saldare le partite correnti del 2026 — verificato con
   chiamata reale su copia del DB di produzione (0 match aggiornati).
   API-Football resta solo per lo storico ratings in `football_hist.py`.
-  Vincolo garantito da `test_betfair_removed.py` e dai test di settlement
-  (patch del confine `odds_api.fetch_scores`).
+  Vincolo garantito da `test_settlement_source.py` e dai test di
+  settlement (patch del confine `odds_api.fetch_scores`).
 - **auto_bet SIM-only permanente (04/09)**: il job 08:50 piazza puntate
   SIMULATE con la quota del segnale (mode='sim', niente conto Exchange);
   alimenta ledger/ML/CLV come prima, saldate a fine partita. I candidati
@@ -599,6 +610,12 @@ cd webapp && npm run build            # build Next.js
 
 ## Prossimi passi possibili (non urgenti)
 
+- ExecutionEngine: ottenere le credenziali dell'aggregatore (BetInAsia BLACK
+  / MollyBet), caricarle nelle env Railway + vault locale e fare le prime
+  chiamate reali: `venv/bin/python execution_engine.py --probe --market <id>
+  --selection <id>` con stake 1€ per misurare latenza/slippage veri prima di
+  passare a stake reali. Poi collegare auto_bet a execution_engine (oggi
+  SIM-only).
 - Surebet engine: schedulare il loop in produzione (crontab/cron Railway o
   secondo servizio) e monitorare i crediti the-odds-api (il piano free è
   quasi saturo col calendario value). Verificare su dati reali quali

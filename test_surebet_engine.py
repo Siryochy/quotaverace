@@ -301,7 +301,6 @@ class TestIndipendenza:
                 assert node.module not in ("tracker", "bot", "auto_bet",
                                            "fixture_engine", "ml_ensemble"), \
                     f"surebet_engine non deve importare {node.module}"
-        assert "betfair" not in src.lower()  # vincolo tripwire
 
     def test_cache_dir_separata(self):
         assert "surebet" in str(se.CACHE_DIR)

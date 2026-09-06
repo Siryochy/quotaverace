@@ -46,14 +46,18 @@ ed è condiviso per costruzione.
 | `BANKROLL_DEFAULT` | opzionale | Bankroll di default (default `100.0`) |
 | `QUOTAVERACE_DATA_DIR` | opzionale | Directory dei dati persistenti (default `/app/data`). Su Railway punta al Volume montato; non usare `/app` |
 
-> ⚠️ **Betfair è stato RIMOSSO dall'architettura il 04/09**: nessuna
-> variabile `BETFAIR_*` è più necessaria e i relativi moduli non esistono.
+> ⚠️ **Il tripwire Betfair è stato rimosso il 06/09** (decisione del
+> proprietario): l'ESECUZIONE passa ora da un aggregatore professionale via
+> `execution_engine.py` (BetInAsia BLACK / MollyBet, protocollo
+> Betfair-compatible). Credenziali aggregatore SOLO da env
+> (`EXECUTION_APP_KEY`, `EXECUTION_USERNAME`, `EXECUTION_PASSWORD`).
 > **Refertazione risultati = the-odds-api** (`odds_api.fetch_scores`, la
 > stessa chiave delle quote restituisce i risultati finiti della stagione
 > corrente); quote/CLV = the-odds-api. API-Football serve SOLO allo storico
 > ratings 2022-2024 (`football_hist.py`): il piano free NON dà accesso alla
 > stagione corrente (verificato 04/09), quindi non può saldare le partite
-> del 2026. `auto_bet` è SIM-only.
+> del 2026. `auto_bet` è SIM-only (collegamento a execution_engine: in
+> programma).
 
 Questo è il **secondo servizio API non esiste più**: l'API è servita dallo
 stesso container del bot sulla porta `PORT` iniettata da Railway.
@@ -96,28 +100,39 @@ railway volume files list / --json
 
 ---
 
-## 1bis. (RIMOSSO 04/09) Integrazione Betfair
+## 1bis. Esecuzione via aggregatore (dal 06/09)
 
-Betfair è stato **escluso definitivamente dall'architettura il 04/09** per
-eliminare la dipendenza dall'account Exchange. Moduli rimossi:
-`betfair_client.py`, `daily_scanner.py`, `daily_scan_job.py`,
-`surebet_pipeline.py` (+ test dedicati). Comando `/scan` e endpoint
-`/api/scan` (risponde "betfair_removed") eliminati; health mostra
-`betfair_enabled: false` per compatibilità frontend.
+Il tripwire Betfair è stato rimosso il 06/09 (decisione del proprietario):
+l'esecuzione passa dagli **aggregatori professionali** per evitare
+limitazioni e ottimizzare le quote. Il modulo `execution_engine.py` espone
+un'unica interfaccia Python verso **BetInAsia BLACK / MollyBet** (protocollo
+Betfair-compatible JSON-RPC, SportsAPING/v1.0) con:
+- credenziali SOLO da env: `EXECUTION_APP_KEY`, `EXECUTION_USERNAME`,
+  `EXECUTION_PASSWORD` (mai hardcoded — vault locale + env Railway);
+- `DryRunProvider` di default (nessuna rete) quando mancano le credenziali;
+- probe a stake minimo (`EXECUTION_MIN_STAKE_EUR`, default 1€) che misura
+  latenza e slippage reali e li logga in `data/execution/measurements.jsonl`.
+
+Uso:
+```bash
+venv/bin/python execution_engine.py --status
+venv/bin/python execution_engine.py --probe --market <id> --selection <id>
+```
 
 Architettura attuale:
 - **Refertazione**: the-odds-api (`odds_api.fetch_scores` +
   `match_scores_by_name`) — risultati finiti della stagione corrente, 1
   credito per sport, aggancio ai match_id the-odds-api già in `matches`.
 - **Quote + CLV**: the-odds-api (`odds_api.py`).
-- **Puntate automatiche**: SIM-only (paper trading con la quota del segnale).
+- **Puntate automatiche**: SIM-only (paper trading) — collegamento a
+  `execution_engine` in programma dopo il collaudo con stake minimo.
 - **Storico ratings**: API-Football (`football_hist.py`, stagioni 2022-2024
   coperte dal piano free).
+- **Mercati**: SOLO 1X2 — OU2.5 escluso definitivamente (06/09, leak
+  sistematico, nessun escape hatch).
 
-> ⚠️ **Requisiti Betfair e setup certificato sono stati RIMOSSI il 04/09**
-> insieme all'integrazione: nessuna credenziale/certificato Exchange è più
-> necessaria. Le regole di stake (minimo 2.00 EUR, step 0.50) sono mantenute
-> in `auto_bet.normalize_stake` per coerenza con le dimensioni storiche.
+> ⚠️ Le regole di stake (minimo 2.00 EUR, step 0.50) sono mantenute in
+> `auto_bet.normalize_stake` per coerenza con le dimensioni storiche.
 
 ---
 
@@ -156,9 +171,11 @@ curl https://<vercel-url>/api/backend/api/health   # via proxy
   `Mounting volume on: ...` e `QuotaVerace Pro avviato.`.
 - **Rate limit**: il free plan di the-odds-api ha 500 req/mese; quello di
   API-Football 100 req/giorno. I job del bot sono già tarati per rientrare.
-- **Betfair (rimosso 04/09)**: nessuna chiamata Exchange — refertazione
-  esclusivamente the-odds-api (fetch_scores della stagione corrente),
-  quote/CLV the-odds-api, API-Football solo storico ratings 2022-2024.
+- **Esecuzione (dal 06/09)**: aggregatore via `execution_engine.py`
+  (BetInAsia BLACK / MollyBet), credenziali da env, probe 1€ per
+  latenza/slippage. Refertazione esclusivamente the-odds-api (fetch_scores
+  della stagione corrente), quote/CLV the-odds-api, API-Football solo
+  storico ratings 2022-2024.
 - **Long polling Telegram** funziona su Railway senza webhook; per webhook
   serve esporre una route HTTP dedicata.
 - Il file `.env` locale non viene deployato: configura le variabili nella

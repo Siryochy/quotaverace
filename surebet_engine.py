@@ -6,8 +6,9 @@ a 2 esiti (h2h / moneyline / testa a testa) via The Odds API.
 Vincoli architetturali (come da specifica):
 - NON condivide stato, database o risorse col bot Value Bet: cache, log e
   loop sono PROPRI (data/surebet/), nessun import da tracker.py/bot.py.
-- Solo The Odds API (vincolo tripwire: nessun riferimento al vecchio
-  scambio/exchange rimosso dall'architettura il 04/09).
+- Solo The Odds API (scansione quote). L'esecuzione degli ordini NON è
+  competenza di questo modulo: passa da execution_engine.py (aggregatore
+  BetInAsia BLACK / MollyBet, dal 06/09).
 - Sport: NBA (basketball_nba), MLB (baseball_mlb), Tennis (chiavi per torneo
   tennis_atp_*/tennis_wta_*, configurabili).
 - Mercati: SOLO h2h con 2 esiti (moneyline/testa a testa).

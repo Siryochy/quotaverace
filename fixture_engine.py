@@ -27,15 +27,14 @@ def _get_ensemble():
     except ImportError:
         return None
 
-DERIV_BIAS = 0.01  # bonus EV ai mercati derivati (Over/Under): soft book meno efficienti
-
-# MERCATO OU2.5: il backtest storico (12.909 partite, 05/09) ha mostrato un
-# LEAK SISTEMATICO sul mercato Over/Under (-6.8% ROI su 924 bet, sotto -7.3%).
-# Emergency 06/09: OU escluso dalle selezioni per fermare l'emorragia finche'
-# il leak non viene corretto. Per riattivarlo: ENABLE_OU_MARKET=1 (env).
-# Il ledger previsioni non registrera' piu' candidati OU finche' resta spento,
-# quindi il dataset ML smette di imparare dal mercato perdente.
-OU_ENABLED = os.getenv("ENABLE_OU_MARKET", "").lower() in ("1", "true", "yes", "on")
+# MERCATO OU2.5: ESCLUSO DEFINITIVAMENTE dalle selezioni (06/09).
+# Il backtest storico (12.909 partite) ha mostrato un leak sistematico
+# (-6.8% ROI su 924 bet, sotto -7.3%): il mercato non viene piu' elaborato,
+# niente escape hatch via env (decisione definitiva del proprietario).
+# Il sistema elabora SOLO segnali 1X2 (h2h). Le previsioni nel ledger non
+# registreranno piu' candidati OU: il dataset ML smette di imparare dal
+# mercato perdente.
+OU_ENABLED = False
 
 TEAM_MAP = {
     "inter milan": "Inter", "ac milan": "Milan", "man united": "Manchester United",
@@ -324,20 +323,18 @@ def _analyze_match(match_id, match, home_db, away_db, league):
     ensemble = _get_ensemble()
 
     candidates = []
-    # Emergency 06/09: OU2.5 escluso dalle selezioni (leak sistematico).
-    # Riaprire con ENABLE_OU_MARKET=1 quando il leak e' corretto.
-    _ou_cand = (("Over 2.5", p_over, market_tot, total_prices),) if OU_ENABLED else ()
+    # OU2.5 escluso DEFINITIVAMENTE (06/09): il sistema elabora solo 1X2.
+    # (Nessuna generazione di candidati Over/Under: leak sistematico.)
     for mkey, model_prob, market, prices in (
         ("1", p1, market_h2h, h2h_prices),
         ("X", px, market_h2h, h2h_prices),
         ("2", p2, market_h2h, h2h_prices),
-    ) + _ou_cand:
+    ):
         entry = prices.get(mkey)
         if not entry:
             continue
         price, display_esito, bookmaker = entry
         market_prob = market.get(mkey) if market else None
-        bias = DERIV_BIAS if mkey == "Over 2.5" else 0.0
         final_prob = adjusted_probability(model_prob, market_prob, price,
                                           league=league)
         ev = compute_ev(final_prob, price)
@@ -361,7 +358,7 @@ def _analyze_match(match_id, match, home_db, away_db, league):
                 ev = compute_ev(final_prob, price)
 
         candidates.append({
-            "score": ev + bias,
+            "score": ev,
             "ev": ev,
             "esito": display_esito,
             "quota": price,
@@ -479,9 +476,9 @@ def _analyze_match(match_id, match, home_db, away_db, league):
                   best["quota"], best["bookmaker"], status,
                   market_prob=best["market_prob"], market_edge=best["market_edge"])
 
-    # Ledger previsioni: registra OGNI segnale proposto (1X2, Over/Under e
-    # Asian Handicap) col suo stato, per la verifica a fine partita e la
-    # calibrazione del modello per mercato.
+    # Ledger previsioni: registra OGNI segnale proposto (1X2 e Asian
+    # Handicap — OU2.5 escluso definitivamente il 06/09) col suo stato, per
+    # la verifica a fine partita e la calibrazione del modello per mercato.
     try:
         for cand in candidates + ah_candidates:
             st = _candidate_status(cand)

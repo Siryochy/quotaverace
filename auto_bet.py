@@ -1,9 +1,12 @@
 """auto_bet.py — Puntate automatiche giornaliere (SIM-only permanente).
 
-DAL 04/09 l'architettura NON ha alcuna dipendenza dal Betfair Exchange: le
-puntate automatiche sono ESCLUSIVAMENTE simulazione (paper trading con la
-quota del segnale). Servono ad alimentare ledger, CLV e dataset ML con lo
-stesso flusso che prima piazzava ordini reali — ma senza conto Exchange.
+DAL 04/09 le puntate automatiche sono ESCLUSIVAMENTE simulazione (paper
+trading con la quota del segnale): servono ad alimentare ledger, CLV e
+dataset ML con lo stesso flusso che prima piazzava ordini reali — ma senza
+conto Exchange. Dal 06/09 l'esecuzione reale è in preparazione via
+aggregatore professionale (execution_engine.py, BetInAsia BLACK / MollyBet):
+il collegamento di auto_bet all'engine arriverà dopo il collaudo con stake
+minimo (probe latenza/slippage).
 
 Flusso del mattino (job 08:50 UTC, dopo analisi):
 

@@ -239,8 +239,9 @@ def _health_json(params=None):
     except Exception:
         quota = None
     creds = {"remaining": quota[0], "cache": quota[1]} if quota else None
-    # Dal 04/09 Betfair è stato RIMOSSO dall'architettura: la refertazione
-    # usa solo API-Football, le quote/CLV solo the-odds-api. Il flag
+    # Refertazione e quote/CLV: the-odds-api (API-Football solo storico
+    # ratings 2022-2024). Dal 06/09 l'ESECUZIONE passa dall'aggregatore
+    # (execution_engine.py, BetInAsia BLACK/MollyBet). Il flag
     # betfair_enabled resta per compatibilità col frontend, sempre False.
     return {"status": "ok", "api_football_key": bool(os.getenv("API_FOOTBALL_KEY")),
             "quota": creds, "betfair_enabled": False, "betfair": None}
@@ -616,15 +617,15 @@ def _market_signals_json(params=None):
 
 
 def _scan_json(params=None):
-    """Endpoint rimosso (04/09): Betfair non fa più parte dell'architettura.
-
-    La refertazione usa esclusivamente the-odds-api (fetch_scores) e le
-    quote/CLV idem: non esiste più un catalogo Exchange da esporre.
+    """Endpoint rimosso (04/09): lo scanner di catalogo Exchange non esiste
+    più. Dal 06/09 l'esecuzione passa dall'aggregatore via
+    execution_engine.py (BetInAsia BLACK / MollyBet, protocollo
+    Betfair-compatible); la refertazione resta the-odds-api.
     """
     return 503, {
         "error": "betfair_removed",
-        "message": "Betfair rimosso dall'architettura (04/09). "
-                   "Refertazione e quote/CLV: the-odds-api.",
+        "message": "Scanner Exchange rimosso. Esecuzione via aggregatore "
+                   "(execution_engine.py); refertazione: the-odds-api.",
     }
 
 

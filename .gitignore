@@ -25,3 +25,4 @@ data/bets_*.csv
 data/report_*.json
 data/confronto_correzioni.json
 data/surebet/
+data/execution/

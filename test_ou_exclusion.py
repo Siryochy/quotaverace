@@ -1,12 +1,15 @@
-"""Test esclusione mercato OU2.5 (emergency 06/09).
+"""Test esclusione DEFINITIVA del mercato OU2.5 (06/09).
 
 Il backtest storico (12.909 partite) ha mostrato un leak sistematico sul
-mercato Over/Under (ROI -6.8% su 924 bet, sotto -7.3%): il mercato OU e'
-stato ESCLUSO dalle selezioni finche' il leak non viene corretto.
-Comportamento atteso con OU_ENABLED=False (default):
-  - _analyze_match NON registra previsioni con mercato "OU" nel ledger;
-  - lo status e il miglior esito dipendono solo da 1X2.
-Con OU_ENABLED=True il comportamento storico (OU considerato) torna attivo.
+mercato Over/Under (ROI -6.8% su 924 bet, sotto -7.3%): il mercato OU2.5
+e' stato ESCLUSO PERMANENTEMENTE dalle selezioni, senza escape hatch via
+env. Il sistema elabora SOLO segnali 1X2 (h2h).
+
+Comportamento atteso:
+  - _analyze_match NON registra previsioni con mercato "OU" nel ledger
+    (neanche con env ENABLE_OU_MARKET=1: la variabile non esiste piu');
+  - lo status e il miglior esito dipendono solo da 1X2;
+  - OU_ENABLED e' costante False (nessun flag riconfigurabile).
 """
 
 import pytest
@@ -39,7 +42,8 @@ def _run(monkeypatch):
 
     is_sane viene forzato a passare (True, "OK") cosi' TUTTI i candidati
     finiscono nel ledger: il test verifica quali mercati vengono registrati,
-    non se i singoli segnali superano il filtro EV."""
+    non se i singoli segnali superano il filtro EV.
+    """
     monkeypatch.setattr("fixture_engine.expected_goals", lambda h, a: (1.9, 1.1))
     monkeypatch.setattr("fixture_engine.save_clv", lambda *a, **k: None)
     monkeypatch.setattr("fixture_engine.get_analysis_for_match", lambda m: None)
@@ -55,19 +59,18 @@ def _run(monkeypatch):
     return status, preds, saved
 
 
-class TestOuExcluso:
+class TestOuEsclusoDefinitivo:
     def test_nessuna_previsione_ou_nel_ledger(self, monkeypatch):
-        """Default (OU_ENABLED=False): nessun candidato OU viene registrato."""
-        monkeypatch.setattr(fixture_engine, "OU_ENABLED", False)
+        """Nessun candidato OU viene registrato: solo 1X2."""
         status, preds, _ = _run(monkeypatch)
         assert status in ("value", "strong_value", "no_value", "rejected")
         mercati = [a[1] for a, _ in preds]  # save_prediction(match, mercato, ...)
         assert "OU" not in mercati
         assert mercati, "devono esserci candidati 1X2"
+        assert all(m == "1X2" for m in mercati)
 
-    def test_esclusione_valida_con_ou_disabilitato(self, monkeypatch):
-        """OU_ENABLED=False con soli prezzi h2h: analisi regolare, no crash."""
-        monkeypatch.setattr(fixture_engine, "OU_ENABLED", False)
+    def test_esclusione_valida_con_soli_prezzi_h2h(self, monkeypatch):
+        """Senza prezzi totals: analisi regolare, nessun crash."""
         m = _match()
         m["bookmakers"][0]["markets"] = [mm for mm in m["bookmakers"][0]["markets"]
                                          if mm["key"] != "totals"]
@@ -81,31 +84,22 @@ class TestOuExcluso:
         assert status in ("value", "strong_value", "no_value", "rejected")
         assert all(a[1] == "1X2" for a, _ in preds)
 
-    def test_con_ou_abilitato_torna_il_mercato_ou(self, monkeypatch):
-        """OU_ENABLED=True: il mercato OU2.5 torna tra i candidati (back-compat)."""
-        monkeypatch.setattr(fixture_engine, "OU_ENABLED", True)
-        status, preds, _ = _run(monkeypatch)
-        assert status in ("value", "strong_value", "no_value", "rejected")
-        mercati = {a[1] for a, _ in preds}
-        assert "OU" in mercati
-
-
-class TestOuEnabledFlag:
-    def test_default_disabilitato(self):
-        """Senza env il mercato OU e' escluso (emergency attiva)."""
-        # il flag e' gia' stato letto all'import da os.getenv; il default
-        # del progetto e' spento (nessun ENABLE_OU_MARKET nel repo)
+    def test_flag_ou_costante_false(self):
+        """OU_ENABLED e' una costante False: nessuna riconfigurazione via env."""
         import os
-        val = os.getenv("ENABLE_OU_MARKET", "")
-        assert val == ""  # il repo non lo imposta: default = escluso
+        assert fixture_engine.OU_ENABLED is False
+        # la variabile env non esiste piu' nel repo: nessun escape hatch
+        assert os.getenv("ENABLE_OU_MARKET", "") == ""
 
-    def test_flag_letto_da_env(self, monkeypatch):
-        """Con ENABLE_OU_MARKET=1 il flag module-level diventa True."""
+    def test_env_non_riattiva_il_mercato(self, monkeypatch):
+        """Anche forzando ENABLE_OU_MARKET=1 il mercato OU resta spento."""
         monkeypatch.setenv("ENABLE_OU_MARKET", "1")
         import importlib
         importlib.reload(fixture_engine)
         try:
-            assert fixture_engine.OU_ENABLED is True
+            assert fixture_engine.OU_ENABLED is False  # costante, ignora env
+            status, preds, _ = _run(monkeypatch)
+            assert "OU" not in [a[1] for a, _ in preds]
         finally:
             monkeypatch.delenv("ENABLE_OU_MARKET", raising=False)
             importlib.reload(fixture_engine)
