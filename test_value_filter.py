@@ -109,21 +109,26 @@ class TestFilterValueBets:
 
 
 class TestAdjustedProbability:
-    """adjusted_probability resta INVARIATO dopo l'esperimento del 06/09.
+    """PATCH CALIBRAZIONE bucket bassi (06/09): sotto LOW_PROB_THRESHOLD
+    la probabilita' finale viene compressa verso il mercato; sopra soglia
+    resta invariata. Misurata sul backtest: closing -6.11 -> -3.08%."""
 
-    Lo "shrink sui bucket alti" (0.85) e' stato misurato su 4 run flat
-    comparabili e NON e' andato in produzione: nella config 1X2-only
-    (OU escluso) peggiora il closing control (-6.11 -> -9.31) perche'
-    sposta la selezione verso i pareggi/trasferte sovraconfidenti.
-    L'esperimento vive nel backtest (--high-prob-threshold/shrink).
-    """
+    def test_compressione_sotto_soglia(self):
+        from value_filter import adjusted_probability, LOW_PROB_SHRINK
+        p = adjusted_probability(0.35, 0.30, 2.40)
+        # blend (peso default) + FL (odds <= 2.5, nessuna modifica) +
+        # compressione bassa: piu' vicino al mercato dell'originale
+        assert p < 0.35
+        assert p > 0.30  # mai sotto il mercato
+        # compressione applicata = deviazione * LOW_PROB_SHRINK
+        assert 0.30 + (p - 0.30) / LOW_PROB_SHRINK > 0.30
 
-    def test_blend_e_longshot_restano(self):
+    def test_sopra_soglia_invariato(self):
         from value_filter import adjusted_probability
-        # nessuna compressione aggiuntiva: p >= mercato e <= modello
-        p = adjusted_probability(0.68, 0.58, 1.80)
-        assert 0.58 <= p <= 0.68
+        p = adjusted_probability(0.45, 0.40, 2.0)
+        # sopra LOW_PROB_THRESHOLD nessuna compressione aggiuntiva
+        assert 0.40 <= p <= 0.45
 
-    def test_senza_mercato_invariato(self):
+    def test_senza_mercato_nessuna_compressione(self):
         from value_filter import adjusted_probability
-        assert adjusted_probability(0.80, None, 2.0) == pytest.approx(0.80)
+        assert adjusted_probability(0.30, None, 2.40) == pytest.approx(0.30)

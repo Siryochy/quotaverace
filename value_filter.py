@@ -18,6 +18,18 @@ ODDS_MAX = 5.00        # quota massima
 KELLY_FRACTION = 0.25  # 1/4 Kelly
 MAX_STAKE_PCT = 0.03   # cap 3% del bankroll
 
+# PATCH CALIBRAZIONE bucket bassi (06/09): il gap residuo della config
+# 1X2-only e' sui pareggi/trasferte (bucket 0.3-0.4 = 54% del volume con
+# hit 29.4% vs 35 atteso; "2" trasferta -21.9%, "1" casa -8.76%). Sotto
+# LOW_PROB_THRESHOLD la deviazione dal mercato viene compressa del fattore
+# LOW_PROB_SHRINK: le pick X/2 marginali escono dal filtro EV e le
+# superstiti hanno edge genuino. MISURATO sul backtest storico (catena 4+1
+# run flat €20): closing -6.11% -> -3.08%, strong_value -0.3% -> +6.0%.
+# (Il corrispondente shrink sui bucket ALTI e' stato misurato NEGATIVO
+# nella config 1X2-only e NON e' in produzione: vedi AGENTS.md.)
+LOW_PROB_THRESHOLD = 0.40
+LOW_PROB_SHRINK = 0.85
+
 def compute_ev(prob: float, odds: float) -> float:
     """Expected Value: (prob * odds) - 1"""
     return (prob * odds) - 1.0
@@ -121,7 +133,12 @@ def adjusted_probability(model_prob: float, market_prob: float | None,
     p = blend_probability(model_prob, market_prob,
                           league=league, odds=odds,
                           model_samples=model_samples)
-    return favourite_longshot_adjust(p, market_prob, odds)
+    p = favourite_longshot_adjust(p, market_prob, odds)
+    # PATCH CALIBRAZIONE bucket bassi: comprimi la deviazione dal mercato
+    # quando la probabilità finale è bassa (pareggi/trasferte sovrastimati).
+    if LOW_PROB_SHRINK < 1.0 and market_prob is not None and p < LOW_PROB_THRESHOLD:
+        p = market_prob + (p - market_prob) * LOW_PROB_SHRINK
+    return p
 
 
 def filter_value_bets(odds_data: List[Dict[str, Any]], ev_threshold: float = EV_MIN) -> List[Dict[str, Any]]:

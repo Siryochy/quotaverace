@@ -185,12 +185,19 @@ cd webapp && npm run build            # build Next.js
      appena 7-9 bet — lo shrink non ha dove agire e comprimendo i
      favoriti ("1") sposta la selezione verso i pareggi/trasferte
      sovraconfidenti (bucket 0.3-0.4: 680 bet, hit 29.4% vs 35 atteso).
-     → `value_filter` e' stato RIPORTATO INVARIATO: lo shrink 0.85 NON
-     va in produzione. Il vero gap residuo della config 1X2-only e' il
-     bucket BASSO (X/2), non l'alto: il prossimo esperimento e' uno
-     shrink lato basso / draw-penalty piu' forte, non piu' shrink fine
-     sui favoriti. Nota: il vecchio report "closing -3,03%" del 05/09
-     era su codice precedente (pre-0c9c4bb) e NON e' confrontabile.
+     → `value_filter` NON ha ricevuto lo shrink alto. Il gap residuo
+     della config 1X2-only e' il bucket BASSO (X/2), non l'alto.
+  4) **PATCH CALIBRAZIONE bucket bassi (06/09, IN PRODUZIONE)** — in
+     `value_filter.adjusted_probability`: sotto LOW_PROB_THRESHOLD (0.40)
+     la deviazione dal mercato viene compressa del fattore LOW_PROB_SHRINK
+     (0.85). Misurata sul backtest (run flat €20 NO-OU): closing
+     **-6.11% -> -3.08%**, flat -6.20 -> -3.28, n_bets 1262 -> 694
+     (le pick X/2 marginali escono dal filtro EV), strong_value
+     -0.3% -> **+6.0%**, pocket X +2.6% -> +14.4%, "2" trasferta
+     -21.9% -> +22.1% (n=54, campione piccolo ma direzione coerente).
+     Nota: il vecchio report "closing -3,03%" del 05/09 era su codice
+     precedente (pre-0c9c4bb) e NON e' confrontabile; il baseline
+     confrontabile della config produzione e' il run flat NO-OU.
 - **Audit crediti the-odds-api + PROFILO SETTEMBRE SOTTO-BUDGET (05/09)**:
   misura live del 05/09 ~16:10 UTC → **239/500 usati, ~260 residui** per
   ~25 giorni (~10,3/giorno sostenibili). Il vincolo originale (~460/mese)

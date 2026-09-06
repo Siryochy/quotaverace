@@ -122,8 +122,21 @@ MAX_ODDS = 5.0
 #    marginali (edge 3-5pp) escono dal filtro, le superstiti hanno edge
 #    genuino -> il ROI a quota CLOSING (che misura l'edge informativo)
 #    dovrebbe risalire verso 0. Default: compressione moderata 0.85.
+#    ⚠️ 06/09: misurato su 4 run flat comparabili -> nella config 1X2-only
+#    (OU escluso) PEGGIORA (closing -6.11 -> -9.31): i bucket alti (0.6+)
+#    contengono appena 7-9 bet e lo shrink sposta la selezione verso i
+#    pareggi/trasferte sovraconfidenti. Tenuto DISATTIVATO in produzione.
 HIGH_PROB_THRESHOLD = 0.55
-HIGH_PROB_SHRINK = 0.85
+HIGH_PROB_SHRINK = 1.0     # 1.0 = neutro (esperimento concluso, esito negativo)
+# 6) SHRINK SUI BUCKET BASSI (06/09, patch calibrazione): il gap residuo
+#    della config 1X2-only e' sul BASSO: bucket 0.3-0.4 = 680 bet (54% del
+#    volume) con hit 29.4% vs 35 atteso; "2" trasferta -21.9% (81 bet),
+#    "1" casa -8.76% (801 bet). I pareggi X sono gia' il pocket positivo
+#    (+2.55%, draw-penalty). Sotto LOW_PROB_THRESHOLD la deviazione dal
+#    mercato viene compressa del fattore LOW_PROB_SHRINK: le pick marginali
+#    X/2 escono dal filtro, le superstiti hanno edge genuino.
+LOW_PROB_THRESHOLD = 0.40
+LOW_PROB_SHRINK = 0.85
 
 RETRAIN_EVERY = 1000      # retrain ensemble ogni N partite chiuse
 MAX_TRAIN_ROWS = 8000     # tetto righe di training per il retrain
@@ -429,12 +442,17 @@ def shrink_prob(p: float, market_prob: Optional[float], odds: float,
         f = shrink_factor_legacy(odds)
     p = market_prob + f * (p - market_prob)
     p = min(p, market_prob + MAX_EDGE)
-    # SHRINK SUI BUCKET ALTI (06/09): l'overconfidence cresce con la
-    # probabilita' -> sopra HIGH_PROB_THRESHOLD comprimi la deviazione dal
-    # mercato. Le pick con edge marginale escono dal filtro is_sane (EV e
-    # edge riscalcolati dal chiamante), le superstiti hanno edge genuino.
-    if p > HIGH_PROB_THRESHOLD:
+    # SHRINK SUI BUCKET ALTI (06/09, esperimento): l'overconfidence cresce
+    # con la probabilita' -> sopra HIGH_PROB_THRESHOLD comprimi la deviazione
+    # dal mercato. Default 1.0 = NEUTRO (esito negativo nella config
+    # 1X2-only, vedi costanti sopra).
+    if HIGH_PROB_SHRINK < 1.0 and p > HIGH_PROB_THRESHOLD:
         p = market_prob + (p - market_prob) * HIGH_PROB_SHRINK
+    # SHRINK SUI BUCKET BASSI (06/09, patch calibrazione): il gap residuo
+    # della config 1X2-only e' sui pareggi/trasferte (0.3-0.4 hit 29.4% vs
+    # 35 atteso) -> sotto LOW_PROB_THRESHOLD comprimi verso il mercato.
+    if LOW_PROB_SHRINK < 1.0 and p < LOW_PROB_THRESHOLD:
+        p = market_prob + (p - market_prob) * LOW_PROB_SHRINK
     return max(0.01, min(0.99, p))
 
 
@@ -1041,6 +1059,12 @@ def main(argv=None) -> int:
                          "(default 0.55; 0 = disattivo)")
     ap.add_argument("--high-prob-shrink", type=float, default=None,
                     help="Compressione della deviazione dal mercato sopra la "
+                         "soglia (default 1.0 = neutro)")
+    ap.add_argument("--low-prob-threshold", type=float, default=None,
+                    help="Soglia prob. per lo shrink sui bucket bassi "
+                         "(default 0.40; 0 = disattivo)")
+    ap.add_argument("--low-prob-shrink", type=float, default=None,
+                    help="Compressione della deviazione dal mercato sotto la "
                          "soglia (default 0.85; 1.0 = nessuna compressione)")
     ap.add_argument("--json", action="store_true",
                     help="Stampa solo il JSON del report")
@@ -1051,6 +1075,7 @@ def main(argv=None) -> int:
     global SHRINK_LONG_SHOT, SHRINK_ODDS_MIN, MAX_EDGE, DRAW_PENALTY
     global MAX_ODDS, SHRINK_FAVORITE, SHRINK_FAV_ODDS_LOW, SHRINK_OU_ONLY
     global HIGH_PROB_THRESHOLD, HIGH_PROB_SHRINK
+    global LOW_PROB_THRESHOLD, LOW_PROB_SHRINK
     if args.shrink is not None:
         SHRINK_LONG_SHOT = args.shrink
     if args.shrink_odds_min is not None:
@@ -1071,6 +1096,10 @@ def main(argv=None) -> int:
         HIGH_PROB_THRESHOLD = args.high_prob_threshold
     if args.high_prob_shrink is not None:
         HIGH_PROB_SHRINK = args.high_prob_shrink
+    if args.low_prob_threshold is not None:
+        LOW_PROB_THRESHOLD = args.low_prob_threshold
+    if args.low_prob_shrink is not None:
+        LOW_PROB_SHRINK = args.low_prob_shrink
     print(f"⚙️  Anti-overconfidence: shrink asimmetrico "
           f"(longshot {SHRINK_LONG_SHOT:.2f} sopra quota {SHRINK_ODDS_MIN:.1f}, "
           f"favoriti {SHRINK_FAVORITE:.2f} sotto quota {SHRINK_ODDS_MIN:.1f}"
