@@ -29,6 +29,14 @@ def _get_ensemble():
 
 DERIV_BIAS = 0.01  # bonus EV ai mercati derivati (Over/Under): soft book meno efficienti
 
+# MERCATO OU2.5: il backtest storico (12.909 partite, 05/09) ha mostrato un
+# LEAK SISTEMATICO sul mercato Over/Under (-6.8% ROI su 924 bet, sotto -7.3%).
+# Emergency 06/09: OU escluso dalle selezioni per fermare l'emorragia finche'
+# il leak non viene corretto. Per riattivarlo: ENABLE_OU_MARKET=1 (env).
+# Il ledger previsioni non registrera' piu' candidati OU finche' resta spento,
+# quindi il dataset ML smette di imparare dal mercato perdente.
+OU_ENABLED = os.getenv("ENABLE_OU_MARKET", "").lower() in ("1", "true", "yes", "on")
+
 TEAM_MAP = {
     "inter milan": "Inter", "ac milan": "Milan", "man united": "Manchester United",
     "man utd": "Manchester United", "man city": "Manchester City",
@@ -316,12 +324,14 @@ def _analyze_match(match_id, match, home_db, away_db, league):
     ensemble = _get_ensemble()
 
     candidates = []
+    # Emergency 06/09: OU2.5 escluso dalle selezioni (leak sistematico).
+    # Riaprire con ENABLE_OU_MARKET=1 quando il leak e' corretto.
+    _ou_cand = (("Over 2.5", p_over, market_tot, total_prices),) if OU_ENABLED else ()
     for mkey, model_prob, market, prices in (
         ("1", p1, market_h2h, h2h_prices),
         ("X", px, market_h2h, h2h_prices),
         ("2", p2, market_h2h, h2h_prices),
-        ("Over 2.5", p_over, market_tot, total_prices),
-    ):
+    ) + _ou_cand:
         entry = prices.get(mkey)
         if not entry:
             continue

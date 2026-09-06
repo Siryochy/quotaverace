@@ -147,8 +147,50 @@ cd webapp && npm run build            # build Next.js
 - Il token va rinnovato quando scade o dopo l'esposizione in chat (flusso:
   fine-grained PAT → Contents RW → va nel VAULT, non più nel `.env`).
 
-## Stato attuale (aggiornato al 05/09/2026)
+## Stato attuale (aggiornato al 06/09/2026)
 
+- **Correzioni ML post-diagnostica (06/09)** — il report sul backtest
+  storico (12.909 partite) mostrava: ROI -2,52% flat, controllo a quota
+  CLOSING -3,03% (la selezione NON batte il mercato devigato),
+  overconfidence crescente sui bucket alti (0.5-0.6: hit 49% vs 55 atteso;
+  0.6-0.7: 56% vs 65; 0.7-1.0: 67% vs 85), CLV vig-free negativo ovunque
+  e leak sistematico sull'OU2.5 (-6,8% su 924 bet, under -7,3%). Tre
+  azioni eseguite (commit in corso):
+  1) **OU2.5 ESCLUSO dalle selezioni (emergency, in produzione)** — `fixture_engine`
+     non genera piu' candidati Over/Under (env `ENABLE_OU_MARKET=1` per
+     riattivare quando il leak sara' corretto). Il ledger previsioni
+     smette di imparare dal mercato perdente. In produzione il bottone
+     value resta 1X2-only finche' non si ristudia il mercato OU.
+  2) **Ensemble ML ATTIVATO in produzione** — prima non esisteva
+     `data/ensemble_model.json` sul volume Railway: `get_ensemble()`
+     tornava non addestrato e le analisi usavano solo Poisson+blend.
+     Aggiunto `ml_ensemble.reset_ensemble_cache()` + job schedulato
+     `retrain_ensemble_job` (bot.py, 05:45 UTC): addestra dal ledger
+     live (`build_training_rows`, zero API) e salva il modello sul
+     volume se il dataset supera MIN_SAMPLES=30 (oggi ~40 righe chiuse:
+     il file viene creato al primo giro / primo retrain manuale).
+  3) **Shrink sui bucket alti (esperimento, NON in produzione)** — in
+     `historical_backtest` (harness di ricerca, flag
+     `--high-prob-threshold/--high-prob-shrink`): sopra soglia 0.55 la
+     deviazione dal mercato viene compressa del fattore 0.85.
+     **Esito misurato (catena di 4 run flat €20 comparabili, 06/09):**
+     - baseline OU ON: n=6274, flat -7,99%, closing **-8,32%**;
+     - shrink .85 OU ON: n=5297, flat -6,17%, closing -6,62% (aiuta
+       col mercato OU attivo: taglia le pick OU marginali, il leak);
+     - baseline NO-OU (**config produzione dopo Punto 3**): n=1262,
+       flat -6,20%, closing **-6,11%**;
+     - shrink .85 NO-OU: n=1305, flat -9,28%, closing **-9,31%**
+       (**PEGGIORA**).
+     Perche': nella config 1X2-only i bucket alti (0.6+) contengono
+     appena 7-9 bet — lo shrink non ha dove agire e comprimendo i
+     favoriti ("1") sposta la selezione verso i pareggi/trasferte
+     sovraconfidenti (bucket 0.3-0.4: 680 bet, hit 29.4% vs 35 atteso).
+     → `value_filter` e' stato RIPORTATO INVARIATO: lo shrink 0.85 NON
+     va in produzione. Il vero gap residuo della config 1X2-only e' il
+     bucket BASSO (X/2), non l'alto: il prossimo esperimento e' uno
+     shrink lato basso / draw-penalty piu' forte, non piu' shrink fine
+     sui favoriti. Nota: il vecchio report "closing -3,03%" del 05/09
+     era su codice precedente (pre-0c9c4bb) e NON e' confrontabile.
 - **Audit crediti the-odds-api + PROFILO SETTEMBRE SOTTO-BUDGET (05/09)**:
   misura live del 05/09 ~16:10 UTC → **239/500 usati, ~260 residui** per
   ~25 giorni (~10,3/giorno sostenibili). Il vincolo originale (~460/mese)

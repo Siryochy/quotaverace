@@ -216,5 +216,66 @@ def test_train_ensemble_con_lista():
     assert metrics.get("status") == "trained"
 
 
+# --- reset_ensemble_cache e job di retrain schedulato (attivazione in prod) ---
+
+import asyncio
+
+
+def test_reset_ensemble_cache_azzera_il_singleton():
+    """reset_ensemble_cache() forza la ricarica da disco alla prossima
+    get_ensemble(): necessario dopo un retrain esterno, altrimenti il
+    processo continuerebbe a usare il vecchio modello (o nessuno)."""
+    import ml_ensemble
+    before = ml_ensemble._ensemble
+    e1 = ml_ensemble.get_ensemble()
+    assert e1 is ml_ensemble.get_ensemble()  # singleton
+    ml_ensemble.reset_ensemble_cache()
+    e2 = ml_ensemble.get_ensemble()
+    assert e2 is not e1
+    # ripristina lo stato per non sporcare gli altri test
+    ml_ensemble.reset_ensemble_cache()
+    ml_ensemble._ensemble = before
+
+
+def test_retrain_ensemble_job_addestra_e_azzera_cache(monkeypatch):
+    """Il job schedulato: con dataset maturo addestra, azzera la cache e
+    NON solleva eccezioni (context puo' essere None: e' un job 'fire' )."""
+    from bot import retrain_ensemble_job
+    import ml_ensemble
+    calls = []
+    monkeypatch.setattr(ml_ensemble, "train_ensemble",
+                        lambda: {"status": "trained", "n_samples": 50,
+                                 "brier_score": 0.24, "accuracy": 0.6,
+                                 "model_type": "xgboost"})
+    monkeypatch.setattr(ml_ensemble, "reset_ensemble_cache",
+                        lambda: calls.append("reset"))
+    asyncio.run(retrain_ensemble_job(None))
+    assert calls == ["reset"]
+
+
+def test_retrain_ensemble_job_dataset_insufficiente(monkeypatch):
+    """Dataset troppo piccolo: esce senza effetti (niente reset, niente
+    crash) e logga INFO."""
+    from bot import retrain_ensemble_job
+    import ml_ensemble
+    calls = []
+    monkeypatch.setattr(ml_ensemble, "train_ensemble",
+                        lambda: {"status": "insufficient_data", "n": 5})
+    monkeypatch.setattr(ml_ensemble, "reset_ensemble_cache",
+                        lambda: calls.append("reset"))
+    asyncio.run(retrain_ensemble_job(None))
+    assert calls == []
+
+
+def test_retrain_ensemble_job_errore_non_crash(monkeypatch):
+    """Un errore nel training non deve far crashare il job (fail-safe)."""
+    from bot import retrain_ensemble_job
+    import ml_ensemble
+    def boom():
+        raise RuntimeError("xgb failure")
+    monkeypatch.setattr(ml_ensemble, "train_ensemble", boom)
+    asyncio.run(retrain_ensemble_job(None))  # non solleva
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

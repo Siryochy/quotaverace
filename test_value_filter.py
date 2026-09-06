@@ -106,3 +106,24 @@ class TestFilterValueBets:
     def test_lista_vuota_se_nessun_match(self):
         result = filter_value_bets([], ev_threshold=0.05)
         assert result == []
+
+
+class TestAdjustedProbability:
+    """adjusted_probability resta INVARIATO dopo l'esperimento del 06/09.
+
+    Lo "shrink sui bucket alti" (0.85) e' stato misurato su 4 run flat
+    comparabili e NON e' andato in produzione: nella config 1X2-only
+    (OU escluso) peggiora il closing control (-6.11 -> -9.31) perche'
+    sposta la selezione verso i pareggi/trasferte sovraconfidenti.
+    L'esperimento vive nel backtest (--high-prob-threshold/shrink).
+    """
+
+    def test_blend_e_longshot_restano(self):
+        from value_filter import adjusted_probability
+        # nessuna compressione aggiuntiva: p >= mercato e <= modello
+        p = adjusted_probability(0.68, 0.58, 1.80)
+        assert 0.58 <= p <= 0.68
+
+    def test_senza_mercato_invariato(self):
+        from value_filter import adjusted_probability
+        assert adjusted_probability(0.80, None, 2.0) == pytest.approx(0.80)

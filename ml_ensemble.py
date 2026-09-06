@@ -531,6 +531,19 @@ def get_ensemble() -> EnsemblePredictor:
     return _ensemble
 
 
+def reset_ensemble_cache() -> None:
+    """Azzera il singleton: la prossima get_ensemble() ricarica da disco.
+
+    Necessario dopo un retrain esterno (es. job schedulato in bot.py):
+    il processo in esecuzione tiene in memoria il vecchio modello e senza
+    questo reset continuerebbe a predire con quello obsoleto (e se non era
+    mai stato addestrato, resterebbe spento anche dopo la creazione del
+    file sul volume).
+    """
+    global _ensemble
+    _ensemble = None
+
+
 def predict_ensemble(row: Dict) -> Dict:
     """Shortcut: predice usando l'ensemble globale."""
     return get_ensemble().predict(row)

@@ -1239,6 +1239,39 @@ async def settlement_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
     for alert in sanity:
         await _send_report_to_recipients(context, alert)
 
+async def retrain_ensemble_job(context: ContextTypes.DEFAULT_TYPE = None):
+    """Addestra e salva l'ensemble ML sul volume dal ledger live (daily).
+
+    Attiva il ML in produzione: build_training_rows() legge predictions+bets
+    chiuse dal DB (zero chiamate API), e se il dataset supera MIN_SAMPLES
+    addestra XGBoost (o Logistic fallback) e salva data/ensemble_model.json
+    sul volume. Prima di questo job il modello non esisteva in produzione:
+    get_ensemble() restituiva un ensemble NON addestrato e le analisi usavano
+    solo Poisson+blend (ml_available=False). Dopo il retrain azzera la cache
+    del singleton cosi' la prossima analisi carica il modello nuovo.
+
+    Se il dataset e' ancora troppo piccolo esce senza effetti (log INFO).
+    """
+    try:
+        from ml_ensemble import train_ensemble, reset_ensemble_cache, MIN_SAMPLES
+        metrics = train_ensemble()
+        status = metrics.get("status")
+        if status == "trained":
+            reset_ensemble_cache()
+            logger.info(
+                "Ensemble ML riaddestrato e salvato: n=%s, brier=%.4f, "
+                "acc=%.3f, type=%s", metrics.get("n_samples"),
+                metrics.get("brier_score", 0.0), metrics.get("accuracy", 0.0),
+                metrics.get("model_type"))
+        elif status == "insufficient_data":
+            logger.info("Ensemble ML: dataset insufficiente (%s/%s righe), "
+                        "riprovo al prossimo giro", metrics.get("n"), MIN_SAMPLES)
+        else:
+            logger.warning("Ensemble ML retrain: %s", metrics)
+    except Exception as e:
+        logger.warning("Retrain ensemble fallito: %s", e)
+
+
 async def _send_report_to_recipients(context, text: str):
     """Invia il messaggio agli iscritti + sempre ai chat ADMIN_CHAT_ID."""
     chat_ids = set(get_subscribers())
@@ -1412,6 +1445,11 @@ def main() -> None:
         job_queue.run_daily(auto_bet_job, time=time(hour=8, minute=50 - IT_OFFSET))
         job_queue.run_daily(backup_data_job, time=time(hour=3, minute=30))
         job_queue.run_once(backup_data_job, when=10)  # snapshot di base all'avvio
+        # Retrain ensemble ML dal ledger live (05:45 UTC): se il dataset e'
+        # maturo crea/aggiorna data/ensemble_model.json sul volume (senza
+        # questo job il ML resterebbe spento in produzione: nessun file, 
+        # nessuna predizione ensemble). Poi azzera la cache del singleton.
+        job_queue.run_daily(retrain_ensemble_job, time=time(hour=5, minute=45))
         # Piano free: riceve gli stessi segnali con 3 ore di ritardo.
         job_queue.run_daily(free_delayed_job, time=time(hour=17 - IT_OFFSET, minute=0))
         # Alert RLM real-time: ogni 5 minuti dalle 14:00 alle 23:50 ITA
@@ -1425,7 +1463,7 @@ def main() -> None:
                     "08:30 sync / 08:50 auto-bet (SIM) / 14:00 pomeriggio / "
                     "14:00-23:50 RLM alert (5') / 17:00 free / 20:00 sera / "
                     "21:30 risultati / 21:00-23:50 EOD (ogni 15') / "
-                    "watchdog settlement (ogni 4h)")
+                    "watchdog settlement (ogni 4h) / 05:45 retrain ensemble ML")
     else: logger.warning("JobQueue non disponibile")
     logger.info("QuotaVerace Pro avviato.")
     application.run_polling()

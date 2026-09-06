@@ -114,6 +114,16 @@ DRAW_PENALTY = 0.80
 # 4) MAX ODDS: hard cap opzionale (--max-odds) per escludere i longshot
 #    estremi; default 5.0 = nessun taglio ulteriore oltre al filtro base.
 MAX_ODDS = 5.0
+# 5) SHRINK SUI BUCKET ALTI (06/09, esperimento calibrazione): la diagnostica
+#    del 05/09 mostra overconfidence crescente con la probabilità (0.5-0.6:
+#    hit 49.3 vs 55 atteso; 0.6-0.7: 56.1 vs 65; 0.7-1.0: 66.7 vs 85).
+#    Quando la probabilità finale supera HIGH_PROB_THRESHOLD, la deviazione
+#    dal mercato viene compressa del fattore HIGH_PROB_SHRINK: le pick
+#    marginali (edge 3-5pp) escono dal filtro, le superstiti hanno edge
+#    genuino -> il ROI a quota CLOSING (che misura l'edge informativo)
+#    dovrebbe risalire verso 0. Default: compressione moderata 0.85.
+HIGH_PROB_THRESHOLD = 0.55
+HIGH_PROB_SHRINK = 0.85
 
 RETRAIN_EVERY = 1000      # retrain ensemble ogni N partite chiuse
 MAX_TRAIN_ROWS = 8000     # tetto righe di training per il retrain
@@ -419,6 +429,12 @@ def shrink_prob(p: float, market_prob: Optional[float], odds: float,
         f = shrink_factor_legacy(odds)
     p = market_prob + f * (p - market_prob)
     p = min(p, market_prob + MAX_EDGE)
+    # SHRINK SUI BUCKET ALTI (06/09): l'overconfidence cresce con la
+    # probabilita' -> sopra HIGH_PROB_THRESHOLD comprimi la deviazione dal
+    # mercato. Le pick con edge marginale escono dal filtro is_sane (EV e
+    # edge riscalcolati dal chiamante), le superstiti hanno edge genuino.
+    if p > HIGH_PROB_THRESHOLD:
+        p = market_prob + (p - market_prob) * HIGH_PROB_SHRINK
     return max(0.01, min(0.99, p))
 
 
@@ -1020,6 +1036,12 @@ def main(argv=None) -> int:
                     help="Sotto-peso dei pareggi (default 0.80)")
     ap.add_argument("--max-odds", type=float, default=None,
                     help="Quota massima accettata (default 5.0)")
+    ap.add_argument("--high-prob-threshold", type=float, default=None,
+                    help="Soglia prob. per lo shrink sui bucket alti "
+                         "(default 0.55; 0 = disattivo)")
+    ap.add_argument("--high-prob-shrink", type=float, default=None,
+                    help="Compressione della deviazione dal mercato sopra la "
+                         "soglia (default 0.85; 1.0 = nessuna compressione)")
     ap.add_argument("--json", action="store_true",
                     help="Stampa solo il JSON del report")
     ap.add_argument("--save", action="store_true",
@@ -1028,6 +1050,7 @@ def main(argv=None) -> int:
 
     global SHRINK_LONG_SHOT, SHRINK_ODDS_MIN, MAX_EDGE, DRAW_PENALTY
     global MAX_ODDS, SHRINK_FAVORITE, SHRINK_FAV_ODDS_LOW, SHRINK_OU_ONLY
+    global HIGH_PROB_THRESHOLD, HIGH_PROB_SHRINK
     if args.shrink is not None:
         SHRINK_LONG_SHOT = args.shrink
     if args.shrink_odds_min is not None:
@@ -1044,6 +1067,10 @@ def main(argv=None) -> int:
         DRAW_PENALTY = args.draw_penalty
     if args.max_odds is not None:
         MAX_ODDS = args.max_odds
+    if args.high_prob_threshold is not None:
+        HIGH_PROB_THRESHOLD = args.high_prob_threshold
+    if args.high_prob_shrink is not None:
+        HIGH_PROB_SHRINK = args.high_prob_shrink
     print(f"⚙️  Anti-overconfidence: shrink asimmetrico "
           f"(longshot {SHRINK_LONG_SHOT:.2f} sopra quota {SHRINK_ODDS_MIN:.1f}, "
           f"favoriti {SHRINK_FAVORITE:.2f} sotto quota {SHRINK_ODDS_MIN:.1f}"

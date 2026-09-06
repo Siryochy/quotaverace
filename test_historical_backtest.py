@@ -148,10 +148,73 @@ class TestShrinkEstesoFavoriti:
                                 mercato="MATCH_ODDS")
             # l'OU viene shrinkato verso il mercato, il 1X2 no
             assert p_ou < p_1x2 - 1e-6
-            assert p_1x2 == pytest.approx(0.60)  # nessuno shrink (f=1.0)
+            # il 1X2 resta col fattore legacy 1.0 ma passa comunque dallo
+            # shrink sui bucket alti (06/09): 0.50 + 0.10*HIGH_PROB_SHRINK
+            assert p_1x2 == pytest.approx(0.50 + 0.10 * hb.HIGH_PROB_SHRINK)
         finally:
             hb.SHRINK_FAVORITE = old_fav
             hb.SHRINK_OU_ONLY = old_only
+
+
+# ---------------------------------------------------------------------------
+# Shrink sui bucket alti (06/09): overconfidence crescente con la prob.
+# ---------------------------------------------------------------------------
+
+class TestShrinkBucketAlti:
+    """Sopra HIGH_PROB_THRESHOLD la deviazione dal mercato viene compressa
+    del fattore HIGH_PROB_SHRINK; sotto soglia nessuna modifica."""
+
+    def test_compressione_sopra_soglia(self):
+        """p=0.65, mercato 0.55: risultato = 0.55 + 0.10*0.85 = 0.635."""
+        p = shrink_prob(0.65, market_prob=0.55, odds=2.0)
+        assert p == pytest.approx(0.55 + (0.65 - 0.55) * hb.HIGH_PROB_SHRINK)
+        assert 0.55 < p < 0.65  # compresso verso il mercato, mai sotto
+
+    def test_nessuna_modifica_sotto_soglia(self):
+        """p sotto HIGH_PROB_THRESHOLD: invariato (solo shrink per odds, qui 1.0)."""
+        p = shrink_prob(0.50, market_prob=0.45, odds=2.0)
+        assert p == pytest.approx(0.50)
+
+    def test_compressione_scatta_solo_sopra_soglia(self):
+        """Sotto HIGH_PROB_THRESHOLD la prob resta invariata (cap edge
+        escluso), sopra soglia viene compressa verso il mercato."""
+        p_low = shrink_prob(0.54, market_prob=0.50, odds=2.0)
+        p_high = shrink_prob(0.60, market_prob=0.50, odds=2.0)
+        assert p_low == pytest.approx(0.54)                       # invariato
+        # 0.50 + 0.10 * 0.85 = 0.585 (cap edge a 0.60 non vincola qui)
+        assert p_high == pytest.approx(0.50 + 0.10 * hb.HIGH_PROB_SHRINK)
+
+    def test_cap_edge_poi_compressione(self):
+        """L'ordine e': cap edge (0.10) PRIMA della compressione bucket alti:
+        p=0.80 con mercato 0.50 viene prima tagliata a 0.60, poi compressa."""
+        p = shrink_prob(0.80, market_prob=0.50, odds=2.0)
+        assert p == pytest.approx(0.50 + 0.10 * hb.HIGH_PROB_SHRINK)
+
+    def test_market_none_nessuna_compressione(self):
+        """Senza riferimento di mercato non c'e' ancoraggio: resta p."""
+        p = shrink_prob(0.80, market_prob=None, odds=2.0)
+        assert p == pytest.approx(0.80)
+
+    def test_threshold_0_disattiva(self):
+        """HIGH_PROB_THRESHOLD=0 (disattivo): nessuna compressione."""
+        old_t = hb.HIGH_PROB_THRESHOLD
+        hb.HIGH_PROB_THRESHOLD = 0.0
+        try:
+            p = shrink_prob(0.80, market_prob=0.50, odds=2.0)
+            assert p >= 0.50  # nessuna compressione aggiuntiva
+        finally:
+            hb.HIGH_PROB_THRESHOLD = old_t
+
+    def test_shrink_1_0_neutro(self):
+        """HIGH_PROB_SHRINK=1.0 = nessuna compressione."""
+        old_s = hb.HIGH_PROB_SHRINK
+        hb.HIGH_PROB_SHRINK = 1.0
+        try:
+            p = shrink_prob(0.70, market_prob=0.55, odds=2.0)
+            # senza compressione resta il valore shrinkato (cap edge incluso)
+            assert p == pytest.approx(min(0.70, 0.55 + hb.MAX_EDGE))
+        finally:
+            hb.HIGH_PROB_SHRINK = old_s
 
 
 # ---------------------------------------------------------------------------
