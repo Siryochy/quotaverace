@@ -234,6 +234,26 @@ class TestLiveBankroll:
         # cassa vuota -> default 100.0
         assert calls["bankroll"] == pytest.approx(100.0)
 
+    def test_esposizione_gia_piazzata_blocca_nuovi_ordini(self, monkeypatch,
+                                                          temp_db):
+        """24/7: se il budget di esposizione del giorno e' gia' consumato
+        dai giri precedenti (already_placed >= cap), il nuovo giro non
+        piazza nulla (fail-closed)."""
+        import adaptive_staking
+        _seed_value_match(mid="e1", home="Osasuna", away="Getafe", quota=2.20)
+        _seed_value_match(mid="e2", home="Bari", away="Crotone", quota=2.20)
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 12.28)
+        monkeypatch.setattr(
+            adaptive_staking, "adaptive_stake",
+            lambda **kw: {"stake": 2.0, "reason": "test"})
+        # cap 40% di 12.28 = 4.91 < gia' piazzato 6.0 -> budget esaurito
+        monkeypatch.setattr(auto_bet, "_today_placed_stake", lambda: 6.0)
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert placed == []
+        assert tracker.get_bets() == []
+
     def test_stake_matched_usato_se_diverso(self, monkeypatch, temp_db):
         """Rippegno parziale: si registra lo stake/prezzo EFFETTIVAMENTE
         riempiti (non il richiesto)."""

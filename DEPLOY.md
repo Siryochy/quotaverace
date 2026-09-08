@@ -223,6 +223,11 @@ Architettura attuale:
 > (0.40), `STAKE_CAP_PCT` (0.10 value), `STAKE_CAP_PCT_STRONG` (0.25
 > strong_value), `STAKE_MIN_EUR` (1.0 = minimo ordine SX), `STAKE_STEP_EUR`
 > (0.01). Giro immediato: `/autobet now` (Telegram, admin).
+>
+> 🕐 **Auto-bet 24/7** (08/09): il giro puntate gira ogni 3h da 08:50 ITA
+> (non più una sola volta al giorno). Cap esposizione totale giornaliero
+> multi-giro: `auto_bet._today_placed_stake` sottrae l'esposizione già
+> piazzata dai giri precedenti.
 
 ---
 

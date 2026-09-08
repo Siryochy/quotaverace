@@ -1420,11 +1420,15 @@ async def report_morning_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
-    """08:50: piazza le puntate del giorno (SIM-only dal 04/09).
+    """Giro puntate automatiche (08:50 ITA + ogni 3h, 24/7 dal 08/09).
 
-    Nessun conto Exchange: puntate simulate con la quota del segnale
-    (paper trading), registrate in `bets` e saldate a fine partita come
-    sempre — alimentano ledger, CLV e dataset ML.
+    SIM di default (paper trading con la quota del segnale, registrate in
+    `bets` e saldate a fine partita) oppure LIVE se AUTO_BET_MODE=live e
+    provider reale configurato (ordini SX reali con staking dinamico sul
+    saldo del wallet). Gira piu' volte al giorno: i nuovi segnali value
+    delle analisi (04:00/12:00/18:00 UTC) vengono scommessi entro 3h;
+    UNIQUE(match_id, esito) evita doppioni e il cap esposizione e'
+    giornaliero (sottrae l'esposizione dei giri precedenti).
     """
     loop = asyncio.get_running_loop()
     try:
@@ -1557,7 +1561,16 @@ def main() -> None:
                                 first=time(hour=21 - IT_OFFSET, minute=0))
         job_queue.run_daily(report_morning_job, time=time(hour=6, minute=5 - IT_OFFSET))
         job_queue.run_daily(history_sync_job, time=time(hour=8, minute=30 - IT_OFFSET))
-        job_queue.run_daily(auto_bet_job, time=time(hour=8, minute=50 - IT_OFFSET))
+        # Auto-bet 24/7 (08/09): giro ogni 3h a partire dalle 08:50 ITA
+        # (08:50, 11:50, 14:50, ...) — i segnali value/strong_value nuovi
+        # (analisi 04:00/12:00/18:00 UTC, finestra candidati mobile 24h)
+        # vengono scommessi entro 3h, giorno e notte. Sicuro: UNIQUE
+        # (match_id, esito) impedisce doppioni e la guardia 15 min evita
+        # ordini a partita iniziata. Il cap esposizione TOTALE resta
+        # giornaliero (sottrae l'esposizione gia' piazzata nei giri
+        # precedenti, vedi auto_bet._today_placed_stake).
+        job_queue.run_repeating(auto_bet_job, interval=3 * 3600,
+                                first=time(hour=8, minute=50 - IT_OFFSET))
         job_queue.run_daily(backup_data_job, time=time(hour=3, minute=30))
         job_queue.run_once(backup_data_job, when=10)  # snapshot di base all'avvio
         # Retrain ensemble ML dal ledger live (05:45 UTC): se il dataset e'
@@ -1575,7 +1588,7 @@ def main() -> None:
         except ImportError:
             logger.warning("rlm_alert non disponibile, alert RLM disabilitato")
         logger.info("Job Pro schedulati (ora italiana): 03:30 backup / 06:05 riepilogo ieri / "
-                    "08:30 sync / 08:50 auto-bet (SIM) / 14:00 pomeriggio / "
+                    "08:30 sync / auto-bet 24/7 (ogni 3h da 08:50) / 14:00 pomeriggio / "
                     "14:00-23:50 RLM alert (5') / 17:00 free / 20:00 sera / "
                     "21:30 risultati / 21:00-23:50 EOD (ogni 15') / "
                     "watchdog settlement (ogni 4h) / 05:45 retrain ensemble ML")

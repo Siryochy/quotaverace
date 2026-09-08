@@ -219,6 +219,35 @@ class TestTotalExposureCap:
         out = auto_bet.apply_total_exposure_cap(cands, bankroll=100.0)
         assert out == cands and not cands[0].get("total_cap")
 
+    def test_cap_sottrae_esposizione_gia_piazzata(self):
+        """24/7: il cap totale e' RIMANENTE — conta anche le puntate gia'
+        piazzate nei giri precedenti (cap 40 - 34 = 6 >= 6: nessun taglio)."""
+        cands = [self._cand("a", 3.0), self._cand("b", 3.0)]
+        out = auto_bet.apply_total_exposure_cap(cands, bankroll=100.0,
+                                                already_placed=34.0)
+        assert all(not c.get("total_cap") for c in out)
+        assert [c["stake"] for c in out] == [3.0, 3.0]
+
+    def test_cap_esaurito_zero(self):
+        """Budget del giorno gia' esaurito (40 >= cap 40): nessun nuovo
+        ordine — gli stake vengono azzerati."""
+        cands = [self._cand("a", 3.0), self._cand("b", 3.0)]
+        out = auto_bet.apply_total_exposure_cap(cands, bankroll=100.0,
+                                                already_placed=40.0)
+        assert all(c["stake"] == 0.0 for c in out)
+        assert all(c.get("total_cap") for c in out)
+
+    def test_cap_ridotto_dal_residuo(self):
+        """Cap residuo ridotto da quanto gia' piazzato: 25 > 20-15=5 -> factor
+        0.2, ranking preservato."""
+        cands = [self._cand(f"m{i}", 5.0, league=f"Lega{i}") for i in range(5)]
+        out = auto_bet.apply_total_exposure_cap(cands, bankroll=50.0,
+                                                already_placed=15.0)
+        tot = sum(c["stake"] for c in out)
+        assert tot <= 5.0 + 0.01
+        assert all(c.get("total_cap") for c in out)
+        assert out[0]["stake"] == out[1]["stake"]  # proporzionale
+
     def test_flusso_sim_applica_il_cap_totale(self, monkeypatch, temp_db):
         """9 value in 9 leghe diverse (nessuna correlazione): stake fisso 5
         -> totale 45 > 40% di 100 -> gli stake vengono ridotti dal cap

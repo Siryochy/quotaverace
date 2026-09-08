@@ -213,7 +213,8 @@ def apply_correlation_cap(candidates: list[dict], bankroll: float,
 
 
 def apply_total_exposure_cap(candidates: list[dict], bankroll: float,
-                             cap_pct: float = TOTAL_EXPOSURE_CAP_PCT) -> list[dict]:
+                             cap_pct: float = TOTAL_EXPOSURE_CAP_PCT,
+                             already_placed: float = 0.0) -> list[dict]:
     """Cap di portafoglio: esposizione totale del giorno <= cap_pct del bankroll.
 
     Kelly dimensiona ogni stake come se fosse l'unica puntata: anche senza
@@ -222,19 +223,39 @@ def apply_total_exposure_cap(candidates: list[dict], bankroll: float,
     gli stake vengono scalati PROPORZIONALMENTE (mantiene il ranking EV e i
     rapporti tra le puntate, non taglia esiti).
 
+    Con piu' giri al giorno (auto-bet 24/7 dal 08/09) il cap e' RIMANENTE:
+    sottrae l'esposizione GIÀ piazzata nei giri precedenti (puntate aperte
+    nelle ultime 24h), cosi' il tetto del 40% vale sul giorno intero e non
+    per ogni singolo giro.
+
     Args:
         candidates: picks con stake (gia' passati dal correlation cap).
         bankroll: bankroll corrente.
         cap_pct: frazione di bankroll massima per l'esposizione totale.
+        already_placed: stake gia' impegnato in puntate aperte (stesso
+            giorno). Default 0 (comportamento storico, un giro solo).
 
     Returns:
-        I candidati con stake scalati; aggiunge "total_cap" (True se
-        ridotto) e "total_cap_group" (descrizione) per il log.
+        I candidati con stake scalati (0.0 se il budget e' gia' esaurito);
+        aggiunge "total_cap" (True se ridotto) e "total_cap_group" per il log.
     """
     if len(candidates) < 2 or bankroll <= 0:
         return candidates
     total = sum(float(c.get("stake", 0) or 0) for c in candidates)
-    cap = bankroll * cap_pct
+    cap = bankroll * cap_pct - float(already_placed or 0.0)
+    if cap <= 0:
+        # Budget del giorno gia' esaurito dai giri precedenti: nessun nuovo
+        # ordine (i candidati vengono azzerati e filtrati dal chiamante).
+        for c in candidates:
+            c["stake"] = 0.0
+            c["total_cap"] = True
+            c["total_cap_group"] = (f"esposizione già piazzata "
+                                     f"€{float(already_placed):.2f} >= cap "
+                                     f"€{bankroll * cap_pct:.2f}")
+        logger.info("auto_bet: cap esposizione totale esaurito — "
+                    "€%.2f già piazzati (cap €%.2f): nessun nuovo ordine",
+                    float(already_placed), bankroll * cap_pct)
+        return candidates
     if total <= cap:
         return candidates
     factor = cap / total
@@ -242,11 +263,37 @@ def apply_total_exposure_cap(candidates: list[dict], bankroll: float,
         raw = float(c.get("stake", 0) or 0)
         c["stake"] = round(raw * factor, 2)
         c["total_cap"] = True
-        c["total_cap_group"] = (f"esposizione totale €{total:.2f} > cap €{cap:.2f}")
+        c["total_cap_group"] = (f"esposizione totale €{total:.2f} > cap "
+                                 f"residuo €{cap:.2f} (già piazzati "
+                                 f"€{float(already_placed):.2f})")
     logger.info("auto_bet: cap esposizione totale attivo — ridotti €%.2f di "
-                "stake (%d pick sopra il cap €%.2f)",
+                "stake (%d pick sopra il cap residuo €%.2f)",
                 total - cap, len(candidates), cap)
     return candidates
+
+
+def _today_placed_stake(hours: float = 24.0) -> float:
+    """Stake GIÀ piazzato nelle ultime `hours` ore (puntate ancora aperte).
+
+    Con l'auto-bet 24/7 (piu' giri al giorno) il cap di esposizione totale
+    deve contare anche le puntate dei giri precedenti: il budget giornaliero
+    e' condiviso tra i giri, non per-giro.
+    """
+    try:
+        from tracker import _get_conn
+        conn = _get_conn()
+        cutoff = (datetime.now(timezone.utc).replace(tzinfo=None)
+                  - timedelta(hours=hours)).isoformat()
+        row = conn.execute(
+            "SELECT COALESCE(SUM(stake), 0) FROM bets "
+            "WHERE esito_finale IS NULL AND created_at >= ?",
+            (cutoff,)).fetchone()
+        conn.close()
+        return float(row[0]) if row and row[0] else 0.0
+    except Exception as e:
+        logger.warning("auto_bet: lettura esposizione gia' piazzata "
+                       "fallita: %s", e)
+        return 0.0
 
 
 def _norm_team(name: str) -> str:
@@ -717,8 +764,17 @@ def run_today_bets(stake_eur: float | None = None,
         })
 
     # --- FASE 2: risk capping (correlazione + esposizione totale) ---
+    # Il cap TOTALE e' giornaliero: sottrae l'esposizione gia' piazzata nei
+    # giri precedenti (puntate aperte nelle ultime 24h), poi scarta i
+    # candidati azzerati dal cap e (in LIVE) riapplica il floor exchange.
     candidates = apply_correlation_cap(candidates, _bankroll)
-    candidates = apply_total_exposure_cap(candidates, _bankroll)
+    candidates = apply_total_exposure_cap(candidates, _bankroll,
+                                          already_placed=_today_placed_stake())
+    candidates = [c for c in candidates if c.get("stake", 0) > 0]
+    if mode == "live":
+        for c in candidates:
+            c["stake"] = max(float(c["stake"]), MIN_STAKE_EUR)
+            c["stake"] = min(float(c["stake"]), _bankroll)
 
     # --- FASE 3: esegui e registra (LIVE via execution_engine oppure SIM) ---
     from tracker import save_bet

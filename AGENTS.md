@@ -182,6 +182,16 @@ cd webapp && npm run build            # build Next.js
   sui segnali a forte margine. Kelly riduce naturalmente lo stake sulle
   quote ad alta varianza (formula piena). `/autobet now` esegue il giro
   SUBITO da Telegram (senza attendere il job 08:50).
+- **Auto-bet 24/7 (08/09)**: il giro puntate gira OGNI 3h (da 08:50 ITA,
+  `run_repeating` in bot.py) invece di una sola volta al giorno: i nuovi
+  segnali value delle analisi (04:00/12:00/18:00 UTC, finestra candidati
+  mobile 24h) vengono scommessi entro 3h, giorno e notte. Sicurezza:
+  UNIQUE(match_id, esito) evita doppioni, guardia 15 min evita ordini a
+  partita iniziata, e il cap esposizione TOTALE è GIORNALIERO e
+  multi-giro (`auto_bet._today_placed_stake` sottrae l'esposizione già
+  piazzata nei giri precedenti dentro `apply_total_exposure_cap`): con
+  più giri al giorno il 40% di bankroll vale sul giorno intero, non per
+  singolo giro.
 - **Fix loop infinito football_hist (08/09)**: il ramo "retry" di
   `sync_history` faceva `continue` senza limite sulla stessa stagione
   (osservato in produzione: "Retry stesso anno per Serie A 2024" a ~50
