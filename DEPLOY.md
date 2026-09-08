@@ -217,8 +217,12 @@ Architettura attuale:
 > sul container mostra `availableBalance` del proxy wallet (verificato
 > 08/09: 12.28 USDC). Prima di affidarsi all'automazione fare un top-up.
 
-> ⚠️ Le regole di stake (minimo 2.00 EUR, step 0.50) sono mantenute in
-> `auto_bet.normalize_stake` per coerenza con le dimensioni storiche.
+> ⚙️ **Staking dinamico** (08/09): nessun importo fisso — Kelly frazionato
+> sul bankroll corrente (in LIVE = saldo reale del wallet SX via
+> `get_balance`). Config: `KELLY_MIN_FRACTION` (0.05), `KELLY_MAX_FRACTION`
+> (0.40), `STAKE_CAP_PCT` (0.10 value), `STAKE_CAP_PCT_STRONG` (0.25
+> strong_value), `STAKE_MIN_EUR` (1.0 = minimo ordine SX), `STAKE_STEP_EUR`
+> (0.01). Giro immediato: `/autobet now` (Telegram, admin).
 
 ---
 

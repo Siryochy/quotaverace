@@ -26,22 +26,32 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from tracker import _get_conn
 
-# --- Config ---
+# --- Config (tutto env-configurabile; staking 100% dinamico dal 08/09) ---
+# Il Kelly frazionato calcola lo stake per OGNI scommessa a partire dal
+# bankroll corrente: nessun importo fisso, solo vincoli di sicurezza
+# percentuali (Kelly + cap per segnale) e il floor dell'exchange.
 BASE_KELLY_FRACTION = 0.25     # 1/4 Kelly base
-MIN_KELLY_FRACTION = 0.10      # 1/10 Kelly minimo (bassa confidenza)
-MAX_KELLY_FRACTION = 0.35      # 3/10 Kelly massimo (alta confidenza)
-MAX_STAKE_PCT = 0.03           # Cap 3% del bankroll per singola bet
-MAX_STAKE_PCT_STRONG = 0.05    # Cap 5% per strong_value ad alta confidenza
+MIN_KELLY_FRACTION = float(os.getenv("KELLY_MIN_FRACTION", "0.05"))
+MAX_KELLY_FRACTION = float(os.getenv("KELLY_MAX_FRACTION", "0.40"))
+# Cap % del bankroll per singola bet: cresce SOLO sui segnali a forte
+# margine matematico (strong_value). Su wallet piccoli (es. 12 USDC) i cap
+# alti permettono stake minimi sensati; il Kelly frazionato resta il freno
+# principale (mai oltre il 40% del Kelly pieno).
+MAX_STAKE_PCT = float(os.getenv("STAKE_CAP_PCT", "0.10"))        # value
+MAX_STAKE_PCT_STRONG = float(os.getenv("STAKE_CAP_PCT_STRONG", "0.25"))
 DRAWDOWN_THRESHOLD = 0.10      # Riduci stakes se drawdown > 10%
 DRAWDOWN_REDUCTION = 0.50      # Riduci stakes del 50% al drawdown massimo
-MIN_STAKE_EUR = 2.00           # Scommessa minima (Italia)
-STAKE_STEP = 0.50              # Step minimo (0.50 EUR)
+# Floor = minimo ordine dell'exchange (SX Bet: 1 USDC); step 0.01 = nessun
+# arrotondamento grossolano (prima erano 2.00 EUR / 0.50 EUR fissi).
+MIN_STAKE_EUR = float(os.getenv("STAKE_MIN_EUR", "1.0"))
+STAKE_STEP = float(os.getenv("STAKE_STEP_EUR", "0.01"))
 
 
 def confidence_kelly_fraction(prob: float, odds: float,
@@ -51,8 +61,8 @@ def confidence_kelly_fraction(prob: float, odds: float,
                                status: str = "value") -> float:
     """Kelly frazionato con frazione dinamica basata sulla confidenza.
 
-    La frazione varia da MIN_KELLY_FRACTION a MAX_KELLY_FRACTION in base
-    a multipli segnali di confidenza:
+    La frazione varia da MIN_KELLY_FRACTION a MAX_KELLY_FRACTION (default
+    0.05-0.40) in base a multipli segnali di confidenza:
 
     - **edge sul mercato**: più alto → più confidenza
     - **ML confidence**: ensemble addestrato → più confidenza
@@ -182,7 +192,7 @@ def adaptive_stake(bankroll: float, prob: float, odds: float,
     stake = min(stake_after_dd, cap)
     capped = stake_after_dd > cap
 
-    # 5. Arrotonda allo step (0.50 EUR)
+    # 5. Arrotonda allo step (0.01) e forza il floor dell'exchange (1.0)
     if round_to_step and stake > 0:
         stake = max(MIN_STAKE_EUR, round(stake / STAKE_STEP) * STAKE_STEP)
 

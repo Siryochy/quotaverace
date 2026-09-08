@@ -100,15 +100,19 @@ class TestAdaptiveStake:
         assert r_dd["stake"] <= r_normal["stake"]
         assert r_dd["drawdown_factor"] < 1.0
 
-    def test_cap_3_percento(self):
-        """Lo stake non supera il 3% del bankroll."""
+    def test_cap_value_10_percento(self):
+        """Cap singola bet value: 10% del bankroll (staking dinamico)."""
         r = adaptive_stake(1000, 0.90, 1.50)  # EV altissimo
-        assert r["stake"] <= 1000 * 0.05  # cap strong_value o value
+        assert r["stake"] <= 1000 * 0.10
 
-    def test_strong_value_cap_5_percento(self):
-        """Strong value ha cap più alto (5%)."""
+    def test_strong_value_cap_25_percento(self):
+        """Strong value ha cap più alto (25%): esposizione solo sui
+        segnali a forte margine matematico."""
         r = adaptive_stake(1000, 0.90, 1.50, status="strong_value")
-        assert r["stake"] <= 1000 * 0.05
+        assert r["stake"] <= 1000 * 0.25
+        # strong_value > value sullo stesso segnale
+        r_val = adaptive_stake(1000, 0.90, 1.50, status="value")
+        assert r["stake"] > r_val["stake"] or r["stake"] == r_val["stake"]
 
     def test_confidenza_influenza_stake(self):
         """Alta confidenza → stake più alto."""
@@ -129,10 +133,19 @@ class TestAdaptiveStake:
         assert "reason" in r
 
     def test_arrotondamento_step(self):
-        """Lo stake è arrotondato allo step di 0.50."""
+        """Lo stake è arrotondato allo step 0.01 (nessuno step fisso) e
+        rispetta il floor 1.0 (minimo ordine exchange)."""
         r = adaptive_stake(1000, 0.55, 2.10)
-        remainder = r["stake"] % 0.50
-        assert remainder == pytest.approx(0.0, abs=0.01) or r["stake"] < 2.0
+        assert round(r["stake"], 2) == r["stake"]  # 2 decimali, no step 0.50
+        assert r["stake"] >= 1.0
+
+    def test_stake_scala_col_bankroll(self):
+        """Staking 100% dinamico: lo stake scala col bankroll (stesso
+        segnale, bankroll diversi → stake proporzionali)."""
+        r_small = adaptive_stake(100.0, 0.55, 2.10)
+        r_big = adaptive_stake(1000.0, 0.55, 2.10)
+        assert r_small["stake"] > 0
+        assert r_big["stake"] >= r_small["stake"] * 9.0
 
 
 if __name__ == "__main__":

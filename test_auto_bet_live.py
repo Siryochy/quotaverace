@@ -131,6 +131,109 @@ class TestLiveMode:
         assert placed == []
         assert tracker.get_bets() == []
 
+class TestLiveBankroll:
+    """Staking dinamico sul saldo REALE del wallet (dal 08/09): il Kelly
+    usa come bankroll il saldo disponibile del proxy wallet SX, mai la
+    cassa simulata. Floor ordine 1 USDC, cap sul saldo disponibile."""
+
+    def test_bankroll_dal_wallet(self, monkeypatch, temp_db):
+        """In LIVE il bankroll del Kelly e' il saldo del wallet (12.28
+        USDC nell'esempio), non la cassa."""
+        import adaptive_staking
+        _seed_value_match(quota=2.20)
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 12.28)
+        calls = {}
+
+        def _fake(**kw):
+            calls.update(kw)
+            return {"stake": 2.0, "reason": "test"}
+
+        monkeypatch.setattr(adaptive_staking, "adaptive_stake", _fake)
+        monkeypatch.setattr(auto_bet, "_live_fill",
+                            lambda pick, stake, floor: _filled())
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert len(placed) == 1
+        assert calls["bankroll"] == pytest.approx(12.28)
+        assert calls["peak_bankroll"] == pytest.approx(12.28)
+
+    def test_wallet_sotto_minimo_nessuna_puntata(self, monkeypatch, temp_db):
+        """Wallet sotto il minimo ordine (1 USDC): fail-closed, niente righe."""
+        _fixed_stake(monkeypatch)
+        _seed_value_match(quota=2.20)
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 0.5)
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert placed == []
+        assert tracker.get_bets() == []
+
+    def test_stake_clamp_al_minimo_exchange(self, monkeypatch, temp_db):
+        """Stake micro sotto 1 USDC: alzato al floor dell'exchange (1.0)."""
+        import adaptive_staking
+        _seed_value_match(quota=2.20)
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 12.28)
+        monkeypatch.setattr(
+            adaptive_staking, "adaptive_stake",
+            lambda **kw: {"stake": 0.6, "reason": "micro"})
+        sent = {}
+
+        def _fake_fill(pick, stake, floor):
+            sent["stake"] = stake
+            return _filled()
+
+        monkeypatch.setattr(auto_bet, "_live_fill", _fake_fill)
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert len(placed) == 1
+        assert sent["stake"] == 1.0
+
+    def test_stake_mai_oltre_il_wallet(self, monkeypatch, temp_db):
+        """In LIVE lo stake non supera mai il saldo disponibile del wallet."""
+        import adaptive_staking
+        _seed_value_match(quota=2.20)
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 3.0)
+        monkeypatch.setattr(
+            adaptive_staking, "adaptive_stake",
+            lambda **kw: {"stake": 5.0, "reason": "test"})
+        sent = {}
+
+        def _fake_fill(pick, stake, floor):
+            sent["stake"] = stake
+            return _filled()
+
+        monkeypatch.setattr(auto_bet, "_live_fill", _fake_fill)
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert len(placed) == 1
+        assert sent["stake"] == 3.0
+
+    def test_saldo_non_leggibile_ripiega_sulla_cassa(self, monkeypatch,
+                                                     temp_db):
+        """Wallet non leggibile (rete/errore): fallback sul bankroll cassa,
+        il giro prosegue in live."""
+        import adaptive_staking
+        _seed_value_match(quota=2.20)
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: None)
+        calls = {}
+
+        def _fake(**kw):
+            calls.update(kw)
+            return {"stake": 2.0, "reason": "test"}
+
+        monkeypatch.setattr(adaptive_staking, "adaptive_stake", _fake)
+        monkeypatch.setattr(auto_bet, "_live_fill",
+                            lambda pick, stake, floor: _filled())
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert len(placed) == 1
+        # cassa vuota -> default 100.0
+        assert calls["bankroll"] == pytest.approx(100.0)
+
     def test_stake_matched_usato_se_diverso(self, monkeypatch, temp_db):
         """Rippegno parziale: si registra lo stake/prezzo EFFETTIVAMENTE
         riempiti (non il richiesto)."""

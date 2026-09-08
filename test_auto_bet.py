@@ -79,11 +79,11 @@ def test_senza_segnali_nessuna_puntata(monkeypatch, temp_db):
 
 
 def test_normalizes_stake_below_minimum(monkeypatch, temp_db):
-    # Guardia minimo Exchange sul percorso a stake fisso (adaptive disattivo)
+    # Guardia minimo Exchange sul percorso a stake fisso (adaptive disattivo):
+    # il floor e' il minimo ordine SX (1.0); sotto, nessuna puntata.
     monkeypatch.setitem(sys.modules, "adaptive_staking", None)
     _seed_value_match()
-    # stake 1.00 -> sotto il minimo: nessuna puntata
-    placed = auto_bet.run_today_bets(stake_eur=1.0)
+    placed = auto_bet.run_today_bets(stake_eur=0.5)
     assert placed == []
 
 

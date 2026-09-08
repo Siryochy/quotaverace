@@ -83,20 +83,24 @@ CORRELATION_WINDOW_MIN = 90    # kickoff entro 90' = stesso blocco temporale
 # complessivo che cresce col numero di pick (varianza additiva).
 TOTAL_EXPOSURE_CAP_PCT = 0.40  # max 40% di bankroll per il portafoglio del giorno
 
-# Step di arrotondamento e minimo (regole Exchange Italia, mantenute anche in
-# SIM per coerenza con le dimensioni degli stake storici).
-ITALY_STAKE_STEP = 0.50
-ITALY_MIN_BACK_STAKE = 2.00
+# Staking 100% dinamico (08/09): NESSUN importo fisso. Lo stake lo decide
+# il Kelly frazionato sul bankroll corrente (saldo reale del wallet in
+# LIVE). Restano solo due vincoli di sicurezza:
+#   - STAKE_STEP_EUR (default 0.01): arrotondamento fine, niente step fissi;
+#   - MIN_STAKE_EUR (default 1.0): floor dell'exchange (SX Bet: 1 USDC).
+STAKE_STEP_EUR = float(os.getenv("STAKE_STEP_EUR", "0.01"))
+MIN_STAKE_EUR = float(os.getenv("MIN_STAKE_EUR", "1.0"))
 
 
 def normalize_stake(stake: float) -> float:
-    """Arrotonda allo step 0.50 e forza il minimo 2.00 (coerente con le
-    regole Exchange Italia usate storicamente). Sotto il minimo: 0 (no bet)."""
+    """Arrotonda allo step configurato (default 0.01) e forza il minimo
+    (default 1.0 = minimo ordine SX Bet in USDC, env MIN_STAKE_EUR).
+    Sotto il minimo: 0 (no bet)."""
     if stake <= 0:
         return 0.0
-    stepped = round(stake / ITALY_STAKE_STEP) * ITALY_STAKE_STEP
+    stepped = round(stake / STAKE_STEP_EUR) * STAKE_STEP_EUR
     stepped = round(stepped, 2)
-    if stepped < ITALY_MIN_BACK_STAKE:
+    if stepped < MIN_STAKE_EUR:
         return 0.0
     return stepped
 
@@ -439,6 +443,26 @@ def _provider_ready() -> bool:
         return False
 
 
+def _live_wallet_balance() -> float | None:
+    """Saldo DISPONIBILE del provider reale (SX Bet: proxy wallet in USDC).
+
+    None se non leggibile (dry-run, errore di rete, credenziali assenti):
+    il chiamante ripiega sul bankroll cassa. Il saldo reale diventa il
+    bankroll del Kelly in modalita' live: ogni stake e' dimensionato su
+    quanto c'e' DAVVERO nel wallet.
+    """
+    try:
+        import execution_engine as ee
+        engine = ee.ExecutionEngine()
+        if isinstance(engine.provider, ee.DryRunProvider):
+            return None
+        bal = engine.provider.get_balance()
+        return float(bal.get("availableBalance") or 0.0)
+    except Exception as e:
+        logger.warning("auto_bet: lettura saldo wallet fallita: %s", e)
+        return None
+
+
 def _execution_mode(allow_sim: bool = True) -> str:
     """Modalita' effettiva del giro di puntate.
 
@@ -579,6 +603,15 @@ def run_today_bets(stake_eur: float | None = None,
     stake_eur_default = stake_eur if stake_eur is not None else float(
         os.getenv("BET_STAKE_EUR", str(BET_STAKE_DEFAULT_EUR)))
 
+    # --- Modalita' effettiva del giro (prima dei candidati: decide il
+    # --- bankroll del Kelly).
+    mode = _execution_mode(allow_sim)
+    if mode == "off":
+        # Kill-switch /autobet off oppure fail-closed senza provider reale.
+        logger.error("auto_bet: modalita' 'off' (kill-switch o fail-closed): "
+                     "nessuna puntata")
+        return []
+
     # Carica adaptive staking (lazy)
     try:
         from adaptive_staking import adaptive_stake, bankroll_stats
@@ -593,6 +626,26 @@ def run_today_bets(stake_eur: float | None = None,
         _bankroll = 100.0
         _peak = 100.0
         logger.info("auto_bet: adaptive_staking non disponibile, uso stake fisso")
+
+    # LIVE: il bankroll del Kelly e' il saldo REALE del wallet exchange
+    # (disponibile per gli ordini), non la cassa simulata. Se il wallet e'
+    # sotto il minimo ordine non si piazza nulla (fail-closed).
+    _wallet_balance: float | None = None
+    if mode == "live":
+        _wallet_balance = _live_wallet_balance()
+        if _wallet_balance is None:
+            logger.warning("auto_bet: saldo wallet non disponibile, uso "
+                           "bankroll cassa €%.2f", _bankroll)
+        elif _wallet_balance < MIN_STAKE_EUR:
+            logger.error("auto_bet: wallet sotto il minimo ordine "
+                         "(%.2f USDC < %.2f): nessuna puntata",
+                         _wallet_balance, MIN_STAKE_EUR)
+            return []
+        else:
+            _bankroll = _wallet_balance
+            _peak = _wallet_balance  # drawdown vs saldo attuale (nessuno storico)
+            logger.info("auto_bet: bankroll LIVE = saldo wallet %.2f USDC",
+                        _wallet_balance)
 
     # Carica CLV storico per la confidenza
     try:
@@ -652,6 +705,13 @@ def run_today_bets(stake_eur: float | None = None,
                         pick_stake, pick["match_id"])
             continue
 
+        # LIVE: clamp al floor dell'exchange (minimo ordine 1 USDC) e mai
+        # oltre il saldo disponibile del wallet (i fondi sono li').
+        if mode == "live":
+            pick_stake = max(pick_stake, MIN_STAKE_EUR)
+            pick_stake = min(pick_stake, _bankroll)
+            pick_stake = round(pick_stake, 2)
+
         candidates.append({
             **pick, "price": price, "stake": pick_stake,
         })
@@ -662,12 +722,6 @@ def run_today_bets(stake_eur: float | None = None,
 
     # --- FASE 3: esegui e registra (LIVE via execution_engine oppure SIM) ---
     from tracker import save_bet
-    mode = _execution_mode(allow_sim)
-    if mode == "off":
-        # Kill-switch /autobet off oppure fail-closed senza provider reale.
-        logger.error("auto_bet: modalita' 'off' (kill-switch o fail-closed): "
-                     "nessuna puntata")
-        return []
     placed: list[dict] = []
     for cand in candidates:
         pick_stake = cand["stake"]

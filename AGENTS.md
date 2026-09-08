@@ -170,6 +170,18 @@ cd webapp && npm run build            # build Next.js
   market_id/selection_id/bet_id reali e stake/prezzo MATCHED. Gli ordini
   rifiutati o i salti non lasciano righe (un FAILED verrebbe saldato come
   perdita). Risk caps invariati (correlation 30% + esposizione 40%).
+- **Staking 100% dinamico (08/09)**: rimosse le regole fisse (era minimo
+  2.00 EUR / step 0.50). Il Kelly frazionato (0.05-0.40, env
+  `KELLY_MIN_FRACTION`/`KELLY_MAX_FRACTION`) calcola lo stake per OGNI
+  scommessa sul bankroll corrente: in LIVE il bankroll è il SALDO REALE
+  del proxy wallet SX (`get_balance` → `availableBalance`), non la cassa
+  simulata (se il saldo è < minimo ordine → nessuna puntata, fail-closed).
+  Floor = minimo ordine exchange (`STAKE_MIN_EUR`, default 1.0 = 1 USDC),
+  step 0.01 (`STAKE_STEP_EUR`), cap per singola bet `STAKE_CAP_PCT` 10%
+  (value) / `STAKE_CAP_PCT_STRONG` 25% (strong_value): esposizione solo
+  sui segnali a forte margine. Kelly riduce naturalmente lo stake sulle
+  quote ad alta varianza (formula piena). `/autobet now` esegue il giro
+  SUBITO da Telegram (senza attendere il job 08:50).
 - **Fix loop infinito football_hist (08/09)**: il ramo "retry" di
   `sync_history` faceva `continue` senza limite sulla stessa stagione
   (osservato in produzione: "Retry stesso anno per Serie A 2024" a ~50

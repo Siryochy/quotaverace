@@ -461,7 +461,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/value` – value bet filtrate\n"
         "`/surebet` – scanner arbitraggi\n"
         "`/setbankroll <€>` – imposta bankroll\n"
-        "`/autobet [off|sim|live]` – kill-switch puntate automatiche (admin)\n"
+        "`/autobet [off|sim|live|now]` – kill-switch/esegui ora (admin)\n"
         "`/subscribe` – attiva notifiche Pro\n"
         "`/risultati` – statistiche reali dei segnali\n"
         "`/backtest` – calibrazione EV atteso vs ROI realizzato\n"
@@ -977,7 +977,9 @@ async def cmd_autobet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
       ne' simulata) finche' non si riattiva;
     - `/autobet sim` (o `pause`): PAUSA ordini reali — torna al paper
       trading;
-    - `/autobet live` (o `resume`/`on`): ripristina AUTO_BET_MODE env.
+    - `/autobet live` (o `resume`/`on`): ripristina AUTO_BET_MODE env;
+    - `/autobet now`: esegue SUBITO il giro di puntate del giorno (LIVE
+      se configurato) senza aspettare il job delle 08:50.
 
     L'override e' persistente (data/execution/auto_bet_mode.json, volume
     condiviso): sopravvive ai redeploy ed e' letto da auto_bet a ogni giro.
@@ -1009,6 +1011,38 @@ async def cmd_autobet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "▶️ *AUTO-BET: riattivato*\n\n"
                 "Torna a seguire `AUTO_BET_MODE` env. Usa `/autobet` per "
                 "verificare lo stato.", parse_mode="Markdown")
+        elif arg == "now":
+            await update.message.reply_text(
+                "🚀 Esecuzione immediata del giro puntate "
+                "(LIVE se configurato)...")
+            loop = asyncio.get_running_loop()
+            try:
+                from auto_bet import run_today_bets
+                placed = await loop.run_in_executor(
+                    _scan_executor, run_today_bets, None, True)
+            except Exception as e:
+                logger.error("cmd_autobet now: %s", e)
+                await update.message.reply_text(f"❌ Errore esecuzione: {e}")
+                return
+            if not placed:
+                await update.message.reply_text(
+                    "ℹ️ Nessuna puntata piazzata (nessun segnale oggi, "
+                    "kill-switch attivo o mercati non disponibili). "
+                    "Usa `/autobet` per lo stato.", parse_mode="Markdown")
+                return
+            mode = placed[0]["mode"]
+            mode_label = {"live": "LIVE", "sim": "SIMULAZIONE"}.get(
+                mode, mode)
+            total = sum(p["stake"] for p in placed)
+            rows = "\n".join(
+                f"• {p['home']} vs {p['away']} — {p['esito_key']} @ "
+                f"{p['price']:.2f} (€{p['stake']:.2f})" for p in placed)
+            await update.message.reply_text(
+                f"🎯 *PUNTATE AUTOMATICHE ({mode_label})*\n"
+                f"{len(placed)} puntate, €{total:.2f} di stake\n\n"
+                f"{rows}\n\n"
+                f"📌 {'ORDINI REALI' if mode == 'live' else 'Simulazione: nessun ordine reale inviato.'}",
+                parse_mode="Markdown")
         else:
             st = kill_switch_status()
             mode_label = {"off": "🛑 OFF (nessuna puntata)",
