@@ -207,6 +207,15 @@ Architettura attuale:
 > (credenziali `SX_API_KEY`/`SX_PRIVATE_KEY` già presenti). `AUTO_BET_MODE`
 > assente = simulazione. Fail-closed: se il chiamante passa allow_sim=False
 > e il provider non è configurato non si piazza nulla.
+>
+> 🛑 **Kill-switch**: in emergenza il comando Telegram `/autobet` (solo
+> admin) scrive un override persistente in `data/execution/auto_bet_mode.json`
+> (volume condiviso, precede `AUTO_BET_MODE`): `/autobet off` = stop totale,
+> `/autobet sim` = pausa ordini reali, `/autobet live` = ripristina.
+>
+> 💰 **Saldo wallet SX**: `venv/bin/python execution_engine.py --balance`
+> sul container mostra `availableBalance` del proxy wallet (verificato
+> 08/09: 12.28 USDC). Prima di affidarsi all'automazione fare un top-up.
 
 > ⚠️ Le regole di stake (minimo 2.00 EUR, step 0.50) sono mantenute in
 > `auto_bet.normalize_stake` per coerenza con le dimensioni storiche.

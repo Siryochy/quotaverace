@@ -461,6 +461,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/value` – value bet filtrate\n"
         "`/surebet` – scanner arbitraggi\n"
         "`/setbankroll <€>` – imposta bankroll\n"
+        "`/autobet [off|sim|live]` – kill-switch puntate automatiche (admin)\n"
         "`/subscribe` – attiva notifiche Pro\n"
         "`/risultati` – statistiche reali dei segnali\n"
         "`/backtest` – calibrazione EV atteso vs ROI realizzato\n"
@@ -967,6 +968,73 @@ async def cmd_backtest_mc(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
+async def cmd_autobet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/autobet [off|stop|sim|pause|live|resume] — kill-switch delle
+    puntate automatiche (solo admin).
+
+    - `/autobet` o `/autobet status`: stato attuale;
+    - `/autobet off` (o `stop`): STOP TOTALE — nessuna puntata (ne' reale
+      ne' simulata) finche' non si riattiva;
+    - `/autobet sim` (o `pause`): PAUSA ordini reali — torna al paper
+      trading;
+    - `/autobet live` (o `resume`/`on`): ripristina AUTO_BET_MODE env.
+
+    L'override e' persistente (data/execution/auto_bet_mode.json, volume
+    condiviso): sopravvive ai redeploy ed e' letto da auto_bet a ogni giro.
+    """
+    admin_ids = _admin_chat_ids()
+    if admin_ids and update.effective_chat.id not in admin_ids:
+        await update.message.reply_text("⛔ Comando riservato agli admin.")
+        return
+    from auto_bet import (clear_kill_switch, kill_switch_status,
+                          set_kill_switch)
+    arg = (context.args[0] if context.args else "").strip().lower()
+    try:
+        if arg in ("off", "stop"):
+            set_kill_switch("off")
+            await update.message.reply_text(
+                "🛑 *AUTO-BET: STOP TOTALE*\n\n"
+                "Nessuna puntata (reale o simulata) finche' non riattivi.\n"
+                "Per riattivare: `/autobet live`", parse_mode="Markdown")
+        elif arg in ("sim", "pause"):
+            set_kill_switch("sim")
+            await update.message.reply_text(
+                "⏸️ *AUTO-BET: PAUSA ordini reali*\n\n"
+                "Resta attivo il paper trading (SIM).\n"
+                "Per riattivare i reali: `/autobet live`",
+                parse_mode="Markdown")
+        elif arg in ("live", "resume", "on"):
+            clear_kill_switch()
+            await update.message.reply_text(
+                "▶️ *AUTO-BET: riattivato*\n\n"
+                "Torna a seguire `AUTO_BET_MODE` env. Usa `/autobet` per "
+                "verificare lo stato.", parse_mode="Markdown")
+        else:
+            st = kill_switch_status()
+            mode_label = {"off": "🛑 OFF (nessuna puntata)",
+                          "sim": "🟡 SIM (paper trading)",
+                          "live": "🟢 LIVE (ordini reali)"}
+            ov_label = {"off": "🛑 STOP TOTALE",
+                        "sim": "⏸️ PAUSA ordini reali"}.get(
+                            st["override"], "nessuno (env)")
+            text = (
+                "🎛 *AUTO-BET — stato*\n\n"
+                f"• Esecuzione effettiva: "
+                f"*{mode_label.get(st['effective'], st['effective'])}*\n"
+                f"• Override kill-switch: {ov_label}\n"
+                f"• AUTO_BET_MODE env: `{st['env_mode'] or 'sim'}`\n"
+                f"• Provider reale pronto: "
+                f"{'✅ sì' if st['provider_ready'] else '❌ no'}\n\n"
+                "Comandi:\n"
+                "`/autobet off` – stop totale\n"
+                "`/autobet sim` – pausa ordini reali\n"
+                "`/autobet live` – riattiva")
+            await update.message.reply_text(text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error("cmd_autobet: %s", e)
+        await update.message.reply_text(f"❌ Errore: {e}")
+
+
 async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/backup — snapshot manuale del DB + dataset ML (solo admin)."""
     admin_ids = _admin_chat_ids()
@@ -1332,6 +1400,18 @@ async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error("auto_bet_job: %s", e)
         return
     if not placed:
+        # Nessuna puntata piazzata: se e' colpa del kill-switch OFF avvisa
+        # l'admin (in emergenza la visibilita' e' tutto); altrimenti silenzio.
+        try:
+            from auto_bet import kill_switch_status
+            if kill_switch_status().get("effective") == "off":
+                text = ("🛑 *AUTO-BET BLOCCATO (kill-switch OFF)*\n\n"
+                        "Il giro delle puntate automatiche e' stato saltato: "
+                        "nessuna puntata piazzata.\n"
+                        "Per riattivare: `/autobet live`")
+                await _send_report_to_recipients(context, text)
+        except Exception as e:
+            logger.error("auto_bet_job (kill-switch notify): %s", e)
         return
     mode = placed[0]["mode"]
     mode_label = {"live": "LIVE", "sim": "SIMULAZIONE",
@@ -1407,6 +1487,7 @@ def main() -> None:
     application.add_handler(CommandHandler("backtest", cmd_backtest))
     application.add_handler(CommandHandler("backtest_mc", cmd_backtest_mc))
     application.add_handler(CommandHandler("backup", cmd_backup))
+    application.add_handler(CommandHandler("autobet", cmd_autobet))
     application.add_handler(CommandHandler("sync", cmd_sync))
     application.add_handler(CommandHandler("quota", cmd_quota))
     application.add_handler(CommandHandler("riepilogo", cmd_riepilogo))

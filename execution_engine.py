@@ -1560,6 +1560,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "dry_run = nessuna rete)")
     ap.add_argument("--status", action="store_true",
                     help="stato provider + credenziali (senza stamparle)")
+    ap.add_argument("--balance", action="store_true",
+                    help="saldo del provider (SX Bet: proxy wallet; "
+                         "richiede credenziali)")
     ap.add_argument("--probe", action="store_true",
                     help="probe a stake minimo: misura latenza e slippage")
     ap.add_argument("--market", type=str, default="",
@@ -1598,6 +1601,18 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.status:
         print(json.dumps(engine.status(), indent=2))
+        return 0
+
+    if args.balance:
+        try:
+            bal = engine.provider.get_balance()
+        except Exception as e:
+            print(f"ERRORE: saldo non disponibile: {e}")
+            return 1
+        out = dict(bal or {})
+        out["provider"] = engine.provider.name
+        out["dry_run"] = isinstance(engine.provider, DryRunProvider)
+        print(json.dumps(out, indent=2))
         return 0
 
     if args.markets:

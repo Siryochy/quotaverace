@@ -39,6 +39,7 @@ Regole prudenti di esecuzione (scelte per questo progetto):
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -57,6 +58,17 @@ MIN_MINUTES_TO_START = 15
 # allow_sim=False e il live non e' disponibile, non si piazza nulla
 # (fail-closed).
 REAL_MODE_VALUES = ("live", "real", "1", "true", "on")
+
+# --- Kill-switch Telegram (dal 08/09) ---
+# Override persistente scritto dal comando /autobet: il file vive sul volume
+# condiviso (data/execution/auto_bet_mode.json) quindi sopravvive ai
+# redeploy. Valori:
+#   "off"  -> STOP TOTALE: nessuna puntata (ne' reale ne' simulata);
+#   "sim"  -> PAUSA ordini reali: resta solo il paper trading;
+#   "live" -> ripristina AUTO_BET_MODE env (nessun override).
+# In assenza del file vale AUTO_BET_MODE env (default "sim").
+KILL_SWITCH_FILE = DATA_DIR / "execution" / "auto_bet_mode.json"
+KILL_SWITCH_VALUES = ("off", "sim", "live")
 
 # --- Correlation risk cap ---
 # Kelly assume indipendenza tra le puntate: due o piu' esiti correlati nello
@@ -336,8 +348,76 @@ def _too_close_to_start(start_time: str | None) -> bool:
     return start <= datetime.now(timezone.utc) + timedelta(minutes=MIN_MINUTES_TO_START)
 
 
+def _kill_switch_override() -> str | None:
+    """Override persistente scritto da /autobet (kill-switch Telegram).
+
+    None se non impostato. Il file vive in data/execution/ (volume
+    condiviso) per sopravvivere ai redeploy.
+    """
+    try:
+        data = json.loads(KILL_SWITCH_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    mode = str(data.get("mode", "")).strip().lower()
+    return mode if mode in KILL_SWITCH_VALUES else None
+
+
+def set_kill_switch(mode: str) -> dict:
+    """Imposta l'override del kill-switch (comando Telegram /autobet).
+
+    mode: "off" (stop totale), "sim" (pausa ordini reali),
+    "live" (ripristina AUTO_BET_MODE env). Scrittura atomica sul volume.
+    """
+    mode = str(mode).strip().lower()
+    if mode == "real":
+        mode = "live"
+    if mode not in KILL_SWITCH_VALUES:
+        raise ValueError(
+            f"modalita' non valida: {mode!r} (attese: off|sim|live)")
+    KILL_SWITCH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data = {"mode": mode,
+            "updated_at": datetime.now(timezone.utc).isoformat()}
+    tmp = KILL_SWITCH_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, KILL_SWITCH_FILE)
+    return data
+
+
+def clear_kill_switch() -> None:
+    """Rimuove l'override: si torna ad AUTO_BET_MODE env."""
+    try:
+        KILL_SWITCH_FILE.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def kill_switch_status() -> dict:
+    """Stato del kill-switch per /autobet (Telegram)."""
+    override = _kill_switch_override()
+    env_mode = os.getenv("AUTO_BET_MODE", "sim").strip().lower()
+    requested = override or env_mode
+    if override == "off":
+        effective = "off"
+    elif requested in REAL_MODE_VALUES and _provider_ready():
+        effective = "live"
+    else:
+        effective = "sim"
+    return {
+        "override": override,
+        "env_mode": env_mode,
+        "requested": requested,
+        "effective": effective,
+        "provider_ready": _provider_ready(),
+        "file": str(KILL_SWITCH_FILE),
+    }
+
+
 def _requested_mode() -> str:
-    """Modalita' richiesta da env AUTO_BET_MODE (default 'sim')."""
+    """Modalita' richiesta: override del kill-switch Telegram se presente,
+    altrimenti env AUTO_BET_MODE (default 'sim')."""
+    override = _kill_switch_override()
+    if override:
+        return override
     return os.getenv("AUTO_BET_MODE", "sim").strip().lower()
 
 
@@ -368,6 +448,11 @@ def _execution_mode(allow_sim: bool = True) -> str:
     richiesto dal chiamante).
     """
     mode = _requested_mode()
+    if mode == "off":
+        # Kill-switch /autobet off: STOP TOTALE, mai puntate (ne' reali ne'
+        # simulate) finche' l'admin non riattiva.
+        logger.warning("auto_bet: kill-switch OFF attivo — nessuna puntata")
+        return "off"
     if mode in REAL_MODE_VALUES:
         if _provider_ready():
             return "live"
@@ -579,8 +664,9 @@ def run_today_bets(stake_eur: float | None = None,
     from tracker import save_bet
     mode = _execution_mode(allow_sim)
     if mode == "off":
-        logger.error("auto_bet: fail-closed richiesto ma provider reale non "
-                     "configurato: nessuna puntata")
+        # Kill-switch /autobet off oppure fail-closed senza provider reale.
+        logger.error("auto_bet: modalita' 'off' (kill-switch o fail-closed): "
+                     "nessuna puntata")
         return []
     placed: list[dict] = []
     for cand in candidates:

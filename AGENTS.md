@@ -177,6 +177,23 @@ cd webapp && npm run build            # build Next.js
   API-Football). Aggiunto `MAX_YEAR_RETRIES` (3) con sleep tra i tentativi:
   dopo il limite la stagione è trattata come non accessibile e si passa
   all'anno precedente (mai più blocchi). Test dedicati.
+- **Kill-switch Telegram `/autobet` (08/09)**: comando admin che blocca
+  le puntate automatiche da remoto in emergenza. Override PERSISTENTE in
+  `data/execution/auto_bet_mode.json` (volume condiviso, sopravvive ai
+  redeploy) con precedenza su `AUTO_BET_MODE` env: `/autobet off|stop` =
+  STOP TOTALE (nessuna puntata, né reale né simulata), `/autobet sim|pause`
+  = pausa ordini reali (resta paper trading), `/autobet live|resume` =
+  ripristina l'env, `/autobet` = stato (effective/override/env/provider).
+  Se il giro 08:50 viene saltato per kill-switch OFF, il job notifica
+  l'admin. Test dedicati in test_auto_bet_killswitch.py.
+- **Check proxy wallet SX (08/09, live su Railway)**: `execution_engine.py
+  --balance` (nuova flag CLI) legge `user/balance-v3`: proxy wallet
+  `0x97aE...44002` deployato e finanziato, **12.28 USDC disponibili**,
+  exposure 0, nessun ordine aperto (la prova Nueva Chicago saldata).
+  ⚠️ Saldo basso: con 2-3 segnali value da €2-5 il wallet potrebbe non
+  coprire tutti gli stake (ordini in eccesso falliscono in modo
+  fail-closed, nessuna riga sul ledger) — valutare un top-up prima di
+  affidarsi all'automazione 24/7.
 - **Correzioni ML post-diagnostica (06/09)** — il report sul backtest
   storico (12.909 partite) mostrava: ROI -2,52% flat, controllo a quota
   CLOSING -3,03% (la selezione NON batte il mercato devigato),

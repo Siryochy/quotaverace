@@ -702,6 +702,33 @@ class TestSmarketsFactory:
         assert data["provider"] == "smarkets"
         assert data["creds"] is True
 
+    def test_cli_balance_dry_run(self, monkeypatch, capsys):
+        """--balance senza credenziali: DryRun, saldo simulato, exit 0."""
+        monkeypatch.setattr(ee, "EXECUTION_DRY_RUN", True)
+        prev = ee.EXECUTION_PROVIDER
+        try:
+            code = ee.main(["--balance", "--dry-run"])
+        finally:
+            ee.EXECUTION_PROVIDER = prev
+            os.environ.pop("EXECUTION_PROVIDER", None)
+        assert code == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["dry_run"] is True
+        assert data["availableBalance"] == 1000.0
+
+    def test_cli_balance_errore_fail_closed(self, monkeypatch, capsys):
+        """--balance con errore del provider: exit 1, mai eccezioni."""
+
+        class _Boom:
+            name = "boom"
+
+            def get_balance(self):
+                raise RuntimeError("api giu'")
+
+        monkeypatch.setattr(ee, "build_provider", lambda: _Boom())
+        assert ee.main(["--balance"]) == 1
+        assert "ERRORE" in capsys.readouterr().out
+
 
 # ---------------------------------------------------------------------------
 # Conversioni prezzo/stake SX Bet
