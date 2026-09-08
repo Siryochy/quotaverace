@@ -1,10 +1,22 @@
-"""execution_engine.py — ExecutionEngine: esecuzione ordini via aggregatore professionale.
+"""execution_engine.py — ExecutionEngine: esecuzione ordini (exchange/aggregatori).
 
 Dal 06/09 l'esecuzione delle puntate passa dagli aggregatori professionali
-(BetInAsia BLACK / MollyBet) al posto del conto Exchange diretto: un'unica
-interfaccia Python che parla il protocollo Betfair-compatible JSON-RPC
-(SportsAPING/v1.0) — lo stesso esposto da BetInAsia BLACK e MollyBet — con
-credenziali dell'aggregatore (app key + username/password) lette SOLO da env.
+(BetInAsia BLACK / MollyBet, protocollo Betfair-compatible JSON-RPC
+SportsAPING/v1.0) al posto del conto Exchange diretto. Dal 07/09 sono
+disponibili anche i provider **Smarkets** (REST pubblica v3,
+api.smarkets.com/v3) e **SX Bet** (V3, api.sx.bet, exchange P2P crypto su
+SX Rollup/Arbitrum Orbit, chainId 4162) — scambi di quote 1X2 su calcio.
+
+Un'unica interfaccia Python (ExecutionProvider) copre tutti i provider:
+- `betinasia` / `mollybet`: JSON-RPC Betfair-compatible, credenziali
+  EXECUTION_APP_KEY / EXECUTION_USERNAME / EXECUTION_PASSWORD;
+- `smarkets`: REST v3, credenziali SMARKETS_USERNAME / SMARKETS_PASSWORD
+  (base URL personalizzabile con SMARKETS_API_BASE);
+- `sxbet`: REST V3 crypto, credenziali SX_API_KEY / SX_PRIVATE_KEY (firma
+  EIP-712 degli ordini, fondi nel proxy wallet; base URL personalizzabile
+  con SX_API_BASE, default api.sx.bet, testnet api.toronto.sx.bet);
+- `dry_run` (default senza credenziali o con EXECUTION_DRY_RUN=1):
+  nessuna rete, misura simulata.
 
 Obiettivo immediato: MISURARE latenza e slippage reali con stake minimo
 (EXECUTION_MIN_STAKE_EUR, default 1€) prima di passare a stake reali.
@@ -12,18 +24,28 @@ Ogni probe scrive una riga in data/execution/measurements.jsonl con
 latency_ms, prezzo richiesto vs matched, slippage e stato dell'ordine.
 
 Vincoli:
-- Nessuna credenziale hardcoded: app key/username/password SOLO da env
-  (EXECUTION_APP_KEY / EXECUTION_USERNAME / EXECUTION_PASSWORD), coerentemente
-  col vault segreti del progetto. Tripwire test_secret_hygiene.py incluso.
-- Senza credenziali (o con EXECUTION_DRY_RUN=1) il provider è DryRun:
-  nessuna chiamata di rete, misura simulata (utile per i test e per
-  preparare le prime chiamate reali quando arriveranno le credenziali).
+- Nessuna credenziale hardcoded: tutte le credenziali SOLO da env,
+  coerentemente col vault segreti del progetto. Tripwire
+  test_secret_hygiene.py incluso.
 - Il modulo NON importa tracker/bot (indipendente, come surebet_engine).
 
 Uso:
     venv/bin/python execution_engine.py --status                 # provider + creds configurati?
+    venv/bin/python execution_engine.py --markets [--max 20]     # elenca i mercati calcio aperti
     venv/bin/python execution_engine.py --probe --market <id> --selection <id> [--price 2.0]
     venv/bin/python execution_engine.py --probe --dry-run        # probe simulata (no rete)
+
+    # SX Bet (EXECUTION_PROVIDER=sxbet oppure --provider sxbet; discovery
+    # e book pubblici senza chiave, ordini firmati EIP-712 con la private key):
+    venv/bin/python execution_engine.py --provider sxbet --markets --max 10
+    SX_API_KEY=... SX_PRIVATE_KEY=0x... \
+        venv/bin/python execution_engine.py --provider sxbet --probe \
+        --market <marketHash_hex> --selection 1 [--price 2.0]
+
+    # Smarkets (EXECUTION_PROVIDER=smarkets oppure --provider smarkets):
+    SMARKETS_USERNAME=... SMARKETS_PASSWORD=... \
+        venv/bin/python execution_engine.py --provider smarkets --probe \
+        --market <market_id> --selection <contract_id> [--price 2.0]
 """
 
 from __future__ import annotations
@@ -31,10 +53,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -50,7 +73,8 @@ logger = logging.getLogger(__name__)
 EXECUTION_DATA_DIR = Path(os.getenv("EXECUTION_DATA_DIR", str(DATA_DIR / "execution")))
 MEASUREMENTS_LOG = EXECUTION_DATA_DIR / "measurements.jsonl"
 
-# Provider: "betinasia" | "mollybet" | "" (auto: dry_run senza credenziali)
+# Provider: "smarkets" | "betinasia" | "mollybet" | "" (auto: dry_run
+# senza credenziali). Il selettore reale è in build_provider().
 EXECUTION_PROVIDER = os.getenv("EXECUTION_PROVIDER", "").strip().lower()
 
 # Credenziali aggregatore — SOLO da env, mai hardcoded.
@@ -77,6 +101,147 @@ EXECUTION_TIMEOUT = float(os.getenv("EXECUTION_TIMEOUT", "10"))
 # Forza la modalità DryRun anche con credenziali presenti (per test/sicurezza).
 EXECUTION_DRY_RUN = os.getenv("EXECUTION_DRY_RUN", "").lower() in (
     "1", "true", "yes", "on")
+
+# ---------------------------------------------------------------------------
+# Credenziali Smarkets — SOLO da env, mai hardcoded.
+# ---------------------------------------------------------------------------
+# Provider Smarkets: API REST pubblica v3 (api.smarkets.com/v3).
+# Autenticazione: POST {base}sessions/ con username/password -> token di
+# sessione usato nell'header `Authorization: Session-Token <token>`.
+# Prezzi in probabilita' * 1e4 (5000 = 50% = quota 2.0), quantita' in
+# stake * 1e4 (10000 = 1.00 EUR). Mercati 1X2 calcio: event type
+# `football_match`, market type `match_odds`, contratti Home/Draw/Away.
+SMARKETS_USERNAME = os.getenv("SMARKETS_USERNAME", "")
+SMARKETS_PASSWORD = os.getenv("SMARKETS_PASSWORD", "")
+SMARKETS_API_BASE = os.getenv(
+    "SMARKETS_API_BASE", "https://api.smarkets.com/v3/")
+
+# ---------------------------------------------------------------------------
+# Credenziali SX Bet — SOLO da env, mai hardcoded.
+# ---------------------------------------------------------------------------
+# Provider SX Bet V3 (docs.sx.bet, V3 live dal 26/08/2026): exchange P2P
+# crypto su SX Rollup (Arbitrum Orbit, chainId 4162).
+# - letture pubbliche (markets/book/metadata) SENZA chiave;
+# - scritture (ordini, saldo, cancel) con header `x-sx-api-key`;
+# - gli ordini vanno firmati EIP-712 con la chiave privata dell'EOA
+#   (SX_PRIVATE_KEY); il capitale sta nel proxy wallet dell'account
+#   (POST /user/deploy-proxy + funding), NON nell'EOA.
+SX_API_KEY = os.getenv("SX_API_KEY", "")
+SX_PRIVATE_KEY = os.getenv("SX_PRIVATE_KEY", "")
+SX_API_BASE = os.getenv("SX_API_BASE", "https://api.sx.bet")
+# timeInForce ordini: IOC/FOK = take immediato, GTC = resta sul book.
+SX_TIME_IN_FORCE = os.getenv("SX_TIME_IN_FORCE", "IOC").upper()
+# TTL dell'ordine firmato (unix seconds, dentro la firma EIP-712).
+SX_EXPIRY_SECONDS = int(os.getenv("SX_EXPIRY_SECONDS", "3600"))
+
+# ---------------------------------------------------------------------------
+# Conversioni prezzo/stake Smarkets (unita' 1e-4)
+# ---------------------------------------------------------------------------
+
+def decimal_to_prob_bps(price: float) -> int:
+    """Quota decimale -> probabilita' in basis point Smarkets.
+
+    Smarkets tratta i contratti come probabilita' * 1e4: quota 2.0 -> 5000,
+    quota 200.0 -> 50 (come nel sample ufficiale smk_trading_bot).
+    """
+    if price < 1.01:
+        raise ValueError(f"quota decimale non valida per Smarkets: {price}")
+    return max(1, int(round(1.0 / price * 10000)))
+
+
+def prob_bps_to_decimal(bps: int) -> float:
+    """Probabilita' in basis point Smarkets -> quota decimale (5000 -> 2.0)."""
+    if not bps or bps <= 0:
+        return 0.0
+    return round(10000.0 / float(bps), 2)
+
+
+def stake_to_quantity(stake: float) -> int:
+    """Stake in valuta -> quantita' Smarkets (stake * 1e4): 1.0 EUR -> 10000."""
+    return max(1, int(round(stake * 10000)))
+
+
+def quantity_to_stake(qty: object) -> float:
+    """Quantita' Smarkets -> stake in valuta (10000 -> 1.0)."""
+    return round(float(qty) / 10000.0, 4)
+
+# ---------------------------------------------------------------------------
+# Conversioni prezzo/stake SX Bet (probabilita' * 1e20, ladder 0.125%)
+# ---------------------------------------------------------------------------
+# SX Bet tratta gli esiti come probabilita' implicita * 1e20:
+# quota 2.0 -> 5.0e19, 31.5% -> 3.15e19. La scala quote (odds ladder) ha
+# gradini da 0.125% (oddsLadderStepSize=125 dal metadata -> 1.25e17).
+SX_PROB_SCALE = 10 ** 20
+
+
+def sx_ladder_step_scaled(ladder_step_size: int) -> int:
+    """Gradino della scala quote (oddsLadderStepSize) in scala 1e20.
+
+    Dal metadata `/metadata/obv3`: oddsLadderStepSize=125 = 0.125% ->
+    gradino = 125 * 1e15 = 1.25e17 in probabilita' * 1e20.
+    """
+    return max(1, int(ladder_step_size)) * 10 ** 15
+
+
+def decimal_to_pct_scaled(price: float, step_scaled: int) -> int:
+    """Quota decimale BACK -> percentageOdds (prob. * 1e20) sulla ladder.
+
+    Arrotonda per difetto al gradino (bound del taker): si accetta al piu'
+    p = 1/quota, quindi se 1/quota non e' sulla scala il gradino piu' vicino
+    NON peggiore della quota richiesta e' quello inferiore — mai riempimenti
+    sotto la quota richiesta.
+    """
+    if price < 1.01:
+        raise ValueError(f"quota decimale non valida per SX Bet: {price}")
+    step = max(1, int(step_scaled))
+    p_raw = SX_PROB_SCALE / float(price)
+    return max(step, int(p_raw // step) * step)
+
+
+def pct_scaled_to_decimal(pct: object) -> float:
+    """percentageOdds (prob. * 1e20) -> quota decimale (3.15e19 -> 3.1746)."""
+    try:
+        p = int(pct)
+    except (TypeError, ValueError):
+        return 0.0
+    if p <= 0:
+        return 0.0
+    return round(SX_PROB_SCALE / float(p), 4)
+
+
+def stake_to_sx_units(stake: float, decimals: int = 6) -> int:
+    """Stake in valuta -> unita' base del token (USDC: 1.0 -> 1_000_000)."""
+    return max(1, int(round(stake * (10 ** int(decimals)))))
+
+
+def sx_units_to_stake(units: object, decimals: int = 6) -> float:
+    """Unita' base SX Bet -> stake in valuta (1_000_000 -> 1.0 USDC)."""
+    try:
+        return round(float(units) / (10 ** int(decimals)), 4)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _sx_levels_to_decimal(levels: object) -> List[Dict]:
+    """Livelli del book SX Bet (maker frame o taker) -> {price, size} decimali."""
+    out: List[Dict] = []
+    if not isinstance(levels, list):
+        return out
+    for lv in levels:
+        if not isinstance(lv, dict):
+            continue
+        try:
+            p = int(lv.get("percentageOdds") or 0)
+        except (TypeError, ValueError):
+            continue
+        if p <= 0:
+            continue
+        out.append({
+            "price": pct_scaled_to_decimal(p),
+            "probability": round(p / SX_PROB_SCALE, 8),
+            "size": sx_units_to_stake(lv.get("size")),
+        })
+    return out
 
 # ---------------------------------------------------------------------------
 # Dataclass risultati
@@ -111,6 +276,7 @@ class ProbeResult:
     order_status: str
     ok: bool
     error: Optional[str] = None
+    bet_id: Optional[str] = None          # id ordine/scommessa generato dal provider
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +317,17 @@ class ExecutionProvider(ABC):
     @abstractmethod
     def best_back_price(self, market_id: str, selection_id: int) -> Optional[float]:
         """Miglior prezzo BACK disponibile per la selezione (o None)."""
+
+    @abstractmethod
+    def list_market_catalogue(self, event_type_ids: tuple = ("1",),
+                              market_type: str = "MATCH_ODDS",
+                              max_results: int = 20) -> List[Dict]:
+        """Elenca i mercati disponibili (calcio per default: event type 1).
+
+        Ritorna una lista di dict con almeno:
+            market_id, market_name, event_name, country_code, open_date,
+            total_matched, runners (lista di {selection_id, name}).
+        """
 
 
 class BetfairJsonRpcProvider(ExecutionProvider):
@@ -205,6 +382,48 @@ class BetfairJsonRpcProvider(ExecutionProvider):
     def get_balance(self) -> Dict:
         result, _ = self._rpc("getAccountFunds", {})
         return result or {}
+
+    def list_market_catalogue(self, event_type_ids: tuple = ("1",),
+                              market_type: str = "MATCH_ODDS",
+                              max_results: int = 20) -> List[Dict]:
+        """listMarketCatalogue (Betfair-compatible): mercati calcio match odds.
+
+        Finestra temporale: da 1h fa (per includere partite in corso) a +48h
+        (si escludono i futuri remoti, dove lo stake minimo del probe rischia
+        di non trovare book). Ordinati per kickoff imminente.
+        """
+        now = datetime.now(timezone.utc)
+        window = {
+            "from": (now - timedelta(hours=1)).isoformat(),
+            "to": (now + timedelta(hours=48)).isoformat(),
+        }
+        result, _ = self._rpc("listMarketCatalogue", {
+            "filter": {
+                "eventTypeIds": list(event_type_ids),
+                "marketTypeCodes": [market_type],
+                "marketStartTime": window,
+            },
+            "maxResults": max_results,
+            "marketProjection": ["COMPETITION", "EVENT", "RUNNER_DESCRIPTION",
+                                 "MARKET_START_TIME"],
+            "sort": "FIRST_TO_START",
+        })
+        out: List[Dict] = []
+        for m in (result or []):
+            runners = [{"selection_id": r.get("selectionId"),
+                        "name": r.get("runnerName")}
+                       for r in m.get("runners", [])]
+            out.append({
+                "market_id": m.get("marketId"),
+                "market_name": m.get("marketName"),
+                "event_name": (m.get("event") or {}).get("name"),
+                "event_id": (m.get("event") or {}).get("id"),
+                "country_code": (m.get("event") or {}).get("countryCode"),
+                "open_date": (m.get("event") or {}).get("openDate"),
+                "total_matched": m.get("totalMatched"),
+                "runners": runners,
+            })
+        return out
 
     def get_market_book(self, market_id: str) -> Dict:
         result, _ = self._rpc("listMarketBook", {
@@ -289,6 +508,646 @@ class MollyBetProvider(BetfairJsonRpcProvider):
     name = "mollybet"
 
 
+class SmarketsProvider(ExecutionProvider):
+    """Provider Smarkets — API REST pubblica v3 (https://api.smarkets.com/v3/).
+
+    Protocollo (dal sample ufficiale Smarkets `smk_trading_bot`):
+    - autenticazione: POST {base}sessions/ con {username, password} ->
+      {token}; le richieste autenticate usano l'header
+      `Authorization: Session-Token <token>` (token in cache 1h);
+    - prezzi in probabilita' * 1e4 (50 = 0.5% = quota decimale 200.0),
+      quantita' in stake * 1e4 (500000 = 50.00 EUR);
+    - side: `buy` = BACK, `sell` = LAY (Smarkets non ha i persistence type
+      Betfair: il parametro viene accettato e ignorato);
+    - mercato 1X2 calcio: event type `football_match`, market type
+      `match_odds`, contratti "Home"/"Draw"/"Away" — il contract_id
+      corrisponde al selection_id dell'interfaccia.
+
+    Le quote (`markets/<id>/quotes/`) espongono per ogni contratto il
+    miglior prezzo `buy` e `sell` in basis point: `best_back_price`
+    restituisce il prezzo `buy` convertito in quota decimale (la semantica
+    buy/sell esatta va verificata col primo probe reale).
+    """
+
+    name = "smarkets"
+
+    def __init__(self, username: str = "", password: str = "",
+                 api_base: Optional[str] = None) -> None:
+        super().__init__(app_key="", username=username, password=password)
+        self.api_base = (api_base or SMARKETS_API_BASE).rstrip("/") + "/"
+
+    # -- auth ----------------------------------------------------------
+    def _login(self) -> str:
+        """Login a sessions/ e cache del token di sessione (1h)."""
+        if self._token and (time.time() - self._token_ts) < 3600:
+            return self._token
+        if not (self.username and self.password):
+            raise RuntimeError(
+                "credenziali Smarkets mancanti (SMARKETS_USERNAME/PASSWORD)")
+        resp = requests.post(
+            f"{self.api_base}sessions/",
+            json={"username": self.username, "password": self.password},
+            timeout=EXECUTION_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        token = data.get("token") if isinstance(data, dict) else None
+        if not token:
+            raise RuntimeError(f"login Smarkets fallito: {data}")
+        self._token = token
+        self._token_ts = time.time()
+        return self._token
+
+    def _headers(self) -> Dict:
+        return {"Authorization": f"Session-Token {self._login()}"}
+
+    def _get(self, path: str, params: Optional[Dict] = None) -> Dict:
+        resp = requests.get(
+            f"{self.api_base}{path}", params=params, headers=self._headers(),
+            timeout=EXECUTION_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _post(self, path: str, payload: Dict) -> Dict:
+        resp = requests.post(
+            f"{self.api_base}{path}", json=payload, headers=self._headers(),
+            timeout=EXECUTION_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+
+    # -- interfaccia ExecutionProvider --------------------------------
+    def get_balance(self) -> Dict:
+        data = self._get("accounts/")
+        accounts = data.get("accounts") or []
+        return accounts[0] if accounts else data
+
+    def list_market_catalogue(self, event_type_ids: tuple = ("football_match",),
+                              market_type: str = "match_odds",
+                              max_results: int = 20) -> List[Dict]:
+        """Discovery: eventi calcio (`football_match`) + mercati + contratti.
+
+        Finestra temporale −1h/+48h (come il provider Betfair-compatible),
+        ordinati per kickoff imminente. Per ogni evento scarica i mercati
+        (filtra per `market_type`, default match_odds = 1X2) e i contratti.
+        Fail-soft: un evento/mercato con errori viene saltato con un log.
+        """
+        now = datetime.now(timezone.utc)
+        params = {
+            "types": ",".join(event_type_ids),
+            "states": "upcoming",
+            "sort": "start_datetime",
+            "limit": max_results,
+            "start_datetime_min": (now - timedelta(hours=1)).isoformat(),
+            "start_datetime_max": (now + timedelta(hours=48)).isoformat(),
+        }
+        data = self._get("events/", params)
+        events = data.get("events") or []
+        out: List[Dict] = []
+        for ev in events:
+            event_id = ev.get("id")
+            try:
+                mdata = self._get(f"events/{event_id}/markets/",
+                                  {"with_volumes": "true"})
+            except Exception as e:
+                logger.warning("smarkets: mercati evento %s falliti: %s",
+                               event_id, e)
+                continue
+            for m in (mdata.get("markets") or []):
+                if market_type and m.get("type") != market_type:
+                    continue
+                try:
+                    cdata = self._get(f"markets/{m['id']}/contracts/")
+                except Exception as e:
+                    logger.warning("smarkets: contratti mercato %s falliti: %s",
+                                   m.get("id"), e)
+                    continue
+                runners = [{"selection_id": c.get("id"),
+                            "name": c.get("name")}
+                           for c in (cdata.get("contracts") or [])]
+                # volume totale dal payload dei mercati (with_volumes)
+                total = None
+                for c in (m.get("contracts") or []):
+                    v = c.get("volume")
+                    if v is not None:
+                        total = (total or 0.0) + float(v)
+                out.append({
+                    "market_id": m.get("id"),
+                    "market_name": m.get("name"),
+                    "event_name": ev.get("name"),
+                    "event_id": event_id,
+                    "country_code": None,
+                    "open_date": ev.get("start_datetime"),
+                    "total_matched": total,
+                    "runners": runners,
+                })
+        return out
+
+    def get_market_book(self, market_id: str) -> Dict:
+        quotes = self._get(f"markets/{market_id}/quotes/")
+        if not isinstance(quotes, dict):
+            return {"marketId": market_id, "status": "OPEN", "runners": []}
+        return {
+            "marketId": market_id, "status": "OPEN",
+            "runners": [{"selectionId": int(cid) if str(cid).isdigit() else cid,
+                          "quotes": book}
+                         for cid, book in quotes.items()],
+        }
+
+    def best_back_price(self, market_id: str, selection_id: int) -> Optional[float]:
+        """Miglior prezzo `buy` del contratto, convertito in quota decimale."""
+        try:
+            quotes = self._get(f"markets/{market_id}/quotes/")
+        except Exception as e:
+            logger.warning("smarkets: quote mercato %s fallite: %s",
+                           market_id, e)
+            return None
+        if not isinstance(quotes, dict):
+            return None
+        book = quotes.get(str(selection_id))
+        if not isinstance(book, dict):
+            return None
+        bps = _quotes_entry_price(book.get("buy"))
+        if not bps:
+            return None
+        return prob_bps_to_decimal(int(bps))
+
+    def place_limit_order(self, market_id: str, selection_id: int,
+                          side: str, price: float, size: float,
+                          persistence: str = "LAPSE") -> OrderResult:
+        side = side.upper()
+        sm_side = {"BACK": "buy", "LAY": "sell"}.get(side)
+        if sm_side is None:
+            return OrderResult(False, None, "FAILURE", price, None, 0.0,
+                               0.0, error=f"side non valido: {side}")
+        try:
+            price_bps = decimal_to_prob_bps(price)
+        except ValueError as e:
+            return OrderResult(False, None, "FAILURE", price, None, 0.0,
+                               0.0, error=str(e))
+        quantity = stake_to_quantity(size)
+        t0 = time.perf_counter()
+        try:
+            data = self._post("orders/", {
+                "market_id": market_id,
+                "contract_id": selection_id,
+                "side": sm_side,
+                "price": price_bps,
+                "quantity": quantity,
+                "reference_id": str(int(time.time() * 1000)),
+            })
+        except Exception as e:
+            latency_ms = (time.perf_counter() - t0) * 1000.0
+            return OrderResult(False, None, "FAILURE", price, None, 0.0,
+                               latency_ms, error=str(e))
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+
+        order = data.get("order") if isinstance(data.get("order"), dict) else None
+        if order is None:
+            orders = data.get("orders")
+            if isinstance(orders, list) and orders and isinstance(orders[0], dict):
+                order = orders[0]
+        order = order if isinstance(order, dict) else data
+
+        status = str(order.get("status") or "SUCCESS").upper()
+        ok = status in ("CREATED", "FILLED", "PARTIAL", "SUCCESS")
+        matched_price = order.get("average_executed_price") \
+            or order.get("average_price")
+        matched_qty = order.get("executed_quantity") \
+            or order.get("matched_quantity") or 0
+        return OrderResult(
+            ok=ok,
+            bet_id=str(order.get("id") or order.get("order_id")
+                        or "") or None,
+            status=status,
+            price_requested=price,
+            price_matched=prob_bps_to_decimal(int(matched_price))
+            if matched_price else None,
+            size_matched=quantity_to_stake(matched_qty),
+            latency_ms=latency_ms,
+            error=None if ok else str(order.get("error_type")
+                                      or order.get("error") or "place failed"),
+        )
+
+    def cancel_order(self, market_id: str, bet_id: str) -> bool:
+        try:
+            resp = requests.delete(
+                f"{self.api_base}orders/{bet_id}/", headers=self._headers(),
+                timeout=EXECUTION_TIMEOUT)
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            logger.warning("smarkets: cancel ordine %s fallita: %s", bet_id, e)
+            return False
+
+
+def _quotes_entry_price(entry: object) -> Optional[int]:
+    """Estrae il prezzo (bps) da un'entrata quote Smarkets, difensivo.
+
+    Supporta sia il formato dict {"price": ...} che liste di [price, qty]
+    o di dict {"price": ...} (primo elemento = migliore).
+    """
+    if isinstance(entry, dict):
+        price = entry.get("price")
+        return int(price) if price else None
+    if isinstance(entry, list):
+        for item in entry:
+            if isinstance(item, dict) and item.get("price"):
+                return int(item["price"])
+            if isinstance(item, (list, tuple)) and item and item[0]:
+                return int(item[0])
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Provider SX Bet (V3)
+# ---------------------------------------------------------------------------
+
+# Campi firmati EIP-712 dell'ordine V3 (docs.sx.bet/api-reference/eip712-order-signing).
+_SX_ORDER_TYPES = {
+    "Order": [
+        {"name": "marketHash", "type": "bytes32"},
+        {"name": "baseToken", "type": "address"},
+        {"name": "totalBetSize", "type": "uint256"},
+        {"name": "percentageOdds", "type": "uint256"},
+        {"name": "salt", "type": "uint256"},
+        {"name": "expiry", "type": "uint256"},
+        {"name": "maker", "type": "address"},
+        {"name": "isMakerBettingOutcomeOne", "type": "bool"},
+    ],
+}
+
+
+class SxBetProvider(ExecutionProvider):
+    """Provider SX Bet V3 — exchange P2P crypto (SX Rollup, Arbitrum Orbit).
+
+    Protocollo (docs.sx.bet, V3 live dal 26/08/2026; la V2 non esiste piu'):
+    - letture pubbliche senza chiave: /markets/active, /orderbook-v3/snapshot,
+      /metadata/obv3; scritture con header `x-sx-api-key`;
+    - i mercati sono BINARI (outcomeOne/outcomeTwo). Il 1X2 calcio e' il
+      market type 1, decomposto in tre mercati "X vs Not X" (Home/Tie/Away):
+      ogni esito singolo del 1X2 si piazza sul suo mercato binario
+      (selection_id 1 = esito X, 2 = "Not X");
+    - ordine firmato EIP-712 con la chiave privata dell'EOA (SX_PRIVATE_KEY),
+      domain dal metadata ("OBv3 Escrow", version "1", chainId della rete);
+      `percentageOdds` = worst price accettato in probabilita' * 1e20
+      (ladder 0.125%), `totalBetSize` in unita' base USDC (6 decimali);
+    - `timeInForce`: GTC = resta sul book, IOC/FOK = take immediato.
+      Questo provider piazza di default in modalita' taker (IOC), ovvero
+      "al prezzo richiesto o meglio" — coerente col flusso value del bot;
+    - il capitale sta nel proxy wallet dell'account (POST /user/deploy-proxy),
+      NON nell'EOA: prima del primo ordine reale va deployato e finanziato
+      (wizard UI o via API con SX_API_KEY).
+    """
+
+    name = "sxbet"
+
+    def __init__(self, api_key: str = "", private_key: str = "",
+                 api_base: Optional[str] = None,
+                 time_in_force: Optional[str] = None) -> None:
+        super().__init__()
+        self.api_key = api_key
+        self.private_key = private_key
+        self.api_base = (api_base or SX_API_BASE).rstrip("/")
+        self.time_in_force = (time_in_force or SX_TIME_IN_FORCE).upper()
+        if self.time_in_force not in ("GTC", "IOC", "FOK"):
+            self.time_in_force = "IOC"
+        self._meta: Optional[Dict] = None
+        self._meta_ts: float = 0.0
+        self._acct = None
+
+    # -- helpers rete ----------------------------------------------------
+    def _headers(self, auth: bool = True) -> Dict:
+        headers = {"Content-Type": "application/json"}
+        if auth:
+            if not self.api_key:
+                raise RuntimeError(
+                    "credenziali SX Bet mancanti (SX_API_KEY)")
+            headers["x-sx-api-key"] = self.api_key
+        return headers
+
+    def _get(self, path: str, params: Optional[Dict] = None,
+             auth: bool = False) -> Dict:
+        resp = requests.get(f"{self.api_base}/{path}", params=params,
+                            headers=self._headers(auth),
+                            timeout=EXECUTION_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _post(self, path: str, payload: Dict, timeout: Optional[float] = None) -> Dict:
+        # waitForOutcome puo' richiedere fino a ~15s lato server.
+        resp = requests.post(f"{self.api_base}/{path}", json=payload,
+                             headers=self._headers(auth=True),
+                             timeout=timeout or (EXECUTION_TIMEOUT + 20))
+        resp.raise_for_status()
+        return resp.json()
+
+    def _metadata(self) -> Dict:
+        """Metadata V3 (chainId, domain EIP-712, baseToken, ladder, limiti) — cache 15'."""
+        if self._meta and (time.time() - self._meta_ts) < 900:
+            return self._meta
+        data = self._get("metadata/obv3")
+        meta = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(meta, dict):
+            raise RuntimeError(f"metadata SX Bet non valido: {data}")
+        self._meta = meta
+        self._meta_ts = time.time()
+        return self._meta
+
+    def _account(self):
+        """Account EIP-155 dalla chiave privata (eth-account, import lazy)."""
+        if self._acct is None:
+            if not self.private_key:
+                raise RuntimeError(
+                    "credenziali SX Bet mancanti (SX_PRIVATE_KEY)")
+            try:
+                from eth_account import Account as _EthAccount
+            except ImportError as e:  # pragma: no cover
+                raise RuntimeError(
+                    "eth-account non installato: aggiungere eth-account a "
+                    "requirements.txt (pip install eth-account)") from e
+            self._acct = _EthAccount.from_key(self.private_key)
+        return self._acct
+
+    def _step_scaled(self) -> int:
+        meta = self._metadata()
+        return sx_ladder_step_scaled(int(meta.get("oddsLadderStepSize") or 125))
+
+    def _sign_order(self, order: Dict) -> str:
+        """Firma EIP-712 dell'ordine V3 (8 campi, salt PRIMA di expiry)."""
+        acct = self._account()
+        from eth_account.messages import encode_typed_data
+        meta = self._metadata()
+        message = {
+            "marketHash": order["marketHash"],
+            "baseToken": order["baseToken"],
+            "totalBetSize": int(order["totalBetSize"]),
+            "percentageOdds": int(order["percentageOdds"]),
+            "salt": int(order["salt"], 16),
+            "expiry": int(order["expiry"]),
+            "maker": order["maker"],
+            "isMakerBettingOutcomeOne": bool(order["isMakerBettingOutcomeOne"]),
+        }
+        signable = encode_typed_data(meta["domain"], _SX_ORDER_TYPES, message)
+        return acct.sign_message(signable).signature.to_0x_hex()
+
+    # -- interfaccia ExecutionProvider ---------------------------------
+    def get_balance(self) -> Dict:
+        """Saldo del proxy wallet: available = spendibile per gli ordini."""
+        data = self._get("user/balance-v3", auth=True)
+        d = data.get("data") if isinstance(data, dict) else None
+        balances = (d or {}).get("balances") or []
+        if not balances:
+            return {"availableBalance": 0.0, "exposure": 0.0, "raw": d}
+        b = balances[0]
+        meta = self._metadata()
+        decimals = int(meta.get("activeAsset", {}).get("decimals") or 6)
+
+        def units(v: object) -> float:
+            try:
+                return round(float(str(v)) / (10 ** decimals), 4)
+            except (TypeError, ValueError):
+                return 0.0
+
+        return {
+            "availableBalance": units(b.get("availableAmount")),
+            "exposure": (units(b.get("escrowedAmount"))
+                          + units(b.get("pendingEscrowAmount"))),
+            "pendingAvailable": units(b.get("pendingAvailableAmount")),
+            "wallet": b.get("wallet"),
+            "userAddress": b.get("userAddress"),
+            "tokenAddress": b.get("tokenAddress"),
+            "raw": b,
+        }
+
+    def list_market_catalogue(self, event_type_ids: tuple = ("5",),
+                              market_type: str = "1X2",
+                              max_results: int = 20) -> List[Dict]:
+        """Discovery 1X2 calcio: i mercati binari type 1 ("X vs Not X").
+
+        `event_type_ids` = id sport SX (default ("5",) = Soccer; vedi
+        GET /sports); `market_type` e' accettato per compatibilita' e
+        ignorato (il 1X2 di SX e' sempre il type 1). Pagina da 100 con
+        `nextKey`, fermandosi a `max_results`.
+        """
+        sport_ids = ",".join(str(s) for s in (event_type_ids or ("5",)))
+        out: List[Dict] = []
+        pagination_key: Optional[str] = None
+        while len(out) < max_results:
+            params: Dict = {"sportIds": sport_ids, "type": "1",
+                            "pageSize": 100}
+            if pagination_key:
+                params["paginationKey"] = pagination_key
+            try:
+                data = self._get("markets/active", params=params)
+            except Exception as e:
+                logger.warning("sxbet: discovery mercati fallita: %s", e)
+                break
+            d = data.get("data") if isinstance(data, dict) else {}
+            markets = (d or {}).get("markets") or []
+            for m in markets:
+                if len(out) >= max_results:
+                    break
+                game_time = m.get("gameTime")
+                open_date = (datetime.fromtimestamp(
+                    int(game_time), tz=timezone.utc).isoformat()
+                    if game_time else None)
+                out.append({
+                    "market_id": m.get("marketHash"),
+                    "market_name": "1X2 - " + str(m.get("outcomeOneName")),
+                    "event_name": f"{m.get('teamOneName')} vs "
+                                  f"{m.get('teamTwoName')}",
+                    "event_id": m.get("sportXeventId"),
+                    "country_code": None,
+                    "open_date": open_date,
+                    "total_matched": None,
+                    "runners": [
+                        {"selection_id": 1,
+                         "name": m.get("outcomeOneName")},
+                        {"selection_id": 2,
+                         "name": m.get("outcomeTwoName")},
+                    ],
+                })
+            pagination_key = (d or {}).get("nextKey")
+            if not pagination_key or not markets:
+                break
+        return out[:max_results]
+
+    def get_market_book(self, market_id: str) -> Dict:
+        """Snapshot del book (prospettiva taker): best price per esito."""
+        data = self._get("orderbook-v3/snapshot", params={
+            "marketHash": market_id, "showTakerPerspective": "true"})
+        d = data.get("data") if isinstance(data, dict) else {}
+        return {
+            "marketId": market_id,
+            "status": "OPEN",
+            "version": (d or {}).get("version"),
+            "runners": [
+                {"selectionId": 1,
+                 "availableToBack": _sx_levels_to_decimal(
+                     (d or {}).get("outcomeOne"))},
+                {"selectionId": 2,
+                 "availableToBack": _sx_levels_to_decimal(
+                     (d or {}).get("outcomeTwo"))},
+            ],
+        }
+
+    def best_back_price(self, market_id: str,
+                        selection_id: int) -> Optional[float]:
+        """Miglior prezzo taker per l'esito (selection 1|2) in quota decimale.
+
+        Book con showTakerPerspective=true: il livello [0] della side e' il
+        migliore per chi vuole scommettere quell'esito (prob. piu' bassa =
+        quota piu' alta).
+        """
+        try:
+            data = self._get("orderbook-v3/snapshot", params={
+                "marketHash": market_id, "showTakerPerspective": "true"})
+        except Exception as e:
+            logger.warning("sxbet: book %s fallito: %s", market_id, e)
+            return None
+        d = data.get("data") if isinstance(data, dict) else {}
+        levels = ((d or {}).get("outcomeOne") if int(selection_id) == 1
+                  else (d or {}).get("outcomeTwo"))
+        if not isinstance(levels, list) or not levels:
+            return None
+        best = levels[0]
+        if not isinstance(best, dict):
+            return None
+        return pct_scaled_to_decimal(best.get("percentageOdds")) or None
+
+    def place_limit_order(self, market_id: str, selection_id: int,
+                          side: str, price: float, size: float,
+                          persistence: str = "LAPSE") -> OrderResult:
+        """Ordine firmato EIP-712 su /orders-v3 (waitForOutcome).
+
+        Mappatura: side BACK su selection 1|2 -> si scommette quell'esito;
+        side LAY su selection X -> si scommette l'esito complementare al
+        prezzo equivalente (prob. complementare). persistence "PERSIST" ->
+        GTC (resta sul book), altrimenti il timeInForce configurato
+        (default IOC = take al prezzo richiesto o meglio).
+        """
+        side = side.upper()
+        sel = 1 if int(selection_id) == 1 else 2
+        if not self.api_key:
+            return OrderResult(False, None, "FAILURE", price, None, 0.0, 0.0,
+                               error="credenziali SX Bet mancanti (SX_API_KEY)")
+        if not self.private_key:
+            return OrderResult(False, None, "FAILURE", price, None, 0.0, 0.0,
+                               error="credenziali SX Bet mancanti (SX_PRIVATE_KEY)")
+        if side == "LAY":
+            # lay X == back not-X: prezzo complementare equivalente
+            p_sel = SX_PROB_SCALE / float(price)
+            p_other = SX_PROB_SCALE - p_sel
+            if p_other <= 0:
+                return OrderResult(False, None, "FAILURE", price, None, 0.0,
+                                   0.0, error="LAY: prob. complementare non valida")
+            price = SX_PROB_SCALE / p_other  # quota dell'esito opposto
+            sel = 2 if sel == 1 else 1
+        elif side != "BACK":
+            return OrderResult(False, None, "FAILURE", price, None, 0.0, 0.0,
+                               error=f"side non valido: {side}")
+        if float(size) < 1.0:
+            return OrderResult(False, None, "FAILURE", price, None, 0.0, 0.0,
+                               error=f"stake minimo SX Bet: 1 USDC "
+                                     f"(ricevuto {size})")
+
+        try:
+            meta = self._metadata()
+            step = sx_ladder_step_scaled(
+                int(meta.get("oddsLadderStepSize") or 125))
+            base_token = meta["activeAsset"]["baseToken"]
+            decimals = int(meta.get("activeAsset", {}).get("decimals") or 6)
+        except Exception as e:
+            return OrderResult(False, None, "FAILURE", price, None, 0.0, 0.0,
+                               error=str(e))
+
+        units = stake_to_sx_units(size, decimals)
+        if units < 10 ** decimals:
+            return OrderResult(False, None, "FAILURE", price, None, 0.0, 0.0,
+                               error=f"stake minimo SX Bet: 1 USDC "
+                                     f"(ricevuto {size})")
+        try:
+            p_bound = decimal_to_pct_scaled(price, step)
+        except ValueError as e:
+            return OrderResult(False, None, "FAILURE", price, None, 0.0, 0.0,
+                               error=str(e))
+
+        tif = "GTC" if persistence.upper() == "PERSIST" else self.time_in_force
+        try:
+            maker = self._account().address
+        except RuntimeError as e:
+            return OrderResult(False, None, "FAILURE", price, None, 0.0, 0.0,
+                               error=str(e))
+        order = {
+            "marketHash": market_id,
+            "maker": maker,
+            "totalBetSize": str(units),
+            "percentageOdds": str(p_bound),
+            "salt": "0x" + secrets.token_hex(32),
+            "expiry": int(time.time()) + SX_EXPIRY_SECONDS,
+            "baseToken": base_token,
+            "isMakerBettingOutcomeOne": sel == 1,
+            "timeInForce": tif,
+        }
+        try:
+            order["orderSignature"] = self._sign_order(order)
+        except Exception as e:
+            return OrderResult(False, None, "FAILURE", price, None, 0.0, 0.0,
+                               error=str(e))
+
+        payload = {"orders": [order], "waitForOutcome": True}
+        t0 = time.perf_counter()
+        try:
+            data = self._post("orders-v3", payload)
+        except Exception as e:
+            latency_ms = (time.perf_counter() - t0) * 1000.0
+            return OrderResult(False, None, "FAILURE", price, None, 0.0,
+                               latency_ms, error=str(e))
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+
+        d = data.get("data") if isinstance(data, dict) else {}
+        entries = (d or {}).get("orders") or []
+        o = entries[0] if isinstance(entries, list) and entries else None
+        if not isinstance(o, dict):
+            return OrderResult(False, None, "FAILURE", price, None, 0.0,
+                               latency_ms, error="risposta ordine vuota")
+        status = str(o.get("status") or "SUBMITTED").upper()
+        if status == "FAILED":
+            return OrderResult(False, o.get("orderId"), status, price, None,
+                               0.0, latency_ms,
+                               error=str(o.get("message") or "ordine rifiutato"))
+        outcome = o.get("outcome") or {}
+        state = str(outcome.get("state") or "").upper()
+        ok = state in ("FULLY_FILLED", "PARTIAL_FILL_DONE")
+        blended = outcome.get("blendedOdds")
+        return OrderResult(
+            ok=ok,
+            bet_id=str(o.get("orderId") or "") or None,
+            status=state or status,
+            price_requested=price,
+            price_matched=pct_scaled_to_decimal(blended)
+            if blended is not None else None,
+            size_matched=sx_units_to_stake(outcome.get("fillAmount"), decimals),
+            latency_ms=latency_ms,
+            error=None if ok else (None if not state
+                                   else "ordine non riempito"),
+        )
+
+    def cancel_order(self, market_id: str, bet_id: str) -> bool:
+        """Cancella ordini per id (DELETE /orders-v3, solo x-sx-api-key)."""
+        if not bet_id:
+            return False
+        try:
+            resp = requests.delete(f"{self.api_base}/orders-v3",
+                                   headers=self._headers(auth=True),
+                                   json={"orders": [{"orderId": bet_id}]},
+                                   timeout=EXECUTION_TIMEOUT)
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            logger.warning("sxbet: cancel ordine %s fallita: %s", bet_id, e)
+            return False
+
+
 class DryRunProvider(ExecutionProvider):
     """Provider simulato: nessuna rete, latenza e slippage sintetici.
 
@@ -314,6 +1173,27 @@ class DryRunProvider(ExecutionProvider):
     def best_back_price(self, market_id: str, selection_id: int) -> Optional[float]:
         return None  # il prezzo lo passa il chiamante nel probe
 
+    def list_market_catalogue(self, event_type_ids: tuple = ("1",),
+                              market_type: str = "MATCH_ODDS",
+                              max_results: int = 20) -> List[Dict]:
+        """Catalogue simulato: due match di calcio finti (per --markets)."""
+        return [
+            {"market_id": "1.1001", "market_name": "Match Odds",
+             "event_name": "Dry FC vs Run FC", "event_id": "3001",
+             "country_code": "IT", "open_date": "2026-09-07T19:00:00Z",
+             "total_matched": 12000.0,
+             "runners": [{"selection_id": 5001, "name": "Dry FC"},
+                          {"selection_id": 5002, "name": "Run FC"},
+                          {"selection_id": 5003, "name": "Draw"}]},
+            {"market_id": "1.1002", "market_name": "Match Odds",
+             "event_name": "Beta FC vs Alpha FC", "event_id": "3002",
+             "country_code": "EN", "open_date": "2026-09-07T19:45:00Z",
+             "total_matched": 8900.0,
+             "runners": [{"selection_id": 5101, "name": "Beta FC"},
+                          {"selection_id": 5102, "name": "Alpha FC"},
+                          {"selection_id": 5103, "name": "Draw"}]},
+        ][:max_results]
+
     def place_limit_order(self, market_id: str, selection_id: int,
                           side: str, price: float, size: float,
                           persistence: str = "LAPSE") -> OrderResult:
@@ -329,30 +1209,64 @@ class DryRunProvider(ExecutionProvider):
 # Factory provider
 # ---------------------------------------------------------------------------
 
+def _creds_configured() -> bool:
+    """Credenziali del provider selezionato da EXECUTION_PROVIDER."""
+    if EXECUTION_PROVIDER == "sxbet":
+        return bool(SX_API_KEY and SX_PRIVATE_KEY)
+    if EXECUTION_PROVIDER == "smarkets":
+        return bool(SMARKETS_USERNAME and SMARKETS_PASSWORD)
+    if EXECUTION_PROVIDER in ("betinasia", "mollybet"):
+        return bool(EXECUTION_APP_KEY and EXECUTION_USERNAME
+                    and EXECUTION_PASSWORD)
+    return False
+
+
 def build_provider() -> ExecutionProvider:
     """Seleziona il provider da env: EXECUTION_PROVIDER + credenziali.
 
     Regole:
-    - EXECUTION_DRY_RUN=1 o credenziali mancanti -> DryRunProvider;
-    - EXECUTION_PROVIDER=betinasia  -> BetInAsiaBlackProvider;
-    - EXECUTION_PROVIDER=mollybet   -> MollyBetProvider;
-    - altrimenti -> DryRunProvider (default sicuro).
+    - EXECUTION_DRY_RUN=1                      -> DryRunProvider;
+    - EXECUTION_PROVIDER=sxbet                 -> SxBetProvider
+      (credenziali SX_API_KEY/SX_PRIVATE_KEY);
+    - EXECUTION_PROVIDER=smarkets              -> SmarketsProvider
+      (credenziali SMARKETS_USERNAME/PASSWORD);
+    - EXECUTION_PROVIDER=betinasia|mollybet    -> provider aggregatore
+      (credenziali EXECUTION_APP_KEY/USERNAME/PASSWORD);
+    - credenziali mancanti o provider ignoto   -> DryRunProvider (default
+      sicuro: nessuna chiamata di rete).
     """
-    if EXECUTION_DRY_RUN or not (EXECUTION_APP_KEY and EXECUTION_USERNAME
-                                 and EXECUTION_PASSWORD):
-        if not (EXECUTION_APP_KEY and EXECUTION_USERNAME and EXECUTION_PASSWORD):
-            logger.warning(
-                "execution: credenziali aggregatore mancanti "
-                "(EXECUTION_APP_KEY/USERNAME/PASSWORD) -> DryRunProvider")
+    if EXECUTION_DRY_RUN:
         return DryRunProvider()
-    if EXECUTION_PROVIDER == "betinasia":
-        return BetInAsiaBlackProvider(EXECUTION_APP_KEY, EXECUTION_USERNAME,
-                                      EXECUTION_PASSWORD)
-    if EXECUTION_PROVIDER == "mollybet":
-        return MollyBetProvider(EXECUTION_APP_KEY, EXECUTION_USERNAME,
-                                EXECUTION_PASSWORD)
-    logger.warning("execution: EXECUTION_PROVIDER='%s' non riconosciuto "
-                   "(betinasia|mollybet) -> DryRunProvider", EXECUTION_PROVIDER)
+    if EXECUTION_PROVIDER == "sxbet":
+        if SX_API_KEY and SX_PRIVATE_KEY:
+            return SxBetProvider(SX_API_KEY, SX_PRIVATE_KEY)
+        logger.warning(
+            "execution: credenziali SX Bet mancanti "
+            "(SX_API_KEY/SX_PRIVATE_KEY) -> DryRunProvider")
+        return DryRunProvider()
+    if EXECUTION_PROVIDER == "smarkets":
+        if SMARKETS_USERNAME and SMARKETS_PASSWORD:
+            return SmarketsProvider(SMARKETS_USERNAME, SMARKETS_PASSWORD)
+        logger.warning(
+            "execution: credenziali Smarkets mancanti "
+            "(SMARKETS_USERNAME/PASSWORD) -> DryRunProvider")
+        return DryRunProvider()
+    if EXECUTION_PROVIDER in ("betinasia", "mollybet"):
+        if EXECUTION_APP_KEY and EXECUTION_USERNAME and EXECUTION_PASSWORD:
+            if EXECUTION_PROVIDER == "betinasia":
+                return BetInAsiaBlackProvider(EXECUTION_APP_KEY,
+                                              EXECUTION_USERNAME,
+                                              EXECUTION_PASSWORD)
+            return MollyBetProvider(EXECUTION_APP_KEY, EXECUTION_USERNAME,
+                                    EXECUTION_PASSWORD)
+        logger.warning(
+            "execution: credenziali aggregatore mancanti "
+            "(EXECUTION_APP_KEY/USERNAME/PASSWORD) -> DryRunProvider")
+        return DryRunProvider()
+    if EXECUTION_PROVIDER:
+        logger.warning("execution: EXECUTION_PROVIDER='%s' non riconosciuto "
+                       "(sxbet|smarkets|betinasia|mollybet) -> DryRunProvider",
+                       EXECUTION_PROVIDER)
     return DryRunProvider()
 
 
@@ -375,12 +1289,30 @@ class ExecutionEngine:
         return {
             "provider": self.provider.name,
             "dry_run": isinstance(self.provider, DryRunProvider),
-            "creds": bool(EXECUTION_APP_KEY and EXECUTION_USERNAME
-                          and EXECUTION_PASSWORD),
+            "creds": _creds_configured(),
+            "creds_env": ("SX_API_KEY/SX_PRIVATE_KEY"
+                           if EXECUTION_PROVIDER == "sxbet" else
+                           "SMARKETS_USERNAME/PASSWORD"
+                           if EXECUTION_PROVIDER == "smarkets" else
+                           "EXECUTION_APP_KEY/USERNAME/PASSWORD"
+                           if EXECUTION_PROVIDER in ("betinasia", "mollybet")
+                           else ""),
             "min_stake_eur": self.min_stake,
             "max_stake_eur": EXECUTION_MAX_STAKE_EUR,
             "measurements_log": str(MEASUREMENTS_LOG),
         }
+
+    def discover_markets(self, max_results: int = 20) -> List[Dict]:
+        """Elenca i mercati calcio (match odds) disponibili per il probe.
+
+        Fail-closed: in caso di errore ritorna la lista vuota e logga il
+        problema (il chiamante decide se considerarlo bloccante).
+        """
+        try:
+            return self.provider.list_market_catalogue(max_results=max_results)
+        except Exception as e:
+            logger.warning("execution: discovery mercati fallita: %s", e)
+            return []
 
     # -- probe latenza/slippage ------------------------------------------
     def probe(self, market_id: str, selection_id: int,
@@ -423,7 +1355,7 @@ class ExecutionEngine:
                 stake=stake, price_best_available=best,
                 price_requested=price_req, price_matched=None,
                 slippage=None, slippage_vs_best=None, latency_ms=latency_ms,
-                order_status="FAILURE", ok=False, error=str(e))
+                order_status="FAILURE", ok=False, error=str(e), bet_id=None)
             self._log_measurement(res)
             return res
         wall_ms = (time.perf_counter() - t0) * 1000.0
@@ -450,7 +1382,7 @@ class ExecutionEngine:
             price_requested=price_req, price_matched=matched,
             slippage=slippage, slippage_vs_best=slip_vs_best,
             latency_ms=latency_ms, order_status=order.status,
-            ok=order.ok, error=order.error)
+            ok=order.ok, error=order.error, bet_id=order.bet_id)
         self._log_measurement(res)
         return res
 
@@ -471,14 +1403,19 @@ class ExecutionEngine:
 def main(argv: Optional[List[str]] = None) -> int:
     import argparse
     ap = argparse.ArgumentParser(
-        description="ExecutionEngine — esecuzione via aggregatore "
-                    "(BetInAsia BLACK / MollyBet)")
+        description="ExecutionEngine — esecuzione via exchange/aggregatore "
+                    "(sxbet | smarkets | betinasia | mollybet | dry-run)")
+    ap.add_argument("--provider", type=str, default="",
+                    choices=("sxbet", "smarkets", "betinasia", "mollybet",
+                             "dry_run"),
+                    help="forza il provider (default: EXECUTION_PROVIDER env; "
+                         "dry_run = nessuna rete)")
     ap.add_argument("--status", action="store_true",
                     help="stato provider + credenziali (senza stamparle)")
     ap.add_argument("--probe", action="store_true",
                     help="probe a stake minimo: misura latenza e slippage")
     ap.add_argument("--market", type=str, default="",
-                    help="market_id (es. 1.234567890)")
+                    help="market_id (SX Bet: marketHash hex; es. 1.234567890)")
     ap.add_argument("--selection", type=int, default=0,
                     help="selection_id dell'esito")
     ap.add_argument("--price", type=float, default=None,
@@ -487,6 +1424,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--stake", type=float, default=None,
                     help=f"stake probe (default EXECUTION_MIN_STAKE_EUR="
                          f"{EXECUTION_MIN_STAKE_EUR})")
+    ap.add_argument("--markets", action="store_true",
+                    help="elenca i mercati calcio aperti (discovery, senza"
+                         " piazzare nulla)")
+    ap.add_argument("--max", type=int, default=20,
+                    help="numero massimo di mercati da elencare (default 20)")
     ap.add_argument("--dry-run", action="store_true",
                     help="forza DryRunProvider (nessuna chiamata di rete)")
     args = ap.parse_args(argv)
@@ -499,6 +1441,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         # ricarica i flag di config letti a import
         global EXECUTION_DRY_RUN
         EXECUTION_DRY_RUN = True
+    if args.provider:
+        os.environ["EXECUTION_PROVIDER"] = args.provider
+        global EXECUTION_PROVIDER
+        EXECUTION_PROVIDER = args.provider
 
     engine = ExecutionEngine()
 
@@ -506,9 +1452,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(engine.status(), indent=2))
         return 0
 
+    if args.markets:
+        markets = engine.discover_markets(max_results=args.max)
+        if not markets:
+            print("Nessun mercato disponibile (o discovery fallita).")
+            return 1
+        for m in markets:
+            runners = ", ".join(
+                f"{r['name']} ({r['selection_id']})" for r in m.get("runners", []))
+            print(f"[{m['market_id']}] {m['event_name']} "
+                  f"({m.get('country_code')}, kickoff "
+                  f"{(m.get('open_date') or '?')[:16]}): "
+                  f"{m.get('total_matched') or 0:.0f} matched — {runners}")
+        return 0
+
     if args.probe:
         if not args.market or not args.selection:
-            print("ERRORE: --probe richiede --market <id> --selection <id>")
+            print("ERRORE: --probe richiede --market <id> --selection <id> "
+                  "(usa --markets per elencarli)")
             return 2
         res = engine.probe(args.market, args.selection,
                            price=args.price, side=args.side, stake=args.stake)

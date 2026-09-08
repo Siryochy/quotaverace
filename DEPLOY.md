@@ -47,10 +47,14 @@ ed è condiviso per costruzione.
 | `QUOTAVERACE_DATA_DIR` | opzionale | Directory dei dati persistenti (default `/app/data`). Su Railway punta al Volume montato; non usare `/app` |
 
 > ⚠️ **Il tripwire Betfair è stato rimosso il 06/09** (decisione del
-> proprietario): l'ESECUZIONE passa ora da un aggregatore professionale via
-> `execution_engine.py` (BetInAsia BLACK / MollyBet, protocollo
-> Betfair-compatible). Credenziali aggregatore SOLO da env
-> (`EXECUTION_APP_KEY`, `EXECUTION_USERNAME`, `EXECUTION_PASSWORD`).
+> proprietario): l'ESECUZIONE passa ora da un provider professionale via
+> `execution_engine.py` — **SX Bet** (V3 crypto, dal 07/09), **Smarkets**
+> (API REST v3, dal 07/09) oppure aggregatori Betfair-compatible (BetInAsia
+> BLACK / MollyBet). Credenziali SOLO da env: `SX_API_KEY`/`SX_PRIVATE_KEY`
+> per SX Bet (richiede `eth-account` in requirements.txt), `SMARKETS_USERNAME`/
+> `SMARKETS_PASSWORD` per Smarkets,
+> `EXECUTION_APP_KEY`/`EXECUTION_USERNAME`/`EXECUTION_PASSWORD` per gli
+> aggregatori.
 > **Refertazione risultati = the-odds-api** (`odds_api.fetch_scores`, la
 > stessa chiave delle quote restituisce i risultati finiti della stagione
 > corrente); quote/CLV = the-odds-api. API-Football serve SOLO allo storico
@@ -100,24 +104,87 @@ railway volume files list / --json
 
 ---
 
-## 1bis. Esecuzione via aggregatore (dal 06/09)
+## 1bis. Esecuzione via provider (dal 06/09; Smarkets 07/09, SX Bet 07/09)
 
 Il tripwire Betfair è stato rimosso il 06/09 (decisione del proprietario):
-l'esecuzione passa dagli **aggregatori professionali** per evitare
-limitazioni e ottimizzare le quote. Il modulo `execution_engine.py` espone
-un'unica interfaccia Python verso **BetInAsia BLACK / MollyBet** (protocollo
-Betfair-compatible JSON-RPC, SportsAPING/v1.0) con:
-- credenziali SOLO da env: `EXECUTION_APP_KEY`, `EXECUTION_USERNAME`,
-  `EXECUTION_PASSWORD` (mai hardcoded — vault locale + env Railway);
+l'esecuzione passa da **SX Bet**, **Smarkets** o dagli **aggregatori
+professionali**. Il modulo `execution_engine.py` espone un'unica interfaccia
+Python (`ExecutionProvider`) con:
+- **SX Bet** (`EXECUTION_PROVIDER=sxbet`, dal 07/09): exchange P2P crypto
+  su **SX Rollup** (Arbitrum Orbit, chainId 4162), API `https://api.sx.bet`
+  (testnet: `SX_API_BASE=https://api.toronto.sx.bet`). La **V3** è live dal
+  26/08/2026 (la V2 non esiste più): letture pubbliche senza chiave
+  (markets/book/metadata), scritture con header `x-sx-api-key`, ordini
+  firmati **EIP-712** con la chiave privata dell'EOA `SX_PRIVATE_KEY`.
+  Credenziali SOLO da env: `SX_API_KEY`/`SX_PRIVATE_KEY` (richiede
+  `eth-account` in requirements.txt, import lazy). Il calcio 1X2 è il
+  market type 1, decomposto in 3 mercati binari "X vs Not X"
+  (Home/Tie/Away): selection 1 = esito X, 2 = "Not X". `percentageOdds` =
+  probabilità ×1e20 (ladder 0.125%), `totalBetSize` in unità USDC (6
+  decimali), timeInForce IOC/FOK = take immediato, GTC = resta sul book.
+  ⚠️ I fondi stanno nel **proxy wallet** dell'account (deploy + funding via
+  UI sx.bet o `POST /user/deploy-proxy`), NON nell'EOA: il probe reale va
+  fatto dopo il deposito. Raggiungibile dall'Italia (verificato 07/09),
+  nessun blocco ADM.
+- **Smarkets** (`EXECUTION_PROVIDER=smarkets`, dal 07/09): API REST pubblica
+  v3 (`https://api.smarkets.com/v3/`), credenziali SOLO da env
+  `SMARKETS_USERNAME`/`SMARKETS_PASSWORD` (base URL personalizzabile con
+  `SMARKETS_API_BASE`). Protocollo dal sample ufficiale `smk_trading_bot`:
+  login `POST sessions/` → header `Authorization: Session-Token <token>`;
+  prezzi in probabilità ×1e4 (5000 = quota 2.0), quantità in stake ×1e4;
+  side `buy`=BACK / `sell`=LAY; mercati 1X2 calcio = event type
+  `football_match`, market type `match_odds`, contratti Home/Draw/Away
+  (il contract_id fa da selection_id).
+- **BetInAsia BLACK / MollyBet** (protocollo Betfair-compatible JSON-RPC,
+  SportsAPING/v1.0): credenziali SOLO da env `EXECUTION_APP_KEY`,
+  `EXECUTION_USERNAME`, `EXECUTION_PASSWORD` (mai hardcoded — vault locale
+  + env Railway).
 - `DryRunProvider` di default (nessuna rete) quando mancano le credenziali;
 - probe a stake minimo (`EXECUTION_MIN_STAKE_EUR`, default 1€) che misura
-  latenza e slippage reali e li logga in `data/execution/measurements.jsonl`.
+  latenza e slippage reali e li logga in `data/execution/measurements.jsonl`;
+- discovery mercati (`--markets`): elenca i match odds calcio aperti
+  (finestra −1h/+48h, ordinati per kickoff) con i selection/contract id,
+  così il probe si lancia senza cercare i market id a mano.
 
 Uso:
 ```bash
 venv/bin/python execution_engine.py --status
+venv/bin/python execution_engine.py --markets [--max 20]
+
+# SX Bet (credenziali da env; discovery e book sono pubblici senza chiave)
+venv/bin/python execution_engine.py --provider sxbet --markets --max 10
+SX_API_KEY=... SX_PRIVATE_KEY=0x... \
+  venv/bin/python execution_engine.py --provider sxbet --probe \
+  --market <marketHash_hex> --selection 1 [--price 2.0]
+
+# Smarkets (credenziali da env)
+SMARKETS_USERNAME=... SMARKETS_PASSWORD=... \
+  venv/bin/python execution_engine.py --provider smarkets --probe \
+  --market <market_id> --selection <contract_id> [--price 2.0]
+
+# Aggregatore Betfair-compatible
 venv/bin/python execution_engine.py --probe --market <id> --selection <id>
 ```
+
+> ⚠️ **Proxy wallet SX Bet**: prima del primo ordine reale va deployato il
+> proxy (wizard di sx.bet o `POST /user/deploy-proxy`) e finanziato con
+> USDC sulla chain SX Rollup (4162). Senza proxy gli ordini vengono
+> rifiutati anche con API key e chiave valide.
+
+> ⚠️ **Protocolli diversi tra provider**: SX Bet espone la REST V3 con
+> ordini firmati EIP-712 (implementato, V3 live dal 26/08/2026); Smarkets
+> espone l'API REST v3 (implementato); BetInAsia BLACK espone un'API
+> Betfair-compatible (JSON-RPC SportsAPING/v1.0, come implementato);
+> MollyBet ha un protocollo REST proprietario su `api.mollybet.com`
+> (sessioni/stream/betslip) — prima di puntare su MollyBet serve un client
+> dedicato. Verificare con l'account quale interfaccia espone davvero.
+>
+> ⚠️ **Blocco ADM in Italia**: `api.smarkets.com` è tra i domini inibiti
+> dall'Agenzia delle Dogane e dei Monopoli (DNS verso il blocco SOGEI
+> `sito-inibito-giochi.adm.gov.it`) — da reti italiane il provider Smarkets
+> non è raggiungibile. Il job di esecuzione va eseguito da Railway o da una
+> rete non soggetta all'inibizione. I test del modulo sono tutti mockati
+> (nessuna dipendenza dalla rete).
 
 Architettura attuale:
 - **Refertazione**: the-odds-api (`odds_api.fetch_scores` +
@@ -171,8 +238,9 @@ curl https://<vercel-url>/api/backend/api/health   # via proxy
   `Mounting volume on: ...` e `QuotaVerace Pro avviato.`.
 - **Rate limit**: il free plan di the-odds-api ha 500 req/mese; quello di
   API-Football 100 req/giorno. I job del bot sono già tarati per rientrare.
-- **Esecuzione (dal 06/09)**: aggregatore via `execution_engine.py`
-  (BetInAsia BLACK / MollyBet), credenziali da env, probe 1€ per
+- **Esecuzione (dal 06/09, Smarkets dal 07/09)**: provider via
+  `execution_engine.py` (Smarkets REST v3 oppure BetInAsia BLACK /
+  MollyBet Betfair-compatible), credenziali da env, probe 1€ per
   latenza/slippage. Refertazione esclusivamente the-odds-api (fetch_scores
   della stagione corrente), quote/CLV the-odds-api, API-Football solo
   storico ratings 2022-2024.

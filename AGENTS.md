@@ -44,17 +44,18 @@ surebet_engine.py   → scanner arbitraggi INDIPENDENTE (05/09): h2h a 2 esiti
 data/               → cache JSON + DB sqlite + modello ensemble
 backtest_mc.py      → backtest walk-forward ensemble+Kelly con Monte Carlo (ROI, MaxDD)
 backup_manager.py   → backup DB+dataset ML (integrity check, rotazione, /backup)
-execution_engine.py → ESECUZIONE ordini via aggregatore professionale (BetInAsia BLACK /
-                      MollyBet, protocollo Betfair-compatible JSON-RPC): provider
-                      interface + DryRun + probe a stake minimo (1€) latenza/slippage
+execution_engine.py → ESECUZIONE ordini via provider (SX Bet V3 crypto / Smarkets /
+                      BetInAsia BLACK / MollyBet): provider interface + DryRun +
+                      probe a stake minimo (1€) latenza/slippage
 webapp/             → Next.js (Vercel): dashboard, cassa, schedina, calendario, backtest, value...
 ```
 
 **Il tripwire Betfair è stato RIMOSSO il 06/09**: i moduli `betfair_client.py`,
 `daily_scanner.py`, `daily_scan_job.py`, `surebet_pipeline.py` non esistono più,
-ma la direzione è cambiata — l'ESECUZIONE passa ora da un aggregatore
-professionale (`execution_engine.py`: BetInAsia BLACK / MollyBet, protocollo
-Betfair-compatible). Refertazione = the-odds-api (`odds_api.fetch_scores`,
+ma la direzione è cambiata — l'ESECUZIONE passa ora da un provider di
+`execution_engine.py` (**SX Bet** V3 crypto dal 07/09, **Smarkets** dal
+07/09, o gli aggregatori BetInAsia BLACK / MollyBet Betfair-compatible).
+Refertazione = the-odds-api (`odds_api.fetch_scores`,
 risultati stagione corrente — la stessa chiave delle quote); quote/CLV =
 the-odds-api. API-Football serve SOLO allo storico ratings 2022-2024
 (`football_hist.py`): il piano free NON copre la stagione corrente (verificato
@@ -322,17 +323,35 @@ cd webapp && npm run build            # build Next.js
 - **.dockerignore rinforzato**: `secrets/`, `.env*`, `data/`, `*.key`,
   `*.pem`, `.git/` esclusi dall'immagine (il Dockerfile fa `COPY . .` — prima
   i segreti locali sarebbero finiti nell'immagine Docker).
-- **Esecuzione via aggregatore professionale (06/09)**: il tripwire
-  `test_betfair_removed.py` è stato RIMOSSO (deciso dal proprietario) e
-  nasce `execution_engine.py`: interfaccia Python unica verso gli
-  aggregatori BetInAsia BLACK / MollyBet (protocollo Betfair-compatible
-  JSON-RPC, SportsAPING/v1.0), credenziali SOLO da env
-  (`EXECUTION_APP_KEY/USERNAME/PASSWORD`), `DryRunProvider` senza
+- **Esecuzione via provider (06/09) + Smarkets e SX Bet (07/09)**: il
+  tripwire `test_betfair_removed.py` è stato RIMOSSO (deciso dal proprietario)
+  e nasce `execution_engine.py`: interfaccia Python unica
+  (`ExecutionProvider`) verso BetInAsia BLACK / MollyBet (protocollo
+  Betfair-compatible JSON-RPC, SportsAPING/v1.0, credenziali SOLO da env
+  `EXECUTION_APP_KEY/USERNAME/PASSWORD`), **Smarkets** (API REST v3
+  `https://api.smarkets.com/v3/`, credenziali `SMARKETS_USERNAME/PASSWORD`,
+  base `SMARKETS_API_BASE`; login `POST sessions/` → header
+  `Authorization: Session-Token`; prezzi ×1e4, quantità in stake ×1e4,
+  buy=BACK/sell=LAY, 1X2 = event `football_match` / market `match_odds` /
+  contratti Home/Draw/Away) e **SX Bet** (V3 dal 26/08/2026: REST
+  `https://api.sx.bet` su SX Rollup/Arbitrum Orbit chainId 4162, testnet
+  `SX_API_BASE=https://api.toronto.sx.bet`; letture pubbliche, scritture con
+  header `x-sx-api-key` (`SX_API_KEY`), ordini firmati EIP-712 con la chiave
+  privata dell'EOA `SX_PRIVATE_KEY` — richiede `eth-account` in
+  requirements.txt, import lazy; 1X2 calcio = market type 1 binario "X vs
+  Not X" Home/Tie/Away, `percentageOdds` prob ×1e20 ladder 0.125%,
+  `totalBetSize` in unità USDC 6 decimali, IOC/FOK = take, GTC = rest;
+  ⚠️ i fondi stanno nel proxy wallet dell'account, NON nell'EOA).
+  `DryRunProvider` senza
   credenziali e probe a stake minimo (`EXECUTION_MIN_STAKE_EUR`=1€) che
   misura latenza e slippage reali loggandoli in
-  `data/execution/measurements.jsonl`. Health mostra `betfair_enabled:
-  false` fisso (compatibilità frontend); `/api/scan` resta 503
-  "betfair_removed" (endpoint rimosso).
+  `data/execution/measurements.jsonl`; discovery `--markets` per elencare i
+  match odds calcio con i selection/contract id. ⚠️ `api.smarkets.com` è
+  inibito dall'ADM in Italia (DNS → sito-inibito-giochi.adm.gov.it): il
+  probe reale va eseguito da Railway/rete non italiana; `api.sx.bet` invece
+  è raggiungibile dall'Italia (verificato 07/09). Health mostra
+  `betfair_enabled: false` fisso (compatibilità
+  frontend); `/api/scan` resta 503 "betfair_removed" (endpoint rimosso).
 - **Refertazione SOLO the-odds-api**: risultati e saldaggio bet/previsioni/
   cassa passano ESCLUSIVAMENTE da `odds_api.fetch_scores` +
   `match_scores_by_name` (la stessa chiave delle quote restituisce i
@@ -610,12 +629,18 @@ cd webapp && npm run build            # build Next.js
 
 ## Prossimi passi possibili (non urgenti)
 
-- ExecutionEngine: ottenere le credenziali dell'aggregatore (BetInAsia BLACK
-  / MollyBet), caricarle nelle env Railway + vault locale e fare le prime
-  chiamate reali: `venv/bin/python execution_engine.py --probe --market <id>
-  --selection <id>` con stake 1€ per misurare latenza/slippage veri prima di
-  passare a stake reali. Poi collegare auto_bet a execution_engine (oggi
-  SIM-only).
+- ExecutionEngine: ottenere le credenziali (SX Bet: `SX_API_KEY`/`SX_PRIVATE_KEY`
+  + proxy wallet deployato e finanziato su SX Rollup; Smarkets:
+  `SMARKETS_USERNAME`/`SMARKETS_PASSWORD`; aggregatore BetInAsia BLACK /
+  MollyBet: `EXECUTION_APP_KEY/USERNAME/PASSWORD`), caricarle nelle env
+  Railway + vault locale e fare le prime chiamate reali:
+  `venv/bin/python execution_engine.py --provider sxbet --probe
+  --market <marketHash_hex> --selection 1` (o `--provider smarkets`, o senza
+  `--provider` per l'aggregatore) con stake 1€ per misurare latenza/slippage
+  veri prima di passare a stake reali. ⚠️ Da rete italiana `api.smarkets.com`
+  è inibito (ADM): il probe Smarkets va eseguito da Railway/rete estera;
+  `api.sx.bet` è raggiungibile. Poi collegare auto_bet a execution_engine
+  (oggi SIM-only).
 - Surebet engine: schedulare il loop in produzione (crontab/cron Railway o
   secondo servizio) e monitorare i crediti the-odds-api (il piano free è
   quasi saturo col calendario value). Verificare su dati reali quali
