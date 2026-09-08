@@ -367,6 +367,36 @@ class TestScan:
         assert row["status"] == "open"
         assert row["ev"] > 0.03
 
+    def test_scan_espone_signal_list_dettagli(self, sb):
+        """Regressione (08/09): il job di notifica Telegram usa la LISTA dei
+        segnali del giro (signal_list), non il conteggio int `signals` —
+        prima `_run_tennis_sandbox_pass` ritornava l'int e
+        tennis_sandbox_job crashava con TypeError su `signals[:5]`."""
+        sb.client.markets = [mk_market("h1", "A", "B")]
+        sb.client.books = {"h1": mk_book(FAIR_A, FAIR_B)}
+        sb.elo.ensure_pair("A", 0.5, "B", 0.5)
+        sb.elo.players["A"].rating = 1750.0
+        res = sb.scan()
+        # il conteggio resta un int (retrocompatibile coi chiamanti esistenti)
+        assert isinstance(res["signals"], int) and res["signals"] >= 1
+        # la lista contiene i DETTAGLI usati dal job (chiavi attese)
+        lst = res["signal_list"]
+        assert isinstance(lst, list) and len(lst) == res["signals"]
+        s = lst[0]
+        for key in ("event", "selection", "price", "prob", "ev", "stake"):
+            assert key in s, f"chiave mancante in signal_list: {key}"
+        assert s["selection"] == "A"
+        assert s["ev"] > 0.03
+        assert s["price"] > 1.0 and s["stake"] > 0
+
+    def test_scan_senza_segnali_lista_vuota(self, sb):
+        """Senza +EV la signal_list e' vuota (nessun crash lato chiamante)."""
+        sb.client.markets = [mk_market("h1", "A", "B")]
+        sb.client.books = {"h1": mk_book(FAIR_A, FAIR_B)}
+        res = sb.scan()
+        assert res["signals"] == 0
+        assert res["signal_list"] == []
+
     def test_mercato_incoerente_saltato(self, sb):
         # Book sporco (sfavorito a quota enorme -> inv_sum < 0.98): salta
         sb.client.markets = [mk_market("h1", "A", "B")]

@@ -558,6 +558,13 @@ cd webapp && npm run build            # build Next.js
   a UNITA' INTERE (`apply_flat_budget`: max floor(30% bankroll) segni per
   blocco correlato e floor(40% - già piazzato) segni/giorno, EV-decrescenti
   — niente frazioni non piazzabili, il minimo SX è 1 USDC).
+  ⚠️ **RIPRISTINATO IL KELLY DINAMICO il 09/09 sera** dopo il deposito
+  Bybit→SX a **~47,16 USDC** (verificato live su Railway:
+  `availableBalance 47163372`; env `AUTO_BET_STAKE_MODE=adaptive`, env
+  flat rimossa). Esempi su 47,16 USDC: value €2,99 / strong_value €5,68
+  con i default prudenti (Kelly 0,05-0,40, cap 10%/25%, floor 1 USDC,
+  esposizione 40% ≈ €18,9/giorno, correlazione 30% ≈ €14,2/blocco,
+  drawdown −10% → stake −50%).
   Guardie: salta partite a <15 min dall'inizio, doppie puntate (UNIQUE
   match_id+esito). Risk caps prima del salvataggio: correlation cap (30%
   bankroll per blocco correlato) + cap esposizione totale (40%). Registro

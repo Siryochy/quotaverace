@@ -1553,7 +1553,12 @@ def _run_tennis_sandbox_pass():
     try:
         res = sb.scan()
         settled = sb.settle()
-        return res.get("signals", 0), settled
+        # scan() ritorna il conteggio in `signals` (int) e i DETTAGLI dei
+        # segnali del giro in `signal_list` (lista di dict): il job di
+        # notifica vuole la LISTA, non il conteggio (fix 08/09: prima qui
+        # veniva ritornato l'int e tennis_sandbox_job crashava con
+        # "TypeError: 'int' object is not subscriptable" su signals[:5]).
+        return res.get("signal_list", []), settled
     finally:
         sb.close()
 

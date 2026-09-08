@@ -827,10 +827,14 @@ class TennisSandbox:
     def scan(self, max_markets: int = 500) -> Dict:
         """Una scansione: mercati attivi -> book -> ELO -> EV -> ghost bet.
 
-        Ritorna un riepilogo {markets, with_book, signals, errors}.
-        Fail-closed: nessuna eccezione verso il chiamante.
+        Ritorna un riepilogo {markets, with_book, signals (conteggio int),
+        signal_list (dettagli dei +EV del giro), errors}. Fail-closed:
+        nessuna eccezione verso il chiamante. `signal_list` serve ai
+        chiamanti che vogliono i DETTAGLI dei segnali (es. notifica
+        Telegram), non solo il conteggio.
         """
-        result = {"markets": 0, "with_book": 0, "signals": 0, "errors": 0}
+        result = {"markets": 0, "with_book": 0, "signals": 0, "errors": 0,
+                  "signal_list": []}
         markets = self.client.active_markets(max_markets=max_markets)
         result["markets"] = len(markets)
         for m in markets:
@@ -894,6 +898,11 @@ class TennisSandbox:
                     self._insert_or_update_signal(
                         m, sel, price, prob, ev, stake, surface)
                     result["signals"] += 1
+                    result["signal_list"].append({
+                        "event": f"{player_a} vs {player_b}",
+                        "selection": sel, "price": price, "prob": prob,
+                        "ev": ev, "stake": stake, "surface": surface or "",
+                    })
                     su = f" (su {SURFACE_IT.get(surface, '')})" if surface \
                         else ""
                     logger.info(
