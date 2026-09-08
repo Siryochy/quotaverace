@@ -273,6 +273,77 @@ class TestLiveBankroll:
         assert b["stake"] == 3.0 and b["price"] == 2.30
 
 
+class TestFlatLive:
+    """Flat-stake LIVE (09/09): 1 USDC fisso per ogni segnale +EV del
+    Calcio 1X2, con risk cap a unita' intere sul saldo REALE del wallet.
+    Con ~12 USDC: cap esposizione 40% = ~4.9 -> max 4 ordini/giorno;
+    cap correlazione 30% = ~3.7 -> max 3 ordini per blocco correlato.
+    """
+
+    def _seed_n(self, n, league_prefix=True):
+        for i in range(n):
+            _seed_value_match(mid=f"f{i}", home=f"Home{i}", away=f"Away{i}",
+                              esito="1" if i % 2 == 0 else "2", quota=2.20)
+        if league_prefix:
+            conn = tracker._get_conn()
+            conn.execute("UPDATE matches SET league = 'Lega' || rowid "
+                         "WHERE id LIKE 'f%'")
+            conn.commit()
+            conn.close()
+
+    def _setup_live(self, monkeypatch, wallet=12.28):
+        _fixed_stake(monkeypatch)
+        monkeypatch.setattr(auto_bet, "STAKE_MODE", "flat")
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: wallet)
+        sent = []
+
+        def fake_fill(pick, stake, floor):
+            sent.append((pick["match_id"], stake))
+            return {"ok": True, "market_id": "0x" + pick["match_id"],
+                    "selection_id": 1, "bet_id": "0xb" + pick["match_id"],
+                    "status": "FULLY_FILLED", "price": floor, "stake": stake}
+
+        monkeypatch.setattr(auto_bet, "_live_fill", fake_fill)
+        return sent
+
+    def test_flat_live_un_usdc_a_segno_cap_totale(self, monkeypatch, temp_db):
+        """5 value in leghe diverse su wallet 12.28: entrano 4 segni da 1
+        USDC (cap esposizione 40% ~4.91), il 5° esce."""
+        self._seed_n(5)
+        sent = self._setup_live(monkeypatch)
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert len(placed) == 4
+        assert all(p["stake"] == 1.0 for p in placed)
+        assert all(p["mode"] == "live" for p in placed)
+        assert len(sent) == 4 and all(s == 1.0 for _, s in sent)
+        # sul ledger: 4 righe live da 1 USDC
+        bets = tracker.get_bets()
+        assert len(bets) == 4 and all(b["stake"] == 1.0 for b in bets)
+
+    def test_flat_live_blocco_correlato_max_3(self, monkeypatch, temp_db):
+        """5 value della STESSA lega e stesso kickoff (blocco correlato):
+        cap correlazione 30% di 12.28 = ~3.7 -> solo 3 segni da 1 USDC."""
+        self._seed_n(5, league_prefix=False)  # tutte Serie A stesso kickoff
+        sent = self._setup_live(monkeypatch)
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert len(placed) == 3
+        assert all(p["stake"] == 1.0 for p in placed)
+        assert len(sent) == 3
+
+    def test_flat_live_budget_esaurito_nessun_ordine(self, monkeypatch,
+                                                      temp_db):
+        """Budget del giorno gia' consumato (already_placed >= cap): il
+        giro non piazza nulla."""
+        self._seed_n(2)
+        self._setup_live(monkeypatch)
+        monkeypatch.setattr(auto_bet, "_today_placed_stake", lambda: 5.0)
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert placed == []
+        assert tracker.get_bets() == []
+
+
 class TestModeSelection:
     def test_default_senza_env_resta_sim(self, monkeypatch, temp_db):
         _fixed_stake(monkeypatch)

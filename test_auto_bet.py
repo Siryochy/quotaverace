@@ -273,6 +273,86 @@ class TestTotalExposureCap:
         assert all(p["stake"] > 0 for p in placed)
 
 
+class TestFlatStake:
+    """Flat-stake (09/09): AUTO_BET_STAKE_MODE=flat -> 1 USDC fisso per
+    ogni segnale +EV, con risk cap a UNITA' INTERE (il minimo ordine SX
+    Bet e' 1 USDC: le frazioni non sono piazzabili e rialzarle al floor
+    sforerebbe i cap)."""
+
+    def _cand(self, mid, ev, league="LegaA", commence="2026-09-09T14:00:00Z",
+              **kw):
+        c = {"match_id": mid, "league": league, "commence": commence,
+             "stake": 1.0, "best_ev": ev, "esito_key": "1"}
+        c.update(kw)
+        return c
+
+    def test_flat_default_unit_piu_cap(self):
+        # Bankroll 12.28 USDC: cap correlazione 30% = 3.68 -> max 3 unita'
+        # per blocco; cap totale 40% = 4.91 -> max 4 unita' al giorno.
+        start = "2026-09-09T14:00:00Z"
+        cands = [self._cand(f"m{i}", ev=0.30 - 0.03 * i, league="Serie A",
+                            commence=start) for i in range(5)]
+        out = auto_bet.apply_flat_budget(cands, bankroll=12.28)
+        placed = [c for c in out if c.get("stake", 0) > 0]
+        assert len(placed) == 3  # floor(3.68/1) unita' per blocco correlato
+        assert all(c["stake"] == 1.0 for c in placed)
+        # Gli esuberi (EV piu' basso) sono azzerati e marcati
+        dropped = [c for c in out if not c.get("stake")]
+        assert len(dropped) == 2 and all(c.get("corr_cap") for c in dropped)
+
+    def test_flat_esposizione_totale_unita_intere(self):
+        # 5 segni in 5 leghe diverse (nessun blocco correlato): entra il
+        # cap TOTALE 40% di 12.28 = 4.91 -> 4 unita', cade l'EV piu' basso.
+        cands = [self._cand(f"m{i}", ev=0.30 - 0.03 * i,
+                            league=f"Lega{i}") for i in range(5)]
+        out = auto_bet.apply_flat_budget(cands, bankroll=12.28)
+        placed = [c for c in out if c.get("stake", 0) > 0]
+        assert len(placed) == 4
+        assert all(c["stake"] == 1.0 for c in placed)
+        # il tagliato e' quello a best_ev minore
+        dropped = [c for c in out if not c.get("stake")]
+        assert len(dropped) == 1 and dropped[0]["match_id"] == "m4"
+        assert dropped[0].get("total_cap")
+
+    def test_flat_cap_residuo_sottrae_gia_piazzato(self):
+        # 12.28 -> budget 4.91; gia' piazzati 3 -> residuo 1.91 -> 1 segno
+        cands = [self._cand(f"m{i}", ev=0.30 - 0.03 * i,
+                            league=f"Lega{i}") for i in range(3)]
+        out = auto_bet.apply_flat_budget(cands, bankroll=12.28,
+                                         already_placed=3.0)
+        placed = [c for c in out if c.get("stake", 0) > 0]
+        assert len(placed) == 1 and placed[0]["match_id"] == "m0"
+
+    def test_flat_sotto_i_cap_tutti_piazzati(self):
+        cands = [self._cand("a", ev=0.2, league="LegaA"),
+                 self._cand("b", ev=0.1, league="LegaB")]
+        out = auto_bet.apply_flat_budget(cands, bankroll=100.0)
+        assert all(c.get("stake", 0) == 1.0 for c in out)
+        assert not any(c.get("total_cap") or c.get("corr_cap") for c in out)
+
+    def test_flat_sim_piazzata_1_euro_a_segno(self, monkeypatch, temp_db):
+        """Flat mode in SIM: ogni segnale value viene piazzato a €1.00
+        (niente Kelly, niente stake fisso dal parametro)."""
+        monkeypatch.setitem(sys.modules, "adaptive_staking", None)
+        monkeypatch.setattr(auto_bet, "STAKE_MODE", "flat")
+        _seed_value_match(mid="m1", quota=2.20)
+        _seed_value_match(mid="m2", home="Bari", away="Crotone", esito="2",
+                          quota=2.10)
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert len(placed) == 2
+        assert all(p["stake"] == 1.0 for p in placed)
+        assert all(p["mode"] == "sim" for p in placed)
+
+    def test_flat_sotto_minimo_nessuna_puntata(self, monkeypatch, temp_db):
+        """Flat stake sotto il minimo ordine (env < 1.0): nessuna puntata."""
+        monkeypatch.setitem(sys.modules, "adaptive_staking", None)
+        monkeypatch.setattr(auto_bet, "STAKE_MODE", "flat")
+        monkeypatch.setattr(auto_bet, "FLAT_STAKE_EUR", 0.5)
+        _seed_value_match(quota=2.20)
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert placed == []
+
+
 class TestClvWiring:
     """Il CLV storico (battere la closing line) deve arrivare ad
     adaptive_stake come has_clv_positive: edge confermato = stake piu' alto."""

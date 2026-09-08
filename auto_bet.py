@@ -14,8 +14,10 @@ Flusso del mattino (job 08:50 UTC, dopo analisi):
 
 1. Legge i segnali value/strong_value del giorno da match_analysis (quelli
    che battono il mercato, come la schedina);
-2. Per ogni segnale calcola lo stake ADATTIVO (Kelly frazionato dinamico
-   con drawdown protection e confidence weighting);
+2. Per ogni segnale calcola lo stake: ADATTIVO di default (Kelly
+   frazionato dinamico con drawdown protection e confidence weighting)
+   oppure FLAT (AUTO_BET_STAKE_MODE=flat, 1 USDC per segno dal 09/09)
+   con risk cap a unita' intere;
 3. Esegue: in LIVE risolve il mercato dell'exchange (evento+esito),
    verifica che il prezzo disponibile sia >= quota del segnale (floor EV:
    mai riempirsi sotto la quota su cui e' stato calcolato l'edge) e piazza
@@ -91,6 +93,18 @@ TOTAL_EXPOSURE_CAP_PCT = 0.40  # max 40% di bankroll per il portafoglio del gior
 STAKE_STEP_EUR = float(os.getenv("STAKE_STEP_EUR", "0.01"))
 MIN_STAKE_EUR = float(os.getenv("MIN_STAKE_EUR", "1.0"))
 
+# --- Flat-stake override (09/09) ---
+# In alternativa al Kelly dinamico si puo' piazzare un importo FISSO per
+# ogni segnale value/strong_value (Calcio 1X2): env
+# AUTO_BET_STAKE_MODE=flat (default 'adaptive' = Kelly dinamico 08/09),
+# importo AUTO_BET_FLAT_STAKE_EUR (default 1.0 = minimo ordine SX Bet in
+# USDC). I cap di sicurezza restano SEMPRE attivi ma vengono applicati a
+# UNITÀ INTERE (vedi apply_flat_budget): con un saldo wallet ~12 USDC
+# entrano al massimo 3-4 ordini da 1 USDC al giorno (cap correlazione 30%
+# + esposizione totale 40%), mai frazioni non piazzabili.
+STAKE_MODE = os.getenv("AUTO_BET_STAKE_MODE", "adaptive").strip().lower()
+FLAT_STAKE_EUR = float(os.getenv("AUTO_BET_FLAT_STAKE_EUR", "1.0"))
+
 
 def normalize_stake(stake: float) -> float:
     """Arrotonda allo step configurato (default 0.01) e forza il minimo
@@ -113,6 +127,53 @@ def _kickoff_utc(commence: str | None):
         return datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
     except Exception:
         return None
+
+
+def _correlation_blocks(candidates: list[dict],
+                        window_min: int = CORRELATION_WINDOW_MIN) -> list[list[dict]]:
+    """Raggruppa i candidati in blocchi CORRELATI per i risk cap.
+
+    Stessa lega con kickoff nella stessa finestra temporale (o stesso
+    match_id, sempre correlati: es. 1X2 + Over sulla stessa partita).
+    Algoritmo greedy: ogni candidato entra nel primo blocco compatibile
+    per tempo (o match_id). Ritorna i blocchi in ordine di comparsa.
+    """
+    def _key(cand) -> str:
+        # Gruppo per LEGA (default 'global' se assente): i match diversi
+        # della stessa lega condividono la varianza di giornata/arbitri e
+        # si separano in blocchi temporali sulla finestra window_min.
+        return f"league:{cand.get('league') or 'global'}"
+
+    def _same_match(a, b) -> bool:
+        # Stesso match_id = SEMPRE correlati (es. 1X2 + Over stessa partita),
+        # anche se i commence non sono parsabili in modo identico.
+        mid = a.get("match_id")
+        return bool(mid) and mid == b.get("match_id")
+
+    groups: list[list[dict]] = []
+    group_bounds: list[tuple] = []  # (min_kickoff, max_kickoff) UTC naive
+    for cand in candidates:
+        k = _kickoff_utc(cand.get("commence"))
+        key = _key(cand)
+        assigned = False
+        for gi, g in enumerate(groups):
+            if _key(g[0]) != key:
+                continue
+            gmin, gmax = group_bounds[gi]
+            in_window = (k is not None and gmin is not None
+                         and abs((k - gmin).total_seconds()) <= window_min * 60)
+            if in_window or _same_match(g[0], cand) or (k is None and gmin is None):
+                g.append(cand)
+                if k is not None:
+                    nmin = min(gmin, k) if gmin else k
+                    nmax = max(gmax, k) if gmax else k
+                    group_bounds[gi] = (nmin, nmax)
+                assigned = True
+                break
+        if not assigned:
+            groups.append([cand])
+            group_bounds.append((k, k))
+    return groups
 
 
 def apply_correlation_cap(candidates: list[dict], bankroll: float,
@@ -147,51 +208,10 @@ def apply_correlation_cap(candidates: list[dict], bankroll: float,
     if len(candidates) < 2 or bankroll <= 0:
         return candidates
 
-    def _group_key(cand) -> str:
-        # Gruppo per LEGA (default 'global' se assente): i match diversi
-        # della stessa lega condividono la varianza di giornata/arbitri e
-        # si separano in blocchi temporali sulla finestra window_min.
-        # Lo stesso match_id ha sempre lo stesso kickoff, quindi esiti
-        # multipli della stessa partita finiscono nello stesso blocco.
-        return f"league:{cand.get('league') or 'global'}"
-
-    def _same_match(a, b) -> bool:
-        # Stesso match_id = SEMPRE correlati (es. 1X2 + Over stessa partita),
-        # anche se i commence non sono parsabili in modo identico.
-        mid = a.get("match_id")
-        return bool(mid) and mid == b.get("match_id")
-
-    # Raggruppa per lega; dentro ogni lega separa i blocchi temporali
-    # disgiunti (finestra window_min). Algoritmo greedy: ogni candidato
-    # entra nel primo blocco compatibile per tempo (o per match_id).
-    groups: list[list[dict]] = []
-    group_bounds: list[tuple] = []  # (min_kickoff, max_kickoff) UTC naive
-    for cand in candidates:
-        k = _kickoff_utc(cand.get("commence"))
-        key = _group_key(cand)
-        assigned = False
-        for gi, g in enumerate(groups):
-            if _group_key(g[0]) != key:
-                continue
-            gmin, gmax = group_bounds[gi]
-            in_window = (k is not None and gmin is not None
-                         and abs((k - gmin).total_seconds()) <= window_min * 60)
-            if in_window or _same_match(g[0], cand) or (k is None and gmin is None):
-                g.append(cand)
-                if k is not None:
-                    nmin = min(gmin, k) if gmin else k
-                    nmax = max(gmax, k) if gmax else k
-                    group_bounds[gi] = (nmin, nmax)
-                assigned = True
-                break
-        if not assigned:
-            groups.append([cand])
-            group_bounds.append((k, k))
-
     cap = bankroll * cap_pct
     capped_total = 0.0
     capped_groups = 0
-    for g in groups:
+    for g in _correlation_blocks(candidates, window_min):
         total = sum(float(c.get("stake", 0) or 0) for c in g)
         if total <= cap:
             continue
@@ -209,6 +229,72 @@ def apply_correlation_cap(candidates: list[dict], bankroll: float,
         logger.info("auto_bet: correlation cap attivo — ridotti €%.2f di "
                     "stake correlati in %d blocchi sopra il cap",
                     capped_total, capped_groups)
+    return candidates
+
+
+def apply_flat_budget(candidates: list[dict], bankroll: float,
+                      unit: float | None = None,
+                      cap_pct: float = CORRELATION_CAP_PCT,
+                      total_cap_pct: float = TOTAL_EXPOSURE_CAP_PCT,
+                      already_placed: float = 0.0,
+                      window_min: int = CORRELATION_WINDOW_MIN) -> list[dict]:
+    """Risk cap a UNITA' INTERE per lo stake FLAT (09/09, Calcio 1X2).
+
+    Con stake fissi da FLAT_STAKE_EUR (= minimo ordine SX Bet, 1 USDC) lo
+    scaling proporzionale dei cap generici produrrebbe frazioni NON
+    piazzabili: rialzarle al floor sforerebbe i cap. Qui i due cap vengono
+    applicati a unita' intere, in ordine di EV decrescente:
+      - blocco correlato (stessa lega + finestra 90', o stesso match):
+        al massimo floor(30% bankroll / unit) segni;
+      - esposizione totale del giorno: al massimo
+        floor((40% bankroll - gia' piazzato) / unit) segni complessivi.
+    Gli esuberi (in coda per EV) vengono azzerati ("stake"=0) con i flag
+    corr_cap/total_cap per il log. Con un saldo wallet ~12 USDC entrano al
+    massimo 3-4 ordini da 1 USDC al giorno.
+    """
+    if not candidates or bankroll <= 0:
+        return candidates
+    unit = float(unit if unit is not None else FLAT_STAKE_EUR)
+    if unit <= 0:
+        return candidates
+
+    ordered = sorted(candidates,
+                     key=lambda c: float(c.get("best_ev", 0.0) or 0.0),
+                     reverse=True)
+    # 1) correlation cap: unita' intere per blocco correlato
+    max_block = int((bankroll * cap_pct) // unit)
+    eligible: list[dict] = []
+    for block in _correlation_blocks(ordered, window_min):
+        keep = block[:max_block] if max_block > 0 else []
+        for c in block:
+            if c in keep:
+                c["stake"] = unit
+                eligible.append(c)
+            else:
+                c["stake"] = 0.0
+                c["corr_cap"] = True
+                c["corr_group"] = (
+                    f"blocco correlato oltre il cap "
+                    f"({len(keep)}x €{unit:.2f} <= €{bankroll * cap_pct:.2f})")
+    # 2) cap esposizione totale: unita' intere sul budget residuo del giorno
+    budget = max(0.0, bankroll * total_cap_pct - float(already_placed or 0.0))
+    max_total = int(budget // unit) if budget > 0 else 0
+    eligible.sort(key=lambda c: float(c.get("best_ev", 0.0) or 0.0),
+                  reverse=True)
+    keep = eligible[:max_total] if max_total > 0 else []
+    for c in eligible:
+        if c in keep:
+            c["stake"] = unit
+        else:
+            c["stake"] = 0.0
+            c["total_cap"] = True
+            c["total_cap_group"] = (
+                f"esposizione totale del giorno piena: "
+                f"{(bankroll * total_cap_pct - float(already_placed or 0.0)):.2f}"
+                f" disponibili / €{unit:.2f} a segno")
+    logger.info("auto_bet: flat budget attivo — %d segni da €%.2f "
+                "(cap correlazione %d/blocco, esposizione %d/giorno)",
+                len(keep), unit, max_block, max_total)
     return candidates
 
 
@@ -728,8 +814,21 @@ def run_today_bets(stake_eur: float | None = None,
                         pick["match_id"])
             continue
 
+        # Flat-stake (09/09, Calcio 1X2): importo FISSO per ogni segnale
+        # value/strong_value invece del Kelly dinamico. Il rispetto dei cap
+        # (correlazione 30% + esposizione totale 40% del giorno) e del
+        # minimo ordine SX avviene a UNITA' INTERE in FASE 2
+        # (apply_flat_budget). Identico per SIM e live.
+        if STAKE_MODE == "flat":
+            pick_stake = normalize_stake(FLAT_STAKE_EUR)
+            if pick_stake <= 0:
+                logger.info("auto_bet: flat stake €%.2f sotto il minimo per "
+                            "%s, salto", FLAT_STAKE_EUR, pick["match_id"])
+                continue
+            logger.info("auto_bet: stake flat €%.2f per %s (%s)",
+                        pick_stake, pick["match_id"], pick["esito_key"])
         # Adaptive staking: stake dinamico (identico per SIM e live)
-        if _adaptive:
+        elif _adaptive:
             as_result = adaptive_stake(
                 bankroll=_bankroll, prob=pick.get("best_ev", 0.0) + 1.0 / price if price > 0 else 0.5,
                 odds=price, market_edge=pick.get("market_edge"),
@@ -767,9 +866,18 @@ def run_today_bets(stake_eur: float | None = None,
     # Il cap TOTALE e' giornaliero: sottrae l'esposizione gia' piazzata nei
     # giri precedenti (puntate aperte nelle ultime 24h), poi scarta i
     # candidati azzerati dal cap e (in LIVE) riapplica il floor exchange.
-    candidates = apply_correlation_cap(candidates, _bankroll)
-    candidates = apply_total_exposure_cap(candidates, _bankroll,
-                                          already_placed=_today_placed_stake())
+    if STAKE_MODE == "flat":
+        # Flat: cap a unita' INTERE (le frazioni non sono piazzabili: il
+        # minimo ordine SX Bet e' 1 USDC). Gli esuberi per EV vengono
+        # azzerati e filtrati qui sotto.
+        candidates = apply_flat_budget(
+            candidates, _bankroll,
+            already_placed=_today_placed_stake())
+    else:
+        candidates = apply_correlation_cap(candidates, _bankroll)
+        candidates = apply_total_exposure_cap(
+            candidates, _bankroll,
+            already_placed=_today_placed_stake())
     candidates = [c for c in candidates if c.get("stake", 0) > 0]
     if mode == "live":
         for c in candidates:

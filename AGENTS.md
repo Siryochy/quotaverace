@@ -41,11 +41,13 @@ surebet_engine.py   → scanner arbitraggi INDIPENDENTE (05/09): h2h a 2 esiti
                       NBA/MLB/Tennis, soft vs sharp via the-odds-api, cache e
                       log propri (data/surebet/), mai import da tracker/bot
                       (loop separato: venv/bin/python surebet_engine.py --loop N)
-tennis_sandbox.py   → SANDBOX tennis (08/09): paper trading Moneyline 2 vie su
-                      SX Bet (type 52), baseline Weighted ELO seminata dal
-                      mercato, +EV con anti-spurio (inv_sum 0.98-1.08), ledger
-                      SQLite dedicato (data/tennis_sandbox/), ZERO ordini reali
-                      e zero crediti the-odds-api (letture SX pubbliche)
+tennis_sandbox.py   → SANDBOX tennis (08/09, ELO esteso il 09/09): paper
+                      trading Moneyline 2 vie su SX Bet (type 52), baseline
+                      ELO superficie-specifico (cemento/terra/erba) con
+                      time-decay 30/60gg seminata dal mercato, +EV con
+                      anti-spurio (inv_sum 0.98-1.08), ledger SQLite dedicato
+                      (data/tennis_sandbox/), ZERO ordini reali e zero crediti
+                      the-odds-api (letture SX pubbliche)
 data/               → cache JSON + DB sqlite + modello ensemble
 backtest_mc.py      → backtest walk-forward ensemble+Kelly con Monte Carlo (ROI, MaxDD)
 backup_manager.py   → backup DB+dataset ML (integrity check, rotazione, /backup)
@@ -160,7 +162,47 @@ cd webapp && npm run build            # build Next.js
 - Il token va rinnovato quando scade o dopo l'esposizione in chat (flusso:
   fine-grained PAT → Contents RW → va nel VAULT, non più nel `.env`).
 
-## Stato attuale (aggiornato al 08/09/2026)
+## Stato attuale (aggiornato al 09/09/2026)
+
+- **ELO tennis superficie-specifico + time-decay nel sandbox (09/09)** —
+  esteso il modello del `tennis_sandbox` prima di affidargli piu' superfici:
+  1) **Surface-Specific ELO**: ogni giocatore ha un rating OVERALL + rating
+  per superficie (hard=cemento/clay=terra/grass=erba). La superficie del
+  torneo e' rilevata dai campi testo del mercato SX (`market_surface` →
+  `detect_surface`, matching pesato su keyword di tornei; NIENTE `surface`
+  in V3). Se il torneo non e' riconosciuto o il testo e' ambiguo → None
+  (mai indovinare: una superficie sbagliata contaminerebbe il rating).
+  Un match su superficie nota aggiorna overall + superficie; uno
+  sconosciuto SOLO l'overall. Ledger migrato (ALTER idempotente): colonna
+  `surface` su `signals` e `observations`. 2) **Time-decay 30/60 giorni**: i
+  risultati invecchiano all'USO — la rating efficace regredisce verso il
+  neutro 1500 in base all'eta' dell'ultimo match osservato: peso PIENO
+  sotto `ELO_RECENT_DAYS` (30), ~50% a ~60gg (`ELO_HALF_LIFE_DAYS` 30),
+  zero oltre `ELO_WINDOW_DAYS` (365). Il seeding dal mercato (n=0) non
+  invecchia. 3) La probabilita' per i +EV usa la **blended rating**: con
+  storico su quella superficie domina la superficie (peso
+  `min(1, n_surf/SURFACE_MIN_MATCHES)`), senza storico l'overall. Il
+  settlement passa la superficie dell'observation a `elo.update`, quindi le
+  superfici imparano solo dai match su quella superficie. `ratings.json`
+  RETROCOMPATIBILE (vecchio formato → overall, superfici vuote). Report
+  con riepilogo per superficie (`🏟️ Per superficie`). Test dedicati
+  (decay 30/60/365gg, isolamento superfici, blend, migrazione ledger,
+  retrocompatibilita', rilevamento tornei).
+- **Collaudo LIVE calcio verificato (09/09)** — su Railway il sistema era
+  GIÀ in esecuzione live effettiva: env `AUTO_BET_MODE=live` +
+  `EXECUTION_PROVIDER=sxbet` (credenziali SX presenti), file kill-switch
+  `data/execution/auto_bet_mode.json` ASSENTE → a runtime
+  `kill_switch_status()` = {override: null, env_mode: live, effective:
+  live, provider_ready: true}. Il giro `auto_bet_job` delle 16:42 UTC ha
+  loggato "bankroll LIVE = saldo wallet 12.28 USDC" e 0 ordini: NON c'e'
+  alcun gate a ~100 campioni che blocchi il live (nel percorso auto_bet
+  non esistono soglie di campioni: ensemble 30 / calibrazione 60 / drift 15
+  sono solo telemetria) — i 0 ordini dipendono dal filtro value: nelle 24h
+  c'erano solo 7 match analizzati, 6 `rejected` e 1 `value` debole
+  (Cardiff–Stoke @3.25, kickoff 18:45 UTC, perso dalla guardia dei 15').
+  Le puntate sim piu' recenti nel DB restano quelle del 05/09 (Over 2.5,
+  pre-esclusione OU). Prossimo giro ogni 3h (es. 19:42 UTC) dopo le
+  analisi 18:00 UTC.
 
 - **Sandbox tennis + scansione calcio H24/7 (08/09)** — nuovo modulo
   `tennis_sandbox.py` (pattern surebet_engine: indipendente da tracker/bot,
@@ -505,11 +547,17 @@ cd webapp && npm run build            # build Next.js
   (quota del segnale, mode='sim') oppure **LIVE via execution_engine dal
   08/09** con `AUTO_BET_MODE=live` + provider reale (SX Bet; ordini reali
   con floor EV e risoluzione evento univoca, mode='live' nel ledger).
-  Stake **ADATTIVO** (`adaptive_staking.py`):
+  Stake **ADATTIVO** di default (`adaptive_staking.py`):
   Kelly frazionato dinamico (0.10-0.35 vs 0.25 fisso prima) con drawdown
   protection (>10% drawdown → riduzione stakes) e confidence weighting
   (market_edge alto + strong_value → stake più alto). Cap: 3% value, 5%
   strong_value. Fallback: stake fisso `BET_STAKE_EUR` se modulo assente.
+  **Flat-stake opzionale (09/09)**: con `AUTO_BET_STAKE_MODE=flat` ogni
+  segnale +EV del Calcio 1X2 viene piazzato a `AUTO_BET_FLAT_STAKE_EUR`
+  (default 1 USDC = minimo ordine SX Bet); i risk cap restano attivi ma
+  a UNITA' INTERE (`apply_flat_budget`: max floor(30% bankroll) segni per
+  blocco correlato e floor(40% - già piazzato) segni/giorno, EV-decrescenti
+  — niente frazioni non piazzabili, il minimo SX è 1 USDC).
   Guardie: salta partite a <15 min dall'inizio, doppie puntate (UNIQUE
   match_id+esito). Risk caps prima del salvataggio: correlation cap (30%
   bankroll per blocco correlato) + cap esposizione totale (40%). Registro

@@ -220,12 +220,15 @@ Architettura attuale:
 > 🎾 **Sandbox tennis (paper trading, 08/09)**: `tennis_sandbox.py` legge i
 > mercati Moneyline tennis SX Bet (type 52) da API PUBBLICA — **zero
 > ordini reali, zero credenziali, zero crediti the-odds-api**. Baseline
-> Weighted ELO (seme dal mercato, apprende dai settlement delle
-> osservazioni) + filtro anti-EV-spurio + ledger SQLite dedicato
-> (`data/tennis_sandbox/`). Attivo sul container con
-> `TENNIS_SANDBOX_ENABLED=1`: scan+settle ogni 6h + report giornaliero
-> 05:55 UTC su Telegram. CLI: `--scan`, `--settle`, `--loop N`,
-> `--report [--json]`.
+> ELO superficie-specifico (cemento/terra/erba, superficie rilevata dal
+> torneo) con time-decay 30/60gg (rating efficace che regredisce verso
+> 1500 col tempo: recenti pieni, dimezzate a ~60gg, dimenticate oltre
+> l'anno) + seme dal mercato, apprende dai settlement delle osservazioni
+> + filtro anti-EV-spurio + ledger SQLite dedicato
+> (`data/tennis_sandbox/`, colonna `surface` migrata in place). Attivo
+> sul container con `TENNIS_SANDBOX_ENABLED=1`: scan+settle ogni 6h +
+> report giornaliero 05:55 UTC su Telegram (con riepilogo per
+> superficie). CLI: `--scan`, `--settle`, `--loop N`, `--report [--json]`.
 
 > ⚙️ **Staking dinamico** (08/09): nessun importo fisso — Kelly frazionato
 > sul bankroll corrente (in LIVE = saldo reale del wallet SX via
@@ -233,6 +236,13 @@ Architettura attuale:
 > (0.40), `STAKE_CAP_PCT` (0.10 value), `STAKE_CAP_PCT_STRONG` (0.25
 > strong_value), `STAKE_MIN_EUR` (1.0 = minimo ordine SX), `STAKE_STEP_EUR`
 > (0.01). Giro immediato: `/autobet now` (Telegram, admin).
+
+> 🧾 **Flat-stake live Calcio 1X2** (09/09): con `AUTO_BET_STAKE_MODE=flat`
+> (+ `AUTO_BET_FLAT_STAKE_EUR=1`) il giro piazza **1 USDC per ogni segnale**
+> value/strong_value; i risk cap (correlazione 30% + esposizione totale 40%
+> del giorno) restano attivi ma a **unita' intere** (`apply_flat_budget`):
+> con wallet ~12 USDC entrano max ~3-4 ordini/giorno (minimo ordine SX = 1
+> USDC, niente frazioni). Default `adaptive` (Kelly) se l'env e' assente.
 >
 > 🕐 **Auto-bet 24/7** (08/09): il giro puntate gira ogni 3h da 08:50 ITA
 > (non più una sola volta al giorno). Cap esposizione totale giornaliero
