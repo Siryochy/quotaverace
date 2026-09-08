@@ -125,24 +125,178 @@ class TestElo:
         assert elo.players["B"].rating > rb
         assert elo.players["A"].n == 1 and elo.players["B"].n == 1
 
-    def test_update_pesato_recency(self, tmp_path):
-        # Un match molto vecchio muove meno (o niente) di uno recente
+    def test_decay_rating_fresca_invariata(self, tmp_path):
+        # Risultati negli ultimi 30 giorni: peso PIENO (nessun fade)
         elo = ts.TennisElo(ratings_file=tmp_path / "r.json")
         now = 2_000_000_000.0
-        recent = now - 86400  # storico aggiornato ieri
+        pr = ts.PlayerRating(1600.0, 5, now - 10 * 86400)
+        elo.players["A"] = pr
+        assert elo.overall_effective("A", now) == 1600.0
+
+    def test_decay_eta_60_giorni_meta_peso(self, tmp_path):
+        # ~50% a 60 giorni (RECENT_DAYS 30 + HALF_LIFE 30): 1550 da 1600
+        elo = ts.TennisElo(ratings_file=tmp_path / "r.json")
+        now = 2_000_000_000.0
+        elo.players["A"] = ts.PlayerRating(1600.0, 5, now - 60 * 86400)
+        eff = elo.overall_effective("A", now)
+        assert eff == pytest.approx(1500.0 + 100.0 * 0.5, abs=0.1)
+
+    def test_decay_risultato_antico_dimenticato(self, tmp_path):
+        # Oltre la finestra (2 anni > ELO_WINDOW_DAYS): rating = neutro 1500
+        elo = ts.TennisElo(ratings_file=tmp_path / "r.json")
+        now = 2_000_000_000.0
+        elo.players["A"] = ts.PlayerRating(
+            1700.0, 5, now - 2 * 365 * 86400)
+        assert elo.overall_effective("A", now) == 1500.0
+
+    def test_decay_non_tocca_seed_dal_mercato(self, tmp_path):
+        # Rating seminati dal mercato (n=0): non invecchiano mai
+        elo = ts.TennisElo(ratings_file=tmp_path / "r.json")
+        now = 2_000_000_000.0
+        elo.ensure_pair("A", 0.65, "B", 0.35)
+        assert elo.overall_effective("A", now) == elo.players["A"].rating
+
+    def test_risultati_recenti_pesano_piu(self, tmp_path):
+        # Stesso esito, stesso rating di partenza: chi ha risultati
+        # recenti (5 giorni fa) mantiene una rating piu' alta di chi ha lo
+        # stesso rating ma e' inattivo da ~4 mesi (il contesto vecchio
+        # viene fade-out dal time-decay PRIMA dell'update).
+        elo = ts.TennisElo(ratings_file=tmp_path / "r.json")
+        now = 2_000_000_000.0
+        recent = now - 5 * 86400
         elo.players["A"] = ts.PlayerRating(1600.0, 5, recent)
-        elo.players["B"] = ts.PlayerRating(1500.0, 5, recent)
-        ra = elo.players["A"].rating
+        elo.players["B"] = ts.PlayerRating(1400.0, 5, recent)
         elo.update("A", "B", ts=now)
-        delta_recent = abs(elo.players["A"].rating - ra)
-        old = now - 2 * 365 * 86400  # storico di 2 anni fa
+        r_recent = elo.players["A"].rating
+        old = now - 120 * 86400
         elo.players["A"] = ts.PlayerRating(1600.0, 5, old)
-        elo.players["B"] = ts.PlayerRating(1500.0, 5, old)
-        ra = elo.players["A"].rating
+        elo.players["B"] = ts.PlayerRating(1400.0, 5, old)
         elo.update("A", "B", ts=now)
-        delta_old = abs(elo.players["A"].rating - ra)
-        assert delta_recent > delta_old
-        assert delta_old == 0.0  # oltre ELO_WINDOW_DAYS: nessun update
+        r_old = elo.players["A"].rating
+        assert r_recent > r_old
+        # e in assenza di update, un A inattivo da 120gg predice un match
+        # piu' equilibrato di un A attivo (decay visibile nella stima)
+        elo.players["C"] = ts.PlayerRating(1600.0, 5, recent)
+        elo.players["D"] = ts.PlayerRating(1600.0, 5, old)
+        eff_c = elo.overall_effective("C", now)
+        eff_d = elo.overall_effective("D", now)
+        assert eff_c == 1600.0
+        assert eff_d < 1600.0  # regredito verso il neutro 1500
+
+    # -- superficie-specifico -------------------------------------------
+    def test_update_superficie_solo_quella(self, tmp_path):
+        # Un match su terra aggiorna overall + terra, NON cemento/erba
+        elo = ts.TennisElo(ratings_file=tmp_path / "r.json")
+        now = 2_000_000_000.0
+        elo.ensure_pair("A", 0.65, "B", 0.35)
+        elo.update("A", "B", surface="clay", ts=now)
+        a = elo.players["A"]
+        assert a.n == 1
+        assert "clay" in a.surfaces and a.surfaces["clay"].n == 1
+        assert "hard" not in a.surfaces and "grass" not in a.surfaces
+        assert elo.players["B"].surfaces["clay"].n == 1
+
+    def test_update_superficie_alias(self, tmp_path):
+        # Alias accettati (cemento/terra/erba)
+        elo = ts.TennisElo(ratings_file=tmp_path / "r.json")
+        now = 2_000_000_000.0
+        elo.ensure_pair("A", 0.6, "B", 0.4)
+        elo.update("A", "B", surface="Terra battuta", ts=now)
+        assert "clay" in elo.players["A"].surfaces
+
+    def test_update_superficie_sconosciuta_solo_overall(self, tmp_path):
+        elo = ts.TennisElo(ratings_file=tmp_path / "r.json")
+        now = 2_000_000_000.0
+        elo.ensure_pair("A", 0.6, "B", 0.4)
+        elo.update("A", "B", surface=None, ts=now)
+        elo.update("B", "A", surface="torneo generico", ts=now)
+        assert elo.players["A"].n == 2
+        assert elo.players["A"].surfaces == {}
+
+    def test_match_prob_usa_superficie(self, tmp_path):
+        # Con storico sulla superficie la probabilita' riflette la rating
+        # superficie-specifica, non solo l'overall.
+        elo = ts.TennisElo(ratings_file=tmp_path / "r.json")
+        now = 2_000_000_000.0
+        elo.players["A"] = ts.PlayerRating(
+            1600.0, 10, now - 86400,
+            surfaces={"clay": ts.SurfaceRating(1800.0, 5, now - 86400)})
+        # B senza storico su terra -> si usa l'overall
+        elo.players["B"] = ts.PlayerRating(1400.0, 10, now - 86400)
+        p_overall = elo.match_prob("A", "B")
+        p_clay = elo.match_prob("A", "B", surface="clay")
+        assert p_overall == pytest.approx(1 / (1 + 10 ** (-200 / 400)),
+                                          abs=0.001)
+        assert p_clay == pytest.approx(1 / (1 + 10 ** (-400 / 400)),
+                                       abs=0.001)
+        assert p_clay > p_overall  # clay-dominante su terra
+
+    def test_persistenza_superfici(self, tmp_path):
+        rfile = tmp_path / "ratings.json"
+        elo = ts.TennisElo(ratings_file=rfile)
+        now = 2_000_000_000.0
+        elo.ensure_pair("A", 0.65, "B", 0.35)
+        elo.update("A", "B", surface="grass", ts=now)
+        elo.save()
+        elo2 = ts.TennisElo(ratings_file=rfile)
+        assert elo2.players["A"].rating == elo.players["A"].rating
+        assert elo2.players["A"].surfaces["grass"].rating \
+            == elo.players["A"].surfaces["grass"].rating
+        assert elo2.players["B"].surfaces["grass"].n == 1
+
+    def test_caricamento_retrocompatibile(self, tmp_path):
+        # Vecchio formato (senza `surfaces`) -> overall + superfici vuote
+        rfile = tmp_path / "ratings.json"
+        rfile.write_text(json.dumps({
+            "Nadal": {"rating": 1700.0, "n": 3, "last_ts": 123.0},
+        }), encoding="utf-8")
+        elo = ts.TennisElo(ratings_file=rfile)
+        assert elo.players["Nadal"].rating == 1700.0
+        assert elo.players["Nadal"].n == 3
+        assert elo.players["Nadal"].surfaces == {}
+
+
+class TestSurface:
+    def test_detect_cemento(self):
+        assert ts.detect_surface("US Open 2026", "ATP") == "hard"
+        assert ts.detect_surface("Australian Open") == "hard"
+        assert ts.detect_surface("BNP Paribas Open Indian Wells") == "hard"
+
+    def test_detect_terra(self):
+        assert ts.detect_surface("Roland Garros", "Grand Slam") == "clay"
+        assert ts.detect_surface("Monte-Carlo Masters") == "clay"
+        assert ts.detect_surface("Internazionali d'Italia Roma") == "clay"
+
+    def test_detect_erba(self):
+        assert ts.detect_surface("Wimbledon 2026") == "grass"
+        assert ts.detect_surface("Queen's Club") == "grass"
+
+    def test_sconosciuto_e_ambiguo(self):
+        # Torneo non riconosciuto o testo ambiguo: MAI indovinare
+        assert ts.detect_surface("Challenger di tennis generico") is None
+        assert ts.detect_surface("Laver Cup") == "hard"
+        assert ts.detect_surface("Porsche Tennis Stuttgart") is None
+        assert ts.detect_surface("") is None
+        assert ts.detect_surface(None, None) is None
+
+    def test_market_surface(self):
+        assert ts.market_surface({"leagueLabel": "ATP US Open",
+                                  "group1": "US Open"}) == "hard"
+        assert ts.market_surface({"leagueLabel": "WTA Roland Garros"}) \
+            == "clay"
+        assert ts.market_surface({"leagueLabel": "ATP Cup",
+                                  "eventName": "Sinner vs Alcaraz"}) \
+            == "hard"
+        assert ts.market_surface({"leagueLabel": "Generico"}) is None
+
+    def test_normalize_alias(self):
+        assert ts.normalize_surface("Cemento") == "hard"
+        assert ts.normalize_surface("terra battuta") == "clay"
+        assert ts.normalize_surface("erba") == "grass"
+        assert ts.normalize_surface("clay") == "clay"
+        assert ts.normalize_surface("hard court") == "hard"
+        assert ts.normalize_surface("") is None
+        assert ts.normalize_surface(None) is None
 
     def test_persistenza(self, tmp_path):
         rfile = tmp_path / "ratings.json"
@@ -244,6 +398,28 @@ class TestScan:
         c = ts.SxTennisClient()
         assert not hasattr(c, "api_key")
 
+    def test_osservazione_registra_superficie(self, sb):
+        # La superficie del torneo viene rilevata e salvata sul ledger
+        sb.client.markets = [mk_market("h1", "A", "B",
+                                       league="Wimbledon 2026")]
+        sb.client.books = {"h1": mk_book(FAIR_A, FAIR_B)}
+        sb.scan()
+        obs = sb.conn.execute(
+            "SELECT surface FROM observations WHERE market_hash='h1'"
+        ).fetchone()
+        assert obs["surface"] == "grass"
+
+    def test_segnale_registra_superficie(self, sb):
+        sb.client.markets = [mk_market("h1", "A", "B",
+                                       league="Roland Garros")]
+        sb.client.books = {"h1": mk_book(1.8, 2.1)}
+        sb.elo.ensure_pair("A", 0.5, "B", 0.5)
+        sb.elo.players["A"].rating = 1750.0
+        sb.scan()
+        row = sb.conn.execute(
+            "SELECT surface FROM signals WHERE selection='A'").fetchone()
+        assert row["surface"] == "clay"
+
 
 # ---------------------------------------------------------------------------
 # Settlement
@@ -302,6 +478,37 @@ class TestSettle:
         self._seed_open_bet(sb)
         sb.settle()
         assert sb.elo.players["A"].n == 1
+
+    def test_settle_allena_rating_superficie(self, sb):
+        # Match su terra (Roland Garros): il settlement aggiorna sia
+        # l'overall sia il rating clay (e NON hard/grass)
+        sb.client.markets = [mk_market("h1", "A", "B",
+                                       league="Roland Garros")]
+        sb.client.books = {"h1": mk_book(1.8, 2.1)}
+        sb.elo.ensure_pair("A", 0.55, "B", 0.45)
+        sb.elo.players["A"].rating = 1700.0
+        sb.scan()
+        obs = sb.conn.execute(
+            "SELECT surface FROM observations WHERE market_hash='h1'"
+        ).fetchone()
+        assert obs["surface"] == "clay"
+        sb.client.outcomes = {"h1": 1}  # vince A
+        sb.settle()
+        assert sb.elo.players["A"].n == 1
+        assert sb.elo.players["A"].surfaces["clay"].n == 1
+        assert "hard" not in sb.elo.players["A"].surfaces
+        assert "grass" not in sb.elo.players["A"].surfaces
+
+    def test_settle_void_non_allena_superficie(self, sb):
+        sb.client.markets = [mk_market("h1", "A", "B",
+                                       league="Wimbledon")]
+        sb.client.books = {"h1": mk_book(FAIR_A, FAIR_B)}
+        sb.elo.ensure_pair("A", 0.5, "B", 0.5)
+        sb.scan()
+        sb.client.outcomes = {"h1": 0}  # void
+        sb.settle()
+        assert sb.elo.players["A"].n == 0
+        assert "grass" not in sb.elo.players["A"].surfaces
 
 
 # ---------------------------------------------------------------------------

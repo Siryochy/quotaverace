@@ -2,12 +2,16 @@
 
 Modulo PARALLELO e SOLO-SIMULAZIONE: legge i mercati tennis Moneyline
 (market type 52 = "12", chi vince senza pareggio) dall'API PUBBLICA di
-SX Bet, stima le probabilita' con una baseline Weighted ELO (seme iniziale
-dalle probabilita' implicite del mercato, poi aggiornata SOLO dai ghost
-bet saldati), calcola il Valore Atteso (+EV) sulle quote a 2 vie e
-registra TUTTI i segnali +EV su un ledger dedicato (SQLite in
-data/tennis_sandbox/) per misurare opportunita' giornaliere, ROI teorico
-e tasso di vincita prima di qualsiasi integrazione con denaro reale.
+SX Bet, stima le probabilita' con un ELO SUPERFICIE-SPECIFICO e
+TIME-DECAY (surface hard=cemento/clay=terra/grass=erba rilevata dal
+nome del torneo; seme iniziale dalle probabilita' implicite del mercato,
+poi aggiornato SOLO dai ghost bet/observation saldati; i risultati
+invecchiano: peso pieno sugli ultimi ~30 giorni, dimezzati a ~60,
+dimenticati oltre l'anno), calcola il Valore Atteso (+EV) sulle quote a
+2 vie e registra TUTTI i segnali +EV su un ledger dedicato (SQLite in
+data/tennis_sandbox/) per misurare opportunita' giornaliere, ROI
+teorico e tasso di vincita prima di qualsiasi integrazione con denaro
+reale.
 
 Vincoli architetturali (pattern surebet_engine):
 - indipendente da tracker/bot: ledger, ratings e loop PROPRI; nessun
@@ -40,7 +44,8 @@ import math
 import os
 import sqlite3
 import time
-from dataclasses import asdict, dataclass
+import unicodedata
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -96,12 +101,26 @@ MAX_ODDS = float(os.getenv("TENNIS_MAX_ODDS", "30"))
 MIN_INV_SUM = float(os.getenv("TENNIS_MIN_INV_SUM", "0.98"))
 MAX_INV_SUM = float(os.getenv("TENNIS_MAX_INV_SUM", "1.08"))
 
-# Weighted ELO: K base, pesato per la recency dei match saldati (i match
-# piu' recenti muovono di piu' il rating; quelli oltre la finestra pesano
-# la meta').
+# ELO superficie-specifico + time-decay.
+#
+# - Surface-Specific ELO: ogni giocatore ha un rating OVERALL (tutte le
+#   superfici) e un rating per superficie (hard=cemento/clay=terra/grass=
+#   erba). Un match su superficie nota aggiorna overall E superficie; un
+#   match senza superficie riconosciuta aggiorna solo l'overall.
+# - Time-decay (30/60 giorni): i risultati invecchiano al momento dell'uso.
+#   La rating efficace regredisce verso il neutro 1500 man mano che l'ultimo
+#   match osservato invecchia: peso PIENO entro ELO_RECENT_DAYS (default
+#   30 giorni), poi il peso dimezza ogni ELO_HALF_LIFE_DAYS (default 30
+#   giorni: ~50% a 60 giorni), zero oltre ELO_WINDOW_DAYS (default 365).
+# - Probabilita' su una superficie: blended rating efficace
+#   overall*(1-w) + superficie*w con w = min(1, n_superficie/
+#   SURFACE_MIN_MATCHES): la superficie conta davvero dopo i primi match
+#   saldati su quella superficie, prima l'overall fa da smoothing.
 ELO_K = float(os.getenv("TENNIS_ELO_K", "32"))
-ELO_WEIGHT_DAYS = float(os.getenv("TENNIS_ELO_WEIGHT_DAYS", "180"))
+ELO_RECENT_DAYS = float(os.getenv("TENNIS_ELO_RECENT_DAYS", "30"))
+ELO_HALF_LIFE_DAYS = float(os.getenv("TENNIS_ELO_HALF_LIFE_DAYS", "30"))
 ELO_WINDOW_DAYS = float(os.getenv("TENNIS_ELO_WINDOW_DAYS", "365"))
+SURFACE_MIN_MATCHES = float(os.getenv("TENNIS_SURFACE_MIN_MATCHES", "3"))
 
 # Rete
 REQUEST_TIMEOUT = float(os.getenv("TENNIS_REQUEST_TIMEOUT", "15"))
@@ -211,26 +230,189 @@ class SxTennisClient:
 
 
 # ---------------------------------------------------------------------------
-# Weighted ELO (baseline predittiva per il tennis)
+# Rilevamento superficie (l'API V3 di SX Bet NON espone la superficie)
+# ---------------------------------------------------------------------------
+SURFACES = ("hard", "clay", "grass")
+# Etichetta italiana (report/Telegram)
+SURFACE_IT = {"hard": "cemento", "clay": "terra battuta",
+              "grass": "erba"}
+
+# Nomi superficie canonici + alias accettati (input/output normalizzati)
+_SURFACE_ALIASES = {
+    "hard": "hard", "hardcourt": "hard", "hard court": "hard",
+    "cemento": "hard", "pista dura": "hard",
+    "clay": "clay", "clay court": "clay", "terra": "clay",
+    "terra battuta": "clay", "terre": "clay",
+    "terre battue": "clay", "rosso": "clay",
+    "grass": "grass", "grass court": "grass", "erba": "grass",
+    "rasen": "grass",
+}
+
+# Tornei (o parole) che identificano la superficie, in forma NORMALIZZATA
+# (lowercase, senza accenti). La lista NON e' esaustiva per design: se un
+# torneo non e' riconosciuto la superficie resta sconosciuta e l'ELO
+# aggiorna solo l'overall, senza mai contaminare le superfici note.
+# Estendere qui per coprire altri eventi (Challenger/ITF/WTA).
+_SURFACE_KEYWORDS = {
+    "clay": [
+        "clay", "clay court", "terra battuta", "terre battue",
+        "terre", "rosso",
+        "roland garros", "roland-garros", "french open",
+        "monte carlo", "montecarlo",
+        "mutua madrid", "madrid open", "madrid",
+        "internazionali d italia", "italian open", "rome masters",
+        "roma",
+        "barcelona open", "conde de godo", "barcellona",
+        "bogota", "buenos aires", "cordoba", "rio open",
+        "rio de janeiro", "santiago", "sao paulo", "brasil open",
+        "montevideo", "south american",
+        "estoril", "casablanca", "marrakech", "hassan ii",
+        "munich", "geneva open", "geneve", "lyon open", "lyon",
+        "gstaad", "umag", "kitzbuhel", "kitzbuehel", "hamburg",
+        "bastad", "bastaad", "bucharest", "belgrade", "bordeaux",
+        "charleston", "houston", "porsche", "bavarian open",
+        "oranjeboom", "santos",
+    ],
+    "grass": [
+        "grass", "grass court", "erba", "rasen", "rasenturnier",
+        "wimbledon", "the championships",
+        "queens club", "queen s club", "london grass",
+        "halle", "terra wortmann", "gerry weber", "boss open",
+        "stuttgart",
+        "rosmalen", "s hertogenbosch", "den bosch", "libema open",
+        "eastbourne", "newport", "mallorca championships",
+        "bad homburg", "nottingham", "illy classic",
+    ],
+    "hard": [
+        "hard", "hard court", "cemento", "pista dura", "indoor",
+        "us open", "australian open", "melbourne",
+        "indian wells", "bnp paribas open",
+        "miami open", "miami",
+        "cincinnati", "western southern",
+        "rogers cup", "canada masters", "canadian open", "toronto",
+        "montreal",
+        "shanghai masters", "shanghai", "china open", "beijing",
+        "paris masters", "paris bercy", "bercy", "rolex paris",
+        "tokyo", "japan open", "dubai", "doha", "qatar open",
+        "abu dhabi", "acapulco", "mexico open", "los cabos",
+        "dallas open", "delray beach", "washington", "dc open",
+        "atlanta", "winston salem", "winston-salem",
+        "rotterdam", "abn amro", "marseille", "open 13",
+        "montpellier", "vienna", "erste bank open", "basel",
+        "basilea", "stockholm", "antwerp", "tel aviv", "sofia",
+        "metz", "moselle open", "astana", "almaty", "zhuhai",
+        "chengdu", "guanzhou",
+        "atp finals", "nitto atp finals", "next gen",
+        "united cup", "atp cup", "laver cup",
+    ],
+}
+
+
+def _normalize_text(text: Optional[str]) -> str:
+    """Lowercase senza accenti, solo alfanumerici separati da spazio."""
+    if not text:
+        return ""
+    t = unicodedata.normalize("NFD", str(text))
+    t = "".join(ch for ch in t if unicodedata.category(ch) != "Mn")
+    return " ".join("".join(ch if ch.isalnum() else " "
+                              for ch in t.lower()).split())
+
+
+def detect_surface(*texts: Optional[str]) -> Optional[str]:
+    """Rileva la superficie (hard|clay|grass) dai campi testuali di un
+    mercato tennis SX (leagueLabel/group1/group2/eventName).
+
+    Matching pesato su parole chiave normalizzate: i nomi di torneo
+    (multi-parola) valgono 2, le parole generiche 1. Ritorna None se
+    nessun torneo/superficie e' riconosciuto o se il testo e' AMBIGUO
+    (parita' di punteggio tra superfici): mai indovinare — una superficie
+    sbagliata contaminerebbe i rating di quella superficie.
+    """
+    blob = " ".join(_normalize_text(t) for t in texts if t).strip()
+    if not blob:
+        return None
+    padded = f" {blob} "
+    scores = {s: 0 for s in SURFACES}
+    for surface, kws in _SURFACE_KEYWORDS.items():
+        for kw in kws:
+            norm_kw = _normalize_text(kw).strip()
+            if not norm_kw:
+                continue
+            if f" {norm_kw} " in padded:
+                scores[surface] += 2 if len(norm_kw.split()) > 1 else 1
+    ranked = sorted(scores.items(), key=lambda kv: -kv[1])
+    best, score = ranked[0]
+    if score <= 0:
+        return None
+    if len(ranked) > 1 and ranked[1][1] == score:
+        return None  # ambiguo
+    return best
+
+
+def normalize_surface(surface: Optional[str]) -> Optional[str]:
+    """Riporta un nome superficie ai valori canonici (hard|clay|grass)."""
+    if not surface:
+        return None
+    norm = _normalize_text(surface).strip()
+    return _SURFACE_ALIASES.get(norm)
+
+
+def market_surface(market: Dict) -> Optional[str]:
+    """Superficie di un mercato tennis SX Bet (None se non rilevabile)."""
+    return detect_surface(
+        market.get("eventName"), market.get("name"),
+        market.get("leagueLabel"), market.get("group1"),
+        market.get("group2"))
+
+
+# ---------------------------------------------------------------------------
+# ELO superficie-specifico con time-decay (baseline predittiva tennis)
 # ---------------------------------------------------------------------------
 @dataclass
-class PlayerRating:
+class SurfaceRating:
     rating: float
     n: int
     last_ts: float
 
 
-class TennisElo:
-    """Weighted ELO a 2 giocatori con K pesato per recency.
+@dataclass
+class PlayerRating:
+    rating: float
+    n: int
+    last_ts: float
+    surfaces: Dict[str, SurfaceRating] = field(default_factory=dict)
 
-    - prob(r_a, r_b) = 1 / (1 + 10^((r_b - r_a)/400))
-    - rating iniziale: se un giocatore non ha ancora rating (nessun ghost
-      bet saldato) viene seminato dalle probabilita' implicite del mercato
-      (devig semplice), che sono il miglior prior disponibile;
-    - update(winner, loser): K_eff = K * weight(days), con weight che
-      decade da 1.0 a 0.5 oltre la finestra ELO_WEIGHT_DAYS. I match fuori
-      da ELO_WINDOW_DAYS non vengono usati per l'update (dati stantii).
-    Persistenza: ratings.json (player -> {rating, n, last_ts}).
+
+class TennisElo:
+    """ELO a 2 giocatori SUPERFICIE-SPECIFICO con time-decay.
+
+    - prob(r_a, r_b) = 1 / (1 + 10^((r_b - r_a)/400)), formula invariata;
+    - rating OVERALL (tutte le superfici) + rating per superficie
+      (chiavi SURFACES: hard/clay/grass). Un match su superficie nota
+      aggiorna sia l'overall sia quella superficie; un match senza
+      superficie riconosciuta aggiorna SOLO l'overall;
+    - seeding: i giocatori senza rating (nessun match saldato) vengono
+      seminati dalle probabilita' implicite del mercato (devig semplice),
+      il miglior prior disponibile. Il seeding NON invecchia (n=0 =>
+      nessun time-decay);
+    - time-decay: i risultati invecchiano al momento dell'USO. La rating
+      efficace `_decayed` regredisce verso il neutro 1500 in base all'eta'
+      dell'ultimo match osservato: peso pieno entro ELO_RECENT_DAYS
+      (default 30g), poi dimezzamento ogni ELO_HALF_LIFE_DAYS (default
+      30g: ~50% a 60 giorni), zero oltre ELO_WINDOW_DAYS (365g). Cosi' i
+      risultati recenti pesano piu' di quelli vecchi sia nelle
+      probabilita' usate per i +EV sia negli update;
+    - probabilita' di un match sulla superficie S: blended rating
+      effettiva = overall_eff * (1-w) + surface_S_eff * w, con
+      w = min(1, n_S / SURFACE_MIN_MATCHES): la superficie conta davvero
+      dopo i primi match saldati su quella superficie, prima l'overall fa
+      da smoothing (i rating di superficie nascono dall'overall, quindi
+      senza storico superficie le due stime coincidono).
+
+    Persistenza: ratings.json (player -> {rating, n, last_ts, surfaces:
+    {surface: {rating, n, last_ts}}}). Caricamento RETROCOMPATIBILE col
+    vecchio formato {rating, n, last_ts}: quei rating diventano l'overall
+    e le superfici partono vuote (nessuna migrazione distruttiva).
     """
 
     def __init__(self, ratings_file: Optional[Path] = None,
@@ -252,15 +434,28 @@ class TennisElo:
             return 1500.0
         return 1500.0 + 400.0 * math.log10(p / (1.0 - p))
 
-    def _weight(self, last_ts: float, now: float) -> float:
-        """Peso recency: nessuno storico (seeding) -> 1.0; dati oltre la
-        finestra -> 0.0 (nessun update); altrimenti decade a 0.5."""
-        if not last_ts:
-            return 1.0
-        days = max(0.0, (now - last_ts) / 86400.0)
-        if days > ELO_WINDOW_DAYS:
-            return 0.0
-        return max(0.5, 1.0 - days / ELO_WEIGHT_DAYS)
+    # -- time-decay ------------------------------------------------------
+    @staticmethod
+    def _decayed(rating: float, n: int, last_ts: float,
+                 now: float) -> float:
+        """Rating efficace al tempo `now` (time-decay dei risultati).
+
+        - rating seminati dal mercato (n=0) o match con eta' <= RECENT_DAYS
+          giorni (ultimi ~30 giorni): peso pieno, nessun decadimento;
+        - poi il peso dimezza ogni HALF_LIFE_DAYS giorni (~50% a ~60
+          giorni dall'ultimo match);
+        - oltre WINDOW_DAYS (365) il risultato e' dimenticato: la rating
+          torna al neutro 1500.
+        """
+        if n <= 0 or not last_ts:
+            return rating
+        age_days = max(0.0, (now - last_ts) / 86400.0)
+        if age_days <= ELO_RECENT_DAYS:
+            return rating
+        if age_days >= ELO_WINDOW_DAYS:
+            return 1500.0
+        w = 0.5 ** ((age_days - ELO_RECENT_DAYS) / ELO_HALF_LIFE_DAYS)
+        return 1500.0 + (rating - 1500.0) * w
 
     # -- seeding ---------------------------------------------------------
     def ensure(self, player: str, market_prob: float) -> float:
@@ -278,8 +473,8 @@ class TennisElo:
 
     def ensure_pair(self, player_a: str, p_a: float,
                     player_b: str, p_b: float) -> None:
-        """Seeding COERENTE di una coppia: assegna rating simmetrici
-        attorno a 1500 tali che prob(r_a, r_b) == p_a esattamente.
+        """Seeding COERENTE di una coppia (rating OVERALL): assegna rating
+        simmetrici attorno a 1500 tali che prob(r_a, r_b) == p_a.
 
         NB: seminare i due giocatori separatamente con `ensure` (implied_
         rating contro 1500) NON funziona: prob(r_a, r_b) distorcerebbe la
@@ -287,6 +482,8 @@ class TennisElo:
           d = 400*log10(p_a/(1-p_a)); r_a = 1500 + d/2; r_b = 1500 - d/2
         cosi' prob(r_a, r_b) = 1/(1+10^(-d/400)) = p_a.
         I giocatori gia' noti (con storico) mantengono il loro rating.
+        Le superfici NON vengono seminate qui: nascono lazy dal primo
+        update su quella superficie (vedi `update`).
         """
         a = (player_a or "").strip()
         b = (player_b or "").strip()
@@ -306,37 +503,102 @@ class TennisElo:
 
     # -- learning --------------------------------------------------------
     def update(self, winner: str, loser: str,
+               surface: Optional[str] = None,
                ts: Optional[float] = None) -> None:
+        """Aggiorna l'ELO col risultato reale (settlement).
+
+        Aggiorna SEMPRE l'overall; se la superficie del match e' nota
+        (canonica o alias) aggiorna anche il rating di quella superficie
+        (creandolo all'occorrenza, seminato dalla rating overall
+        efficace). L'update usa le rating EFFICACI (time-decay applicato
+        prima: i risultati vecchi pesano meno) e il K pieno.
+        """
         now = ts if ts is not None else time.time()
-        rw = self.players.get(winner)
-        rl = self.players.get(loser)
-        if rw is None or rl is None:
+        pr_w = self.players.get(winner)
+        pr_l = self.players.get(loser)
+        if pr_w is None or pr_l is None:
             logger.warning("tennis elo: update senza rating per %s/%s",
                            winner, loser)
             return
-        # Pesi recency indipendenti: un giocatore senza storico impara a
-        # piena velocita' (weight 1.0); dati vecchi -> weight 0.0 (niente
-        # update su quel lato). MAI fallback a 1.0 per weight 0.0.
-        w_w = self._weight(rw.last_ts, now)
-        w_l = self._weight(rl.last_ts, now)
-        k_w = self.k * w_w
-        k_l = self.k * w_l
-        expected_w = self.prob(rw.rating, rl.rating)
-        new_w = rw.rating + k_w * (1.0 - expected_w)
-        new_l = rl.rating - k_l * expected_w
-        rw.rating = round(new_w, 1)
-        rl.rating = round(new_l, 1)
+        self._apply_update(pr_w, pr_l, now)
+        surf = normalize_surface(surface)
+        if surf is not None:
+            sw = pr_w.surfaces.get(surf)
+            if sw is None:
+                sw = SurfaceRating(rating=self._effective_pr(pr_w, now),
+                                   n=0, last_ts=now)
+                pr_w.surfaces[surf] = sw
+            sl = pr_l.surfaces.get(surf)
+            if sl is None:
+                sl = SurfaceRating(rating=self._effective_pr(pr_l, now),
+                                   n=0, last_ts=now)
+                pr_l.surfaces[surf] = sl
+            self._apply_update(sw, sl, now)
+
+    def _apply_update(self, rw: "RatingObj", rl: "RatingObj",
+                      now: float) -> None:
+        """Un passo ELO standard con K pieno su una coppia di rating
+        (overall o superficie). Prima ogni rating viene fatta invecchiare
+        (time-decay), poi il risultato appena osservato muove a K pieno:
+        e' cosi' che i risultati recenti pesano piu' di quelli vecchi.
+        """
+        eff_w = self._decayed(rw.rating, rw.n, rw.last_ts, now)
+        eff_l = self._decayed(rl.rating, rl.n, rl.last_ts, now)
+        expected = self.prob(eff_w, eff_l)
+        rw.rating = round(eff_w + self.k * (1.0 - expected), 1)
+        rl.rating = round(eff_l - self.k * expected, 1)
         rw.n += 1
         rl.n += 1
         rw.last_ts = now
         rl.last_ts = now
 
-    def match_prob(self, player_a: str, player_b: str) -> float:
-        r_a = self.players.get(player_a)
-        r_b = self.players.get(player_b)
+    # -- probabilita' ----------------------------------------------------
+    @staticmethod
+    def _effective_pr(pr: "RatingObj", now: float) -> float:
+        return TennisElo._decayed(pr.rating, pr.n, pr.last_ts, now)
+
+    def overall_effective(self, player: str,
+                          now: Optional[float] = None) -> Optional[float]:
+        """Rating overall efficace al tempo `now` (None se giocatore
+        ignoto). Applica il time-decay: un giocatore inattivo da piu' di
+        ~60 giorni vede il suo rating regredire verso il neutro."""
+        pr = self.players.get(player)
+        if pr is None:
+            return None
+        return self._decayed(pr.rating, pr.n, pr.last_ts,
+                             now if now is not None else time.time())
+
+    def blended_rating(self, player: str,
+                       surface: Optional[str] = None,
+                       now: Optional[float] = None) -> Optional[float]:
+        """Rating efficace usata per la probabilita' di un match su
+        `surface`. Senza storico su quella superficie ritorna l'overall
+        efficace; con storico combina overall e superficie con peso che
+        sale col numero di match saldati su quella superficie
+        (SURFACE_MIN_MATCHES = fiducia piena).
+        """
+        now = now if now is not None else time.time()
+        overall = self.overall_effective(player, now)
+        if overall is None:
+            return None
+        surf = normalize_surface(surface)
+        pr = self.players[player]
+        sr = pr.surfaces.get(surf) if surf is not None else None
+        if sr is None or sr.n <= 0:
+            return overall
+        w = min(1.0, sr.n / SURFACE_MIN_MATCHES)
+        surf_r = self._decayed(sr.rating, sr.n, sr.last_ts, now)
+        return (1.0 - w) * overall + w * surf_r
+
+    def match_prob(self, player_a: str, player_b: str,
+                   surface: Optional[str] = None) -> float:
+        """Probabilita' di vittoria di player_a su `surface` (surface None
+        = overall, usato quando la superficie del torneo e' sconosciuta)."""
+        r_a = self.blended_rating(player_a, surface)
+        r_b = self.blended_rating(player_b, surface)
         if r_a is None or r_b is None:
             return 0.5
-        return self.prob(r_a.rating, r_b.rating)
+        return self.prob(r_a, r_b)
 
     # -- persistenza -----------------------------------------------------
     def save(self) -> None:
@@ -350,15 +612,29 @@ class TennisElo:
             logger.warning("tennis elo: salvataggio ratings fallito: %s", e)
 
     def load(self) -> None:
+        """Carica ratings.json. Retrocompatibile: i file nel vecchio
+        formato {player: {rating, n, last_ts}} (senza `surfaces`)
+        vengono caricati come overall con superfici vuote.
+        """
         try:
             if not self.ratings_file.exists():
                 return
             payload = json.loads(self.ratings_file.read_text(encoding="utf-8"))
             for name, data in payload.items():
+                surfaces: Dict[str, SurfaceRating] = {}
+                for s, sd in (data.get("surfaces") or {}).items():
+                    try:
+                        surfaces[str(s)] = SurfaceRating(
+                            rating=float(sd.get("rating", 1500)),
+                            n=int(sd.get("n", 0)),
+                            last_ts=float(sd.get("last_ts", 0.0)))
+                    except (TypeError, ValueError):
+                        continue
                 self.players[name] = PlayerRating(
                     rating=float(data.get("rating", 1500)),
                     n=int(data.get("n", 0)),
-                    last_ts=float(data.get("last_ts", 0.0)))
+                    last_ts=float(data.get("last_ts", 0.0)),
+                    surfaces=surfaces)
         except Exception as e:
             logger.warning("tennis elo: caricamento ratings fallito: %s", e)
 
@@ -374,6 +650,7 @@ CREATE TABLE IF NOT EXISTS signals (
     market_hash TEXT NOT NULL,
     event_id TEXT NOT NULL,
     league TEXT NOT NULL DEFAULT '',
+    surface TEXT NOT NULL DEFAULT '',
     player_a TEXT NOT NULL,
     player_b TEXT NOT NULL,
     selection TEXT NOT NULL,
@@ -398,6 +675,7 @@ CREATE TABLE IF NOT EXISTS observations (
     market_hash TEXT NOT NULL UNIQUE,
     event_id TEXT NOT NULL,
     league TEXT NOT NULL DEFAULT '',
+    surface TEXT NOT NULL DEFAULT '',
     player_a TEXT NOT NULL,
     player_b TEXT NOT NULL,
     price_a REAL NOT NULL,
@@ -409,11 +687,29 @@ CREATE TABLE IF NOT EXISTS observations (
 """
 
 
+def _migrate_ledger(conn: sqlite3.Connection) -> None:
+    """Migrazioni idempotenti per DB nati prima dell'era superficie.
+
+    Aggiunge la colonna `surface` a signals/observations se manca (i
+    DB esistenti su Railway continuano a funzionare senza reset).
+    """
+    for table, column, decl in (
+            ("signals", "surface", "TEXT NOT NULL DEFAULT ''"),
+            ("observations", "surface", "TEXT NOT NULL DEFAULT ''")):
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            logger.info("ledger tennis: colonna %s.%s aggiunta",
+                        table, column)
+    conn.commit()
+
+
 def _open_ledger(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    _migrate_ledger(conn)
     conn.commit()
     return conn
 
@@ -478,17 +774,19 @@ class TennisSandbox:
         return self._conn
 
     def _insert_observation(self, market: Dict, price_a: float,
-                            price_b: float) -> None:
+                            price_b: float,
+                            surface: Optional[str] = None) -> None:
         now = datetime.now(timezone.utc)
         day = now.strftime("%Y-%m-%d")
         self.conn.execute(
             """INSERT OR IGNORE INTO observations
-               (ts, day, market_hash, event_id, league, player_a, player_b,
-                price_a, price_b)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (ts, day, market_hash, event_id, league, surface,
+                player_a, player_b, price_a, price_b)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (now.isoformat(), day, market.get("marketHash", ""),
              market.get("sportXeventId", ""),
              market.get("leagueLabel") or market.get("group1") or "",
+             surface or "",
              (market.get("teamOneName") or market.get("outcomeOneName")
               or "").strip(),
              (market.get("teamTwoName") or market.get("outcomeTwoName")
@@ -498,7 +796,8 @@ class TennisSandbox:
 
     def _insert_or_update_signal(self, market: Dict, selection: str,
                                  price: float, model_prob: float,
-                                 ev: float, stake: float) -> None:
+                                 ev: float, stake: float,
+                                 surface: Optional[str] = None) -> None:
         now = datetime.now(timezone.utc)
         day = now.strftime("%Y-%m-%d")
         player_a = (market.get("teamOneName")
@@ -510,16 +809,18 @@ class TennisSandbox:
         league = market.get("leagueLabel") or market.get("group1") or ""
         self.conn.execute(
             """INSERT INTO signals
-               (ts, day, market_hash, event_id, league, player_a, player_b,
-                selection, price, model_prob, ev, stake)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               (ts, day, market_hash, event_id, league, surface,
+                player_a, player_b, selection, price, model_prob, ev, stake)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(market_hash, selection) DO UPDATE SET
                  ts=excluded.ts, day=excluded.day, league=excluded.league,
+                 surface=excluded.surface,
                  price=excluded.price, model_prob=excluded.model_prob,
                  ev=excluded.ev, stake=excluded.stake
                WHERE signals.status = 'open'""",
             (now.isoformat(), day, market_hash, event_id, league,
-             player_a, player_b, selection, price, model_prob, ev, stake))
+             surface or "", player_a, player_b, selection, price,
+             model_prob, ev, stake))
         self.conn.commit()
 
     # -- scansione -------------------------------------------------------
@@ -571,10 +872,16 @@ class TennisSandbox:
                 if not player_a or not player_b:
                     continue
                 self.elo.ensure_pair(player_a, impl_a, player_b, 1.0 - impl_a)
+                # Superficie del torneo (None se non riconoscibile): la
+                # probabilita' usa il rating superficie-specifico se c'e'
+                # storico su quella superficie, altrimenti l'overall.
+                surface = market_surface(m)
                 # Osservazione: ogni match con book valido finisce nel
-                # ledger per alimentare l'apprendimento ELO (vedi _SCHEMA).
-                self._insert_observation(m, price_a, price_b)
-                prob_a = self.elo.match_prob(player_a, player_b)
+                # ledger per alimentare l'apprendimento ELO (vedi _SCHEMA),
+                # con la superficie per gli update superficie-specifici.
+                self._insert_observation(m, price_a, price_b, surface)
+                prob_a = self.elo.match_prob(player_a, player_b,
+                                             surface=surface)
                 prob_b = 1.0 - prob_a
                 ev_a = prob_a * price_a - 1.0
                 ev_b = prob_b * price_b - 1.0
@@ -585,12 +892,15 @@ class TennisSandbox:
                         continue
                     stake = kelly_stake(prob, price, self.bankroll)
                     self._insert_or_update_signal(
-                        m, sel, price, prob, ev, stake)
+                        m, sel, price, prob, ev, stake, surface)
                     result["signals"] += 1
+                    su = f" (su {SURFACE_IT.get(surface, '')})" if surface \
+                        else ""
                     logger.info(
                         "tennis sandbox +EV: %s vs %s — %s @%.2f "
-                        "(p=%.3f, EV %+.2f%%, stake paper %.2f)",
-                        player_a, player_b, sel, price, prob, ev * 100, stake)
+                        "(p=%.3f, EV %+.2f%%, stake paper %.2f)%s",
+                        player_a, player_b, sel, price, prob, ev * 100,
+                        stake, su)
             except Exception as e:
                 result["errors"] += 1
                 logger.warning("tennis sandbox: market %s fallito: %s",
@@ -638,7 +948,11 @@ class TennisSandbox:
                 winner = loser = None
             if winner is not None and loser is not None:
                 self.elo.ensure_pair(player_a, 0.5, player_b, 0.5)
-                self.elo.update(winner, loser)
+                # Apprendimento ELO col risultato reale: aggiorna l'overall
+                # e, se la superficie del match e' nota, anche il rating
+                # superficie-specifico (time-decay incluso).
+                self.elo.update(winner, loser,
+                                surface=row["surface"] or None)
             now = datetime.now(timezone.utc).isoformat()
             self.conn.execute(
                 "UPDATE observations SET status='settled', winner=?, "
@@ -743,6 +1057,36 @@ class TennisSandbox:
             daily = [dict(r) for r in daily_rows[:days]]
         else:
             daily = [dict(r) for r in daily_rows]
+        # Riepilogo PER SUPERFICIE (ELO superficie-specifico): quante
+        # osservazioni apprese e quanti segnali chiusi su ogni superficie.
+        obs_surf = conn.execute(
+            "SELECT COALESCE(surface,'') surface, COUNT(*) n, "
+            "       COALESCE(SUM(CASE WHEN status='settled' THEN 1 "
+            "ELSE 0 END),0) settled "
+            "FROM observations GROUP BY surface ORDER BY surface").fetchall()
+        sig_surf = conn.execute(
+            "SELECT COALESCE(surface,'') surface, COUNT(*) n, "
+            "       COALESCE(SUM(CASE WHEN status IN ('won','lost','void') "
+            "THEN 1 ELSE 0 END),0) closed, "
+            "       COALESCE(SUM(CASE WHEN status='won' THEN 1 ELSE 0 END),0) won, "
+            "       COALESCE(SUM(CASE WHEN status='lost' THEN 1 ELSE 0 END),0) lost "
+            "FROM signals GROUP BY surface ORDER BY surface").fetchall()
+        sig_by_surf = {r["surface"]: r for r in sig_surf}
+        surfaces = []
+        for r in obs_surf:
+            s = r["surface"] or ""
+            sig = sig_by_surf.get(s)
+            surfaces.append({
+                "surface": s,
+                "label": SURFACE_IT.get(s, "sconosciuta") if s
+                else "sconosciuta",
+                "observations": int(r["n"] or 0),
+                "observations_settled": int(r["settled"] or 0),
+                "signals": int((sig["n"] if sig else 0) or 0),
+                "closed": int((sig["closed"] if sig else 0) or 0),
+                "won": int((sig["won"] if sig else 0) or 0),
+                "lost": int((sig["lost"] if sig else 0) or 0),
+            })
         n_closed = int(total["closed"] or 0)
         stake_closed = float(total["stake_closed"] or 0.0)
         roi = (float(total["profit_total"] or 0.0) / stake_closed * 100.0) \
@@ -768,6 +1112,7 @@ class TennisSandbox:
             "roi_pct": round(roi, 2) if roi is not None else None,
             "avg_ev_pct": round(float(total["avg_ev"] or 0.0) * 100.0, 2),
             "daily": daily,
+            "surfaces": surfaces,
         }
         try:
             REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -821,6 +1166,14 @@ def format_report(rep: Dict) -> str:
     else:
         lines.append("ROI teorico: in attesa del primo settlement")
     lines.append(f"EV medio segnali: {rep['avg_ev_pct']:+.2f}%")
+    if rep.get("surfaces"):
+        lines.append("")
+        lines.append("🏟️ *Per superficie*")
+        for s in rep["surfaces"]:
+            lines.append(
+                f"  • {s['label']}: {s['observations_settled']} match "
+                f"appresi, {s['closed']} segnali chiusi "
+                f"(✅{s['won']}/❌{s['lost']})")
     if rep["daily"]:
         lines.append("")
         lines.append("📅 *Per giornata*")
