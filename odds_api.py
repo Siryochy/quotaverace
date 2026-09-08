@@ -365,8 +365,6 @@ def oddsapi_to_records(payload, sport="calcio"):
                             esito = "X"
                         else:
                             continue
-                    elif key == "totals":
-                        esito = name  # "Over 2.5" / "Under 2.5"
                     else:
                         continue
                     rows.append({

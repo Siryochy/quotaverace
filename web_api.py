@@ -255,7 +255,7 @@ def _segnali_json(params=None):
     con EV, stake Kelly (1/4, cap 3%) e, se disponibili, le quote di
     mercato reali dal calendario.
     """
-    from poisson_engine import expected_goals, prob_1x2, prob_over_under, prob_btts
+    from poisson_engine import expected_goals, prob_1x2
     from value_filter import compute_ev, kelly_fraction, get_pro_stake, is_sane
     from leagues_data import ALL_LEAGUES
 
@@ -269,8 +269,6 @@ def _segnali_json(params=None):
         return 404, {"error": str(e), "home": home, "away": away}
 
     p1, px, p2 = prob_1x2(lam_h, lam_a)
-    p_over, p_under = prob_over_under(lam_h, lam_a)
-    p_btts = prob_btts(lam_h, lam_a)
 
     # Quote di riferimento: miglior prezzo dal calendario (se gia' analizzato)
     league = None
@@ -300,7 +298,6 @@ def _segnali_json(params=None):
         {"esito": "1", "label": f"Vittoria {home}", "prob": p1, "quota": 2.0},
         {"esito": "X", "label": "Pareggio", "prob": px, "quota": 3.2},
         {"esito": "2", "label": f"Vittoria {away}", "prob": p2, "quota": 2.0},
-        {"esito": "Over 2.5", "label": "Over 2.5 Gol", "prob": p_over, "quota": ref_odds.get("quota", 2.10)},
     ]
     for cand in candidates:
         cand["ev"] = compute_ev(cand["prob"], cand["quota"])
@@ -312,8 +309,6 @@ def _segnali_json(params=None):
         "home": home, "away": away, "league": league or "",
         "lam_h": round(lam_h, 3), "lam_a": round(lam_a, 3),
         "p1": round(p1, 4), "pX": round(px, 4), "p2": round(p2, 4),
-        "p_over": round(p_over, 4), "p_under": round(p_under, 4),
-        "p_btts": round(p_btts, 4),
         "best": {"esito": best["esito"], "label": best["label"],
                   "quota": best["quota"], "prob": round(best["prob"], 4),
                   "ev": round(best["ev"], 4)},
@@ -339,7 +334,7 @@ def _calendario_json(params=None):
              best_quota, best_bookmaker, a_status, _, market_prob, market_edge) = ana
             item.update({
                 "lam_h": lam_h, "lam_a": lam_a, "prob_1": p1, "prob_X": px,
-                "prob_2": p2, "prob_over": p_over,
+                "prob_2": p2,
                 "best_esito": best_esito, "best_quota": best_quota,
                 "best_bookmaker": best_bookmaker, "best_ev": best_ev,
                 "analisi_status": a_status, "market_prob": market_prob,

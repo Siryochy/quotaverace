@@ -201,15 +201,12 @@ async def send_premium_sticker(bot, chat_id) -> None:
     except Exception as e:
         logger.warning(f"Sticker premium non inviato a {chat_id}: {e}")
 
-def format_segnale_pronto(home, away, lam_h, lam_a, quota_over=2.10, bookmaker="Generico", bankroll=100.0,
+def format_segnale_pronto(home, away, lam_h, lam_a, bookmaker="Generico", bankroll=100.0,
                           extra_note=None):
     p1, px, p2 = prob_1x2(lam_h, lam_a)
-    p_over, p_under = prob_over_under(lam_h, lam_a)
-    p_btts = prob_btts(lam_h, lam_a)
     candidates = [
         ("1", p1, f"Vittoria {home}", 2.0), ("X", px, "Pareggio", 3.2),
-        ("2", p2, f"Vittoria {away}", 2.0), ("Over 2.5", p_over, "Over 2.5 Gol", quota_over),
-        ("Under 2.5", p_under, "Under 2.5 Gol", 1.85), ("BTTS", p_btts, "Gol Gol (BTTS)", 1.90),
+        ("2", p2, f"Vittoria {away}", 2.0),
     ]
     best = max(candidates, key=lambda x: compute_ev(x[1], x[3]))
     _, best_prob, best_label, best_quota = best
@@ -236,8 +233,7 @@ def format_segnale_pronto(home, away, lam_h, lam_a, quota_over=2.10, bookmaker="
     msg = (
         f"📊 *SEGNALE PRONTO – {home} vs {away}*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"⚽ *Expected Goals:*\n   {home}: {lam_h:.2f}\n   {away}: {lam_a:.2f}\n\n"
-        f"📈 *Probabilità:*\n   1: {p1*100:.1f}% | X: {px*100:.1f}% | 2: {p2*100:.1f}%\n"
-        f"   Over 2.5: {p_over*100:.1f}% | Under 2.5: {p_under*100:.1f}%\n   BTTS: {p_btts*100:.1f}%\n\n"
+        f"📈 *Probabilità:*\n   1: {p1*100:.1f}% | X: {px*100:.1f}% | 2: {p2*100:.1f}%\n\n"
         f"🎯 *SEGNALE:* {best_label}\n   Bookmaker: {bookmaker} | Quota: {best_quota:.2f}\n"
         f"   EV: {ev_percent:+.2f}%\n\n"
         f"💰 *Kelly Pro (1/4 + cap 3%):*\n"
@@ -688,7 +684,7 @@ def format_daily_report(since: str, label: str) -> str:
     lines = [f"📅 *RIEPILOGO — {label}*", "━━━━━━━━━━━━━━━━━━━━━━\n"]
     if total_n:
         lines.append(f"🎯 *Previsioni chiuse:* {total_n}")
-        for mkt in ("1X2", "OU", "BTTS", "AH"):
+        for mkt in ("1X2", "BTTS", "AH"):
             b = by_mkt.get(mkt)
             if not b or not b["n"]:
                 continue

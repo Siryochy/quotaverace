@@ -414,12 +414,12 @@ _DRAW_NAMES = ("the draw", "draw", "pareggio")
 
 
 def _canonical_esito(esito: str, home: str, away: str) -> dict | None:
-    """Esito del segnale -> (mercato, esito_key) canonici per il ledger."""
+    """Esito del segnale -> (mercato, esito_key) canonici per il ledger.
+
+    Sistema 1X2 SOLO (calcio) + 2-way (tennis). OU2.5 escluso definitivamente
+    dal 06/09: il mercato non genera candidati.
+    """
     el = str(esito or "").lower().strip()
-    if "over" in el:
-        return {"mercato": "OU", "esito_key": "Over 2.5"}
-    if "under" in el:
-        return {"mercato": "OU", "esito_key": "Under 2.5"}
     if el in ("x", "draw", "pareggio"):
         return {"mercato": "1X2", "esito_key": "X"}
     if el == "1":

@@ -62,17 +62,15 @@ DISCLAIMER = (
 # ---------------------------------------------------------------------------
 
 def _tool_analyze_match(home: str, away: str) -> dict:
-    """Analisis pertandingan: expected goals, probabilitas 1X2, Over 2.5."""
-    from poisson_engine import expected_goals, prob_1x2, prob_over_under
+    """Analisis pertandingan: expected goals, probabilitas 1X2."""
+    from poisson_engine import expected_goals, prob_1x2
     lam_h, lam_a = expected_goals(home, away)
     p1, px, p2 = prob_1x2(lam_h, lam_a)
-    p_over, p_under = prob_over_under(lam_h, lam_a)
     return {
         "home": home, "away": away,
         "expected_goals": {"home": round(lam_h, 2), "away": round(lam_a, 2)},
         "probabilitas": {
             "1": round(p1, 4), "X": round(px, 4), "2": round(p2, 4),
-            "over_2_5": round(p_over, 4), "under_2_5": round(p_under, 4),
         },
     }
 

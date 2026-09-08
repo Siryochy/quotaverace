@@ -8,7 +8,7 @@ from config import DATA_DIR
 from odds_api import (fetch_odds, SPORTS_MAP, QUERY_WINDOW_DAYS,
                       interval_for_sport, is_sport_due, DAILY_QUERY_BUDGET)
 from leagues_data import ALL_LEAGUES
-from poisson_engine import expected_goals, prob_1x2, prob_over_under, ah_outcome_probs
+from poisson_engine import expected_goals, prob_1x2, ah_outcome_probs
 from value_filter import (compute_ev, kelly_fraction, kelly_euro, is_sane,
                            combined_quota, combined_probability, multipla_stake,
                            adjusted_probability, get_pro_stake)
@@ -27,14 +27,11 @@ def _get_ensemble():
     except ImportError:
         return None
 
-# MERCATO OU2.5: ESCLUSO DEFINITIVAMENTE dalle selezioni (06/09).
+# Sistema 1X2 SOLO (calcio) + 2-way (tennis). OU2.5 escluso definitivamente.
 # Il backtest storico (12.909 partite) ha mostrato un leak sistematico
 # (-6.8% ROI su 924 bet, sotto -7.3%): il mercato non viene piu' elaborato,
-# niente escape hatch via env (decisione definitiva del proprietario).
-# Il sistema elabora SOLO segnali 1X2 (h2h). Le previsioni nel ledger non
-# registreranno piu' candidati OU: il dataset ML smette di imparare dal
-# mercato perdente.
-OU_ENABLED = False
+# nessuna escape hatch via env (decisione definitiva del proprietario).
+# Il sistema elabora SOLO segnali 1X2 (h2h).
 
 TEAM_MAP = {
     "inter milan": "Inter", "ac milan": "Milan", "man united": "Manchester United",
@@ -228,14 +225,12 @@ def _analyze_match(match_id, match, home_db, away_db, league):
     except Exception:
         return "error"
     p1, px, p2 = prob_1x2(lam_h, lam_a)
-    p_over, _ = prob_over_under(lam_h, lam_a)
 
     home_api = (match.get("home_team") or "").strip().lower()
     away_api = (match.get("away_team") or "").strip().lower()
 
     # 1. Line shopping: miglior prezzo (e book) per esito, su tutti i bookmaker.
     h2h_prices: Dict[str, tuple] = {}    # "1"/"X"/"2" -> (prezzo, bookmaker)
-    total_prices: Dict[str, tuple] = {}  # "Over 2.5" -> (prezzo, bookmaker)
     pinnacle_prices: Dict[str, float] = {}  # esito key -> prezzo Pinnacle (closing line sharp)
     for bm in match.get("bookmakers", []):
         bname = bm.get("title") or bm.get("key") or "Sconosciuto"
@@ -261,25 +256,6 @@ def _analyze_match(match_id, match, home_db, away_db, league):
                         h2h_prices[esito] = (float(price), name, bname)
                     if is_pinnacle:
                         pinnacle_prices[esito] = float(price)
-            elif mkt.get("key") == "totals":
-                for out in mkt.get("outcomes", []):
-                    name = (out.get("name") or "").strip()
-                    price = out.get("price")
-                    if not name or not price or float(price) <= 1.0:
-                        continue
-                    if out.get("point") == 2.5:
-                        low = name.lower()
-                        if "over" in low:
-                            mkey, disp = "Over 2.5", "Over 2.5"
-                        elif "under" in low:
-                            mkey, disp = "Under 2.5", "Under 2.5"
-                        else:
-                            continue
-                        cur = total_prices.get(mkey)
-                        if cur is None or float(price) > cur[0]:
-                            total_prices[mkey] = (float(price), disp, bname)
-                        if is_pinnacle:
-                            pinnacle_prices[mkey] = float(price)
 
     # 1b. Asian Handicap (mercato 'spreads'): linee con entrambi i lati.
     #     home_line e' la linea vista dal lato casa (negativa = la casa dà gol).
@@ -316,7 +292,6 @@ def _analyze_match(match_id, match, home_db, away_db, league):
 
     # 2. Probabilita' fair di mercato (devig power, corregge il longshot bias).
     market_h2h = market_implied({k: v[0] for k, v in h2h_prices.items()}) if len(h2h_prices) >= 2 else None
-    market_tot = market_implied({k: v[0] for k, v in total_prices.items()}) if len(total_prices) >= 2 else None
 
     # 3. Candidati: esito (chiave mercato) -> modello + mercato.
     # ML Ensemble: caricato una volta per l'analisi
@@ -344,7 +319,7 @@ def _analyze_match(match_id, match, home_db, away_db, league):
         if ensemble and ensemble.trained:
             ens_row = {
                 "prob_1": p1, "prob_X": px, "prob_2": p2,
-                "prob_over": p_over, "lam_h": lam_h, "lam_a": lam_a,
+                "lam_h": lam_h, "lam_a": lam_a,
                 "quota": price, "market_prob": market_prob,
                 "market_edge": (model_prob - market_prob) if market_prob else None,
                 "ev": ev, "prob": final_prob,
@@ -368,7 +343,7 @@ def _analyze_match(match_id, match, home_db, away_db, league):
             "prob_ensemble": ensemble_prob,
             "market_prob": market_prob,
             "market_edge": (model_prob - market_prob) if market_prob is not None else None,
-            "mercato": "1X2" if mkey in ("1", "X", "2") else "OU",
+            "mercato": "1X2",
             "esito_key": mkey,
         })
 
@@ -418,11 +393,6 @@ def _analyze_match(match_id, match, home_db, away_db, league):
                             bookmaker=entry[2],
                             market_prob=(market_h2h.get(esito_key)
                                          if market_h2h else None))
-        for mkey, entry in total_prices.items():
-            record_snapshot(match_id, mkey, entry[0],
-                            bookmaker=entry[2],
-                            market_prob=(market_tot.get(mkey)
-                                         if market_tot else None))
     except Exception as e:
         logger.debug(f"Snapshot prezzo fallito per {match_id}: {e}")
 
@@ -472,7 +442,7 @@ def _analyze_match(match_id, match, home_db, away_db, league):
                     f"{steam_info['move_pct']:+.1f}% in "
                     f"{steam_info['span_minutes']:.0f} min")
 
-    save_analysis(match_id, lam_h, lam_a, p1, px, p2, p_over, best["ev"], best["esito"],
+    save_analysis(match_id, lam_h, lam_a, p1, px, p2, best["ev"], best["esito"],
                   best["quota"], best["bookmaker"], status,
                   market_prob=best["market_prob"], market_edge=best["market_edge"])
 
