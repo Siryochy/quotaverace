@@ -1561,16 +1561,18 @@ def main() -> None:
                                 first=time(hour=21 - IT_OFFSET, minute=0))
         job_queue.run_daily(report_morning_job, time=time(hour=6, minute=5 - IT_OFFSET))
         job_queue.run_daily(history_sync_job, time=time(hour=8, minute=30 - IT_OFFSET))
-        # Auto-bet 24/7 (08/09): giro ogni 3h a partire dalle 08:50 ITA
-        # (08:50, 11:50, 14:50, ...) — i segnali value/strong_value nuovi
-        # (analisi 04:00/12:00/18:00 UTC, finestra candidati mobile 24h)
-        # vengono scommessi entro 3h, giorno e notte. Sicuro: UNIQUE
+        # Auto-bet 24/7 (08/09): giro ogni 3h, primo giro 10 min dopo il
+        # boot — i segnali value/strong_value nuovi (analisi 04:00/12:00/
+        # 18:00 UTC, finestra candidati mobile 24h) vengono scommessi entro
+        # 3h, giorno e notte, anche subito dopo un redeploy. Sicuro: UNIQUE
         # (match_id, esito) impedisce doppioni e la guardia 15 min evita
         # ordini a partita iniziata. Il cap esposizione TOTALE resta
         # giornaliero (sottrae l'esposizione gia' piazzata nei giri
         # precedenti, vedi auto_bet._today_placed_stake).
+        # NB: first=600 (delay dopo il boot) e NON first=time(...): con
+        # l'orario gia' passato il primo giro slitterebbe al giorno dopo.
         job_queue.run_repeating(auto_bet_job, interval=3 * 3600,
-                                first=time(hour=8, minute=50 - IT_OFFSET))
+                                first=600)
         job_queue.run_daily(backup_data_job, time=time(hour=3, minute=30))
         job_queue.run_once(backup_data_job, when=10)  # snapshot di base all'avvio
         # Retrain ensemble ML dal ledger live (05:45 UTC): se il dataset e'
