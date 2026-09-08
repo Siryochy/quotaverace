@@ -1308,5 +1308,126 @@ class TestSegreti:
                     f"execution_engine non deve importare {node.module}"
 
 
+# ---------------------------------------------------------------------------
+# Risoluzione match -> mercato (auto_bet live)
+# ---------------------------------------------------------------------------
+
+class _FakeSxProvider:
+    """Provider finto per la risoluzione: espone solo il catalogo."""
+
+    name = "sxbet"
+
+    def __init__(self, markets):
+        self._markets = markets
+
+    def list_market_catalogue(self, event_type_ids=("5",),
+                              market_type="1X2", max_results=400):
+        return self._markets[:max_results]
+
+
+GAME_TS = "2026-09-08T18:00:00+00:00"
+
+
+def _sx_event_markets(home="Nueva Chicago", away="Quilmes",
+                      ts=GAME_TS, prefix="m"):
+    """Le tre binario 'X vs Not X' del 1X2 SX per un evento."""
+    def row(mid, t1, t2, o1):
+        return {"market_id": mid, "event_name": f"{t1} vs {t2}",
+                "open_date": ts, "team_one_name": t1, "team_two_name": t2,
+                "outcome_one_name": o1,
+                "outcome_two_name": f"Not {o1}",
+                "runners": [{"selection_id": 1, "name": o1},
+                             {"selection_id": 2, "name": f"Not {o1}"}]}
+    return [
+        row(f"{prefix}-home", home, away, home),
+        row(f"{prefix}-away", home, away, away),
+        row(f"{prefix}-tie", home, away, "Tie"),
+    ]
+
+
+class TestNameKeySim:
+    def test_key_normalizza_e_accetta(self):
+        assert ee._name_key("CA Osasuna") == "ca osasuna"
+        assert ee._name_key("Nueva Chicago") == "nueva chicago"
+        assert ee._name_key("Nueva-Chicago!") == "nueva chicago"
+        assert ee._name_key("Málaga") == "malaga"  # accent-fold
+        assert ee._name_key(None) == ""
+
+    def test_sim_sovrapposizione_e_ratio(self):
+        assert ee._name_sim("Inter", "Inter Milan") >= 0.82   # contenimento
+        assert ee._name_sim("Betis", "Real Betis") >= 0.82
+        assert ee._name_sim("Roma", "Roma") == 1.0
+        assert ee._name_sim("Roma", "Lazio") < 0.82
+        assert ee._name_sim(None, "Roma") == 0.0
+
+
+class TestResolveMatchMarket:
+    def _prov(self, markets):
+        return _FakeSxProvider(markets)
+
+    def test_esito_casa(self):
+        prov = self._prov(_sx_event_markets())
+        r = ee.resolve_match_market(prov, "Nueva Chicago", "Quilmes", "1",
+                                    kickoff_iso=GAME_TS)
+        assert r and r["market_id"] == "m-home" and r["selection_id"] == 1
+
+    def test_esito_trasferta(self):
+        prov = self._prov(_sx_event_markets())
+        r = ee.resolve_match_market(prov, "Nueva Chicago", "Quilmes", "2",
+                                    kickoff_iso=GAME_TS)
+        assert r and r["market_id"] == "m-away" and r["selection_id"] == 1
+
+    def test_esito_pareggio(self):
+        prov = self._prov(_sx_event_markets())
+        r = ee.resolve_match_market(prov, "Nueva Chicago", "Quilmes", "X",
+                                    kickoff_iso=GAME_TS)
+        assert r and r["market_id"] == "m-tie" and r["selection_id"] == 1
+        assert r["label"] == "X"
+
+    def test_nomi_fuzzy_squadre(self):
+        # Segnale the-odds-api "Real Betis"/"Inter" vs nomi SX piu' lunghi
+        prov = self._prov(_sx_event_markets(home="Real Betis",
+                                            away="Inter Milan"))
+        r = ee.resolve_match_market(prov, "Real Betis", "Inter", "1",
+                                    kickoff_iso=GAME_TS)
+        assert r and r["market_id"] == "m-home"
+
+    def test_orientamento_invertito_nessun_match(self):
+        # Home/away scambiati: non si deve MAI scommettere sul lato sbagliato
+        prov = self._prov(_sx_event_markets())
+        r = ee.resolve_match_market(prov, "Quilmes", "Nueva Chicago", "1",
+                                    kickoff_iso=GAME_TS)
+        assert r is None
+
+    def test_kickoff_fuori_finestra_nessun_match(self):
+        prov = self._prov(_sx_event_markets(ts="2026-09-09T18:00:00+00:00"))
+        r = ee.resolve_match_market(prov, "Nueva Chicago", "Quilmes", "1",
+                                    kickoff_iso="2026-09-08T18:00:00Z")
+        assert r is None
+
+    def test_eventi_multipli_ambigui_nessun_match(self):
+        mkts = _sx_event_markets(ts="2026-09-08T18:00:00+00:00", prefix="a")
+        mkts += _sx_event_markets(ts="2026-09-08T19:00:00+00:00", prefix="b")
+        prov = self._prov(mkts)
+        # due kickoff diversi ma entrambi dentro la finestra di 6h -> ambiguo
+        r = ee.resolve_match_market(prov, "Nueva Chicago", "Quilmes", "1",
+                                    kickoff_iso="2026-09-08T18:30:00Z")
+        assert r is None
+
+    def test_catalogo_vuoto_none(self):
+        prov = self._prov([])
+        assert ee.resolve_match_market(prov, "A", "B", "1") is None
+
+    def test_provider_non_sxbet_none(self):
+        class _Dry:
+            name = "dry_run"
+        assert ee.resolve_match_market(_Dry(), "A", "B", "1") is None
+
+    def test_esito_sconosciuto_none(self):
+        prov = self._prov(_sx_event_markets())
+        assert ee.resolve_match_market(prov, "Nueva Chicago", "Quilmes",
+                                       "Over 2.5", kickoff_iso=GAME_TS) is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

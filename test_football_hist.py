@@ -125,6 +125,51 @@ class TestSyncHistory:
         res = fh.sync_history(seasons=1, leagues=["Serie A"])
         assert res["_total"] == 20
 
+    def test_retry_transitorio_poi_ok(self, monkeypatch):
+        """Un paio di errori transitori sulla stessa stagione NON devono far
+        saltare la stagione: si ritenta e si prosegue appena l'API risponde."""
+        monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+        monkeypatch.setattr(fh.time, "sleep", lambda *a, **k: None)
+        calls = {"n": 0}
+
+        def flaky(path, params=None):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                return None  # _season_status(None) == "retry"
+            return {"results": 1, "response": [_fixture()]}
+
+        monkeypatch.setattr(fh, "_api_get", flaky)
+        res = fh.sync_history(seasons=1, leagues=["Serie A"])
+        assert res["_total"] == 1
+
+    def test_retry_persistente_termina_senza_bloccare(self, monkeypatch):
+        """Errore persistente (body None = 'retry' per TUTTE le stagioni): il
+        loop DEVE terminare. Regressione del bug 08/09/2026: il ramo 'retry'
+        faceva continue all'infinito sulla stessa stagione (Serie A 2024),
+        loggando a raffica e bloccando il job. Con MAX_YEAR_RETRIES ogni
+        stagione viene provata al piu' MAX_YEAR_RETRIES+1 volte e poi
+        scartata passando all'anno precedente."""
+        monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+        monkeypatch.setattr(fh.time, "sleep", lambda *a, **k: None)
+        calls = []
+
+        def never_ok(path, params=None):
+            calls.append(dict(params or {}))
+            return None  # _season_status(None) == "retry"
+
+        monkeypatch.setattr(fh, "_api_get", never_ok)
+        res = fh.sync_history(seasons=1, leagues=["Serie A"])
+        # Nessun risultato salvato, nessuna eccezione: il job e' uscito.
+        assert res["_total"] == 0
+        assert res["Serie A"] == 0
+        # Chiamate limitate: (retry max + 1 tentativo che fa scattare lo skip)
+        # per ogni anno dal corrente fino a 2018 (incluso).
+        years = fh.time.localtime().tm_year - 2018 + 1
+        assert len(calls) <= years * (fh.MAX_YEAR_RETRIES + 1)
+        # ... e nessuna stagione e' stata tentata piu' del previsto.
+        assert all(calls.count(s) <= fh.MAX_YEAR_RETRIES + 1 for s in set(
+            (c.get("league"), c.get("season")) for c in calls))
+
 
 class TestRunSync:
     def test_senza_key(self, monkeypatch):

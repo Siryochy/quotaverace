@@ -59,6 +59,14 @@ def _env(name: str) -> str:
 
 MAX_RETRIES = 3        # tentativi per errore transitorio (rate-limit/rete)
 RETRY_BACKOFF = 3      # secondi tra i tentativi (x2 a ogni retry)
+# Retry consecutivi consentiti dal ciclo per-stagione di sync_history PRIMA di
+# passare all'anno precedente. Il retry con backoff vive gia' dentro _api_get
+# (MAX_RETRIES tentativi HTTP); senza questa guardia un errore persistente
+# (es. body None dopo i 3 tentativi HTTP, o errori JSON non "plan") faceva
+# girare il ramo "retry" all'infinito bloccando l'intero job
+# (loop "Retry stesso anno per Serie A 2024", osservato in produzione il
+# 08/09/2026: ~50 righe/sec di log per oltre 25 minuti).
+MAX_YEAR_RETRIES = 3
 
 
 def _api_get(path: str, params: Dict) -> Optional[dict]:
@@ -244,13 +252,31 @@ def sync_history(seasons: int = DEFAULT_SEASONS, leagues: Optional[List[str]] = 
         collected = 0
         year = current_year
         rows = []
+        year_retries = 0  # retry consecutivi sulla stessa (lega, stagione)
         while collected < seasons and year >= 2018:
             body = _api_get("fixtures", {"league": lid, "season": year})
             status = _season_status(body)
             if status == "retry":
-                # errore transitorio (rate-limit/rete): riprova la stessa stagione
-                logger.info(f"Retry stesso anno per {league} {year} (status retry)")
+                # Errore transitorio (rate-limit/rete): riprova la stessa
+                # stagione, ma con LIMITE MASSIMO RIGIDO (MAX_YEAR_RETRIES).
+                # Un errore persistente non deve mai bloccare il job: dopo il
+                # limite si tratta la stagione come non accessibile e si passa
+                # a quella precedente.
+                year_retries += 1
+                if year_retries > MAX_YEAR_RETRIES:
+                    logger.warning(
+                        "Stagione %s non disponibile (%s): %d retry "
+                        "consecutivi falliti, salto all'anno precedente",
+                        year, league, MAX_YEAR_RETRIES)
+                    year_retries = 0
+                    year -= 1
+                    continue
+                logger.info(
+                    "Retry stesso anno per %s %s (status retry) %d/%d",
+                    league, year, year_retries, MAX_YEAR_RETRIES)
+                time.sleep(RETRY_BACKOFF)  # gentilezza verso il rate limit
                 continue
+            year_retries = 0
             if status == "skip":
                 logger.info(f"Stagione {year} non accessibile ({league}), salto")
                 year -= 1

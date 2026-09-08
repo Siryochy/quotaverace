@@ -60,8 +60,9 @@ ed è condiviso per costruzione.
 > corrente); quote/CLV = the-odds-api. API-Football serve SOLO allo storico
 > ratings 2022-2024 (`football_hist.py`): il piano free NON dà accesso alla
 > stagione corrente (verificato 04/09), quindi non può saldare le partite
-> del 2026. `auto_bet` è SIM-only (collegamento a execution_engine: in
-> programma).
+> del 2026. `auto_bet`: SIM di default, ordini **LIVE** via
+> `execution_engine` dal 08/09 con `AUTO_BET_MODE=live` + provider reale
+> (`EXECUTION_PROVIDER` + credenziali; oggi SX Bet).
 
 Questo è il **secondo servizio API non esiste più**: l'API è servita dallo
 stesso container del bot sulla porta `PORT` iniettata da Railway.
@@ -191,12 +192,21 @@ Architettura attuale:
   `match_scores_by_name`) — risultati finiti della stagione corrente, 1
   credito per sport, aggancio ai match_id the-odds-api già in `matches`.
 - **Quote + CLV**: the-odds-api (`odds_api.py`).
-- **Puntate automatiche**: SIM-only (paper trading) — collegamento a
-  `execution_engine` in programma dopo il collaudo con stake minimo.
+- **Puntate automatiche**: SIM di default (paper trading) oppure **LIVE**
+  via `execution_engine` (08/09) con `AUTO_BET_MODE=live` + provider reale
+  configurato (SX Bet): risoluzione evento univoca + floor EV (riempimento
+  solo a quota-segnale o meglio), ledger `bets` con mode='live' e
+  market_id/bet_id reali. Senza provider configurato resta SIM (fail-safe).
 - **Storico ratings**: API-Football (`football_hist.py`, stagioni 2022-2024
   coperte dal piano free).
 - **Mercati**: SOLO 1X2 — OU2.5 escluso definitivamente (06/09, leak
   sistematico, nessun escape hatch).
+
+> 💡 Per attivare l'esecuzione reale del job 08:50 su Railway:
+> `railway variable set --service api AUTO_BET_MODE=live EXECUTION_PROVIDER=sxbet`
+> (credenziali `SX_API_KEY`/`SX_PRIVATE_KEY` già presenti). `AUTO_BET_MODE`
+> assente = simulazione. Fail-closed: se il chiamante passa allow_sim=False
+> e il provider non è configurato non si piazza nulla.
 
 > ⚠️ Le regole di stake (minimo 2.00 EUR, step 0.50) sono mantenute in
 > `auto_bet.normalize_stake` per coerenza con le dimensioni storiche.

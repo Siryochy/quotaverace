@@ -59,8 +59,10 @@ Refertazione = the-odds-api (`odds_api.fetch_scores`,
 risultati stagione corrente — la stessa chiave delle quote); quote/CLV =
 the-odds-api. API-Football serve SOLO allo storico ratings 2022-2024
 (`football_hist.py`): il piano free NON copre la stagione corrente (verificato
-04/09), quindi non può saldare le partite del 2026. auto_bet è SIM-only
-permanente. Il vincolo "settlement = the-odds-api" resta garantito da
+04/09), quindi non può saldare le partite del 2026. auto_bet: SIM di
+DEFAULT, ordini LIVE via `execution_engine` dal 08/09 con
+`AUTO_BET_MODE=live` + provider reale configurato (EXECUTION_PROVIDER +
+credenziali; oggi SX Bet). Il vincolo "settlement = the-odds-api" resta garantito da
 `test_settlement_source.py`; il vincolo "nessuna credenziale in chiaro" da
 `test_secret_hygiene.py`.
 
@@ -153,8 +155,28 @@ cd webapp && npm run build            # build Next.js
 - Il token va rinnovato quando scade o dopo l'esposizione in chat (flusso:
   fine-grained PAT → Contents RW → va nel VAULT, non più nel `.env`).
 
-## Stato attuale (aggiornato al 06/09/2026)
+## Stato attuale (aggiornato al 08/09/2026)
 
+- **auto_bet → execution_engine LIVE (08/09)**: i segnali value/strong_value
+  del job 08:50 possono ora piazzare ORDINI REALI su SX Bet (uscita dal
+  SIM-only). Si attiva solo con `AUTO_BET_MODE=live|real` E provider reale
+  configurato (`EXECUTION_PROVIDER=sxbet` + `SX_API_KEY`/`SX_PRIVATE_KEY`);
+  senza, resta SIM (default) o fail-closed con allow_sim=False. Flusso:
+  risoluzione del mercato exchange per la STESSA partita (nomi squadre +
+  kickoff, univocità — mai ordini su eventi ambigui,
+  `execution_engine.resolve_match_market`, provider sxbet), floor EV (si
+  riempie SOLO alla quota-segnale o meglio: best < quota → salto), ordine
+  IOC con bound = quota del segnale, ledger `bets` con mode='live' +
+  market_id/selection_id/bet_id reali e stake/prezzo MATCHED. Gli ordini
+  rifiutati o i salti non lasciano righe (un FAILED verrebbe saldato come
+  perdita). Risk caps invariati (correlation 30% + esposizione 40%).
+- **Fix loop infinito football_hist (08/09)**: il ramo "retry" di
+  `sync_history` faceva `continue` senza limite sulla stessa stagione
+  (osservato in produzione: "Retry stesso anno per Serie A 2024" a ~50
+  righe/sec per oltre 25 min, bloccando il job e bruciando la quota
+  API-Football). Aggiunto `MAX_YEAR_RETRIES` (3) con sleep tra i tentativi:
+  dopo il limite la stagione è trattata come non accessibile e si passa
+  all'anno precedente (mai più blocchi). Test dedicati.
 - **Correzioni ML post-diagnostica (06/09)** — il report sul backtest
   storico (12.909 partite) mostrava: ROI -2,52% flat, controllo a quota
   CLOSING -3,03% (la selezione NON batte il mercato devigato),
@@ -406,9 +428,11 @@ cd webapp && npm run build            # build Next.js
   il segnale della schedina resta 1X2/OU.
 - **Quote**: fix fallback `load_odds(path)` (prima non funzionava mai) e nota
   di freschezza in `/segnale` quando le quote sono da cache vecchia.
-- **Puntate automatiche** (`auto_bet.py`, job 08:50 ITA): **SIM-only dal
-  04/09** — simula i segnali value/strong_value del giorno con la quota del
-  segnale (mode='sim', nessun conto Exchange), stake **ADATTIVO** (`adaptive_staking.py`):
+- **Puntate automatiche** (`auto_bet.py`, job 08:50 ITA): SIM di DEFAULT
+  (quota del segnale, mode='sim') oppure **LIVE via execution_engine dal
+  08/09** con `AUTO_BET_MODE=live` + provider reale (SX Bet; ordini reali
+  con floor EV e risoluzione evento univoca, mode='live' nel ledger).
+  Stake **ADATTIVO** (`adaptive_staking.py`):
   Kelly frazionato dinamico (0.10-0.35 vs 0.25 fisso prima) con drawdown
   protection (>10% drawdown → riduzione stakes) e confidence weighting
   (market_edge alto + strong_value → stake più alto). Cap: 3% value, 5%
@@ -639,8 +663,9 @@ cd webapp && npm run build            # build Next.js
   `--provider` per l'aggregatore) con stake 1€ per misurare latenza/slippage
   veri prima di passare a stake reali. ⚠️ Da rete italiana `api.smarkets.com`
   è inibito (ADM): il probe Smarkets va eseguito da Railway/rete estera;
-  `api.sx.bet` è raggiungibile. Poi collegare auto_bet a execution_engine
-  (oggi SIM-only).
+  `api.sx.bet` è raggiungibile. Wiring auto_bet → execution_engine
+  completato l'08/09 (vedi Stato attuale): resta il collaudo live in
+  produzione (AUTO_BET_MODE=live + EXECUTION_PROVIDER=sxbet su Railway).
 - Surebet engine: schedulare il loop in produzione (crontab/cron Railway o
   secondo servizio) e monitorare i crediti the-odds-api (il piano free è
   quasi saturo col calendario value). Verificare su dati reali quali

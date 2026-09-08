@@ -959,6 +959,13 @@ class SxBetProvider(ExecutionProvider):
                     "country_code": None,
                     "open_date": open_date,
                     "total_matched": None,
+                    # Nomi squadre/esiti del market (per la risoluzione
+                    # match -> mercato in auto_bet: su SX il 1X2 e' spezzato
+                    # in 3 mercati binari "X vs Not X" — uno per esito).
+                    "team_one_name": m.get("teamOneName"),
+                    "team_two_name": m.get("teamTwoName"),
+                    "outcome_one_name": m.get("outcomeOneName"),
+                    "outcome_two_name": m.get("outcomeTwoName"),
                     "runners": [
                         {"selection_id": 1,
                          "name": m.get("outcomeOneName")},
@@ -1268,6 +1275,147 @@ def build_provider() -> ExecutionProvider:
                        "(sxbet|smarkets|betinasia|mollybet) -> DryRunProvider",
                        EXECUTION_PROVIDER)
     return DryRunProvider()
+
+
+# ---------------------------------------------------------------------------
+# Risoluzione match -> mercato (per auto_bet live)
+# ---------------------------------------------------------------------------
+
+_TIE_LABELS = {"tie", "draw", "the draw", "pareggio", "x"}
+
+
+def _name_key(s: object) -> str:
+    """Normalizza un nome per il confronto: minuscolo, accent-fold, solo
+    alfanumerici (es. 'CA Osasuna' -> 'ca osasuna', 'Nueva Chicago' ->
+    'nueva chicago'). Ritorna '' per input vuoti."""
+    if s is None:
+        return ""
+    import re
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(s))
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = re.sub(r"[^a-z0-9]+", " ", s.lower())
+    return " ".join(s.split())
+
+
+def _name_sim(a: object, b: object) -> float:
+    """Somiglianza tra nomi squadra normalizzati (1.0 = uguali).
+
+    Il match tra il nome del segnale (the-odds-api) e quello dell'exchange
+    raramente e' identico ('Inter' vs 'Inter Milan', 'Betis' vs 'Real
+    Betis'): si accetta la sovrapposizione (0.92) o la somiglianza di
+    sequenza (SequenceMatcher) sopra soglia. Mai abbastanza alta da far
+    scattare falsi positivi tra squadre diverse.
+    """
+    ka, kb = _name_key(a), _name_key(b)
+    if not ka or not kb:
+        return 0.0
+    if ka == kb:
+        return 1.0
+    if ka in kb or kb in ka:
+        return 0.92
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, ka, kb).ratio()
+
+
+def resolve_match_market(provider, home: str, away: str, esito_key: str,
+                         kickoff_iso: Optional[str] = None,
+                         window_hours: float = 6.0,
+                         max_results: int = 400) -> Optional[Dict]:
+    """Trova il mercato del provider per la partita (home/away) e l'esito.
+
+    Il segnale value di auto_bet nasce dalle quote the-odds-api (match_id
+    proprio); per piazzare un ordine reale serve il market_id dell'exchange
+    della STESSA partita e la selezione dell'esito. Questo resolver:
+
+    1. scarica il catalogo calcio del provider (mercati ACTIVE);
+    2. trova l'evento con entrambe le squadre allineate (home/away in
+       ordine, somiglianza >= 0.82) e kickoff nella finestra del segnale;
+    3. dentro l'evento sceglie il mercato/selezione dell'esito richiesto:
+       su SX Bet il 1X2 e' spezzato in 3 mercati binari "X vs Not X"
+       (uno per esito: esito 1 -> outcomeOne = casa, 2 -> trasferta,
+       X -> outcomeOne = 'Tie').
+
+    Fail-closed: ritorna None se l'evento non e' univoco (0 o piu' match)
+    o l'esito non e' mappabile — il chiamante NON deve scommettere su un
+    mercato ambiguo. Provider supportati oggi: sxbet.
+
+    Ritorna un dict con market_id, selection_id, event_name, label, oppure
+    None.
+    """
+    pname = str(getattr(provider, "name", "")).lower()
+    if pname != "sxbet":
+        logger.warning("resolve_match_market: provider '%s' non ancora "
+                       "supportato (solo sxbet)", pname or "?")
+        return None
+
+    kick = None
+    if kickoff_iso:
+        try:
+            kick = datetime.fromisoformat(
+                str(kickoff_iso).replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            kick = None
+
+    try:
+        markets = provider.list_market_catalogue(
+            event_type_ids=("5",), max_results=max_results)
+    except Exception as e:
+        logger.warning("resolve_match_market: discovery fallita: %s", e)
+        return None
+    if not markets:
+        return None
+
+    hk, ak = _name_key(home), _name_key(away)
+    events: Dict[tuple, list] = {}
+    for m in markets:
+        t1, t2 = _name_key(m.get("team_one_name")), _name_key(m.get("team_two_name"))
+        if not (t1 and t2):
+            continue
+        if _name_sim(t1, hk) < 0.82 or _name_sim(t2, ak) < 0.82:
+            continue
+        # Finestra kickoff: il mercato dell'exchange deve riferirsi alla
+        # stessa partita del segnale (stesso orario, tolleranza finestra).
+        od_bin = None
+        if kick is not None:
+            od = m.get("open_date")
+            if od:
+                try:
+                    dt = datetime.fromisoformat(
+                        str(od).replace("Z", "+00:00")).replace(tzinfo=None)
+                    if abs((dt - kick).total_seconds()) > window_hours * 3600:
+                        continue
+                    # Bin temporale (minuti): le tre binario dello STESSO
+                    # evento hanno lo stesso gameTime e finiscono nello
+                    # stesso gruppo; due eventi con gli stessi nomi ma
+                    # kickoff diversi restano SEPARATI (=> ambiguo).
+                    od_bin = dt.replace(second=0, microsecond=0)
+                except Exception:
+                    pass
+        events.setdefault((t1, t2, od_bin), []).append(m)
+
+    if len(events) != 1:
+        if events:
+            logger.warning("resolve_match_market: %d eventi candidati per "
+                           "%s vs %s, salto (ambiguo)", len(events), home, away)
+        return None
+
+    event_markets = next(iter(events.values()))
+    es = str(esito_key or "").strip().lower()
+    for m in event_markets:
+        o1 = _name_key(m.get("outcome_one_name"))
+        if es in ("x", "draw", "pareggio"):
+            if o1 in _TIE_LABELS:
+                return {"market_id": m["market_id"], "selection_id": 1,
+                        "event_name": m.get("event_name"), "label": "X",
+                        "provider": pname}
+        else:
+            target = hk if es == "1" else (ak if es == "2" else None)
+            if target and _name_sim(o1, target) >= 0.82:
+                return {"market_id": m["market_id"], "selection_id": 1,
+                        "event_name": m.get("event_name"), "label": es,
+                        "provider": pname}
+    return None
 
 
 # ---------------------------------------------------------------------------
