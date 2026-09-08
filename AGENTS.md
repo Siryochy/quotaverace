@@ -41,6 +41,11 @@ surebet_engine.py   → scanner arbitraggi INDIPENDENTE (05/09): h2h a 2 esiti
                       NBA/MLB/Tennis, soft vs sharp via the-odds-api, cache e
                       log propri (data/surebet/), mai import da tracker/bot
                       (loop separato: venv/bin/python surebet_engine.py --loop N)
+tennis_sandbox.py   → SANDBOX tennis (08/09): paper trading Moneyline 2 vie su
+                      SX Bet (type 52), baseline Weighted ELO seminata dal
+                      mercato, +EV con anti-spurio (inv_sum 0.98-1.08), ledger
+                      SQLite dedicato (data/tennis_sandbox/), ZERO ordini reali
+                      e zero crediti the-odds-api (letture SX pubbliche)
 data/               → cache JSON + DB sqlite + modello ensemble
 backtest_mc.py      → backtest walk-forward ensemble+Kelly con Monte Carlo (ROI, MaxDD)
 backup_manager.py   → backup DB+dataset ML (integrity check, rotazione, /backup)
@@ -156,6 +161,35 @@ cd webapp && npm run build            # build Next.js
   fine-grained PAT → Contents RW → va nel VAULT, non più nel `.env`).
 
 ## Stato attuale (aggiornato al 08/09/2026)
+
+- **Sandbox tennis + scansione calcio H24/7 (08/09)** — nuovo modulo
+  `tennis_sandbox.py` (pattern surebet_engine: indipendente da tracker/bot,
+  ledger SQLite dedicato in `data/tennis_sandbox/`, mai import da tracker/bot
+  e nessuna credenziale — test dedicati lo verificano). Legge i mercati
+  tennis Moneyline (type 52 = "12", sportId 6) dall'API PUBBLICA di SX Bet
+  (zero costi, zero ordini: fail-closed totale). Baseline **Weighted ELO**
+  (K pesato per recency, seeding a COPPIA coerente — il seeding singolo
+  distorceva prob: 0.773→0.920) seminata dalle probabilita' implicite del
+  mercato e aggiornata SOLO dai risultati reali delle osservazioni saldate
+  (`/markets/find` → `outcome` 1|2|0). Anti-EV-spurio: filtro coerenza
+  mercato `MIN_INV_SUM=0.98/MAX_INV_SUM=1.08` (somma inversi dei due best
+  back ~1 su un exchange; sotto soglia = book sporco, l'EV finto supera
+  l'EV_MIN 3% solo con edge reale del modello). Ledger: ogni +EV registrato
+  con selezione univoca (UNIQUE market_hash+selection), stake Kelly
+  frazionario su bankroll VIRTUALE (paper, default 1000) e OGNI match
+  scansionato salvato come observation per l'apprendimento ELO (senza
+  settlement l'ELO resterebbe identico al mercato: deadlock). Report
+  `--report [--json]`: opportunita'/giorno, ROI teorico, win rate. CLI:
+  `--scan`, `--settle`, `--loop N`. Attivo su Railway con
+  `TENNIS_SANDBOX_ENABLED=1` (scan+settle ogni 6h + report 05:55 UTC via
+  Telegram); collaudo reale 08/09: 8 mercati US Open, 8 book, 1 segnale +EV
+  (Linda Noskova @4.21 vs rating seminato — mercato in movimento).
+- **Scansione calcio H24/7 garantita da test** (08/09): il percorso 1X2
+  (bot.py morning/afternoon/evening + fixture_engine + odds_api) non ha
+  alcun gating per giorno della settimana — tripwire
+  `test_football_scan_h24.py` blocca chiunque introduca limitazioni "solo
+  weekend" (job run_daily senza `days=`, assenza di isoweekday/weekday/%7
+  nella pipeline, auto_bet run_repeating 3h).
 
 - **auto_bet → execution_engine LIVE (08/09)**: i segnali value/strong_value
   del job 08:50 possono ora piazzare ORDINI REALI su SX Bet (uscita dal

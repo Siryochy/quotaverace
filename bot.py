@@ -1486,6 +1486,91 @@ def _db_path():
     return DATA_DIR / "quotaverace.db"
 
 
+async def tennis_sandbox_job(context: ContextTypes.DEFAULT_TYPE):
+    """Sandbox tennis (paper trading) 24/7 — solo SIMULAZIONE su SX Bet.
+
+    Gated da TENNIS_SANDBOX_ENABLED=1 (default off). Ogni 6h: scansione
+    +EV dei mercati Moneyline tennis (type 52) via API PUBBLICA SX Bet
+    (zero credenziali, zero ordini, zero crediti the-odds-api) e
+    settlement dei ghost bet aperti col risultato reale (l'ELO impara
+    dalle osservazioni saldate). Notifica solo in caso di attivita'
+    (nuovi segnali o settlement), per non fare spam.
+    """
+    if os.getenv("TENNIS_SANDBOX_ENABLED", "0") != "1":
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        res = await loop.run_in_executor(
+            _scan_executor, _run_tennis_sandbox_pass)
+    except Exception as e:
+        logger.error("tennis_sandbox_job: %s", e)
+        return
+    if not res:
+        return
+    signals, settled = res
+    if not signals and not settled:
+        return
+    rows = []
+    for s in signals[:5]:
+        rows.append(f"  • {s['event']} — {s['selection']} @{s['price']:.2f} "
+                    f"(EV {s['ev'] * 100:+.1f}%, stake paper {s['stake']:.2f})")
+    for st in settled[:5]:
+        outcome = {"won": "✅ vinta", "lost": "❌ persa",
+                   "void": "⚪ void"}.get(st["status"], st["status"])
+        rows.append(f"  • {st['event']} — {st['selection']}: {outcome} "
+                    f"(P/L {st['profit']:+.2f})")
+    text = (f"🎾 *SANDBOX TENNIS (paper)* — attività del giro\n"
+            f"{len(signals)} nuovi segnali +EV, {len(settled)} settlement\n\n"
+            + "\n".join(rows) +
+            "\n\n📌 Simulazione: nessun ordine reale, nessun costo.")
+    await _send_report_to_recipients(context, text)
+    logger.info("tennis_sandbox_job: %d segnali, %d settlement",
+                len(signals), len(settled))
+
+
+async def tennis_sandbox_report_job(context: ContextTypes.DEFAULT_TYPE):
+    """Report giornaliero del sandbox tennis (05:55 UTC): opportunita'
+    per giorno, ROI teorico, win rate — per valutare la baseline ELO
+    prima di qualsiasi integrazione con denaro reale.
+    """
+    if os.getenv("TENNIS_SANDBOX_ENABLED", "0") != "1":
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        text = await loop.run_in_executor(_scan_executor, _tennis_report_text)
+    except Exception as e:
+        logger.error("tennis_sandbox_report_job: %s", e)
+        return
+    if not text:
+        return
+    await _send_report_to_recipients(context, text)
+
+
+def _run_tennis_sandbox_pass():
+    """Scan+settle in un colpo (thread dell'executor). Fail-closed."""
+    from tennis_sandbox import TennisSandbox
+    sb = TennisSandbox()
+    try:
+        res = sb.scan()
+        settled = sb.settle()
+        return res.get("signals", 0), settled
+    finally:
+        sb.close()
+
+
+def _tennis_report_text() -> str:
+    """Testo del report giornaliero sandbox tennis (o '' se vuoto)."""
+    from tennis_sandbox import TennisSandbox, format_report
+    sb = TennisSandbox()
+    try:
+        rep = sb.report()
+    finally:
+        sb.close()
+    if rep["total_signals"] == 0 and rep["observations"] == 0:
+        return ""
+    return format_report(rep)
+
+
 async def backup_data_job(context: ContextTypes.DEFAULT_TYPE):
     """Backup giornaliero dei dati persistenti (delega a backup_manager).
 
@@ -1580,6 +1665,17 @@ def main() -> None:
         # questo job il ML resterebbe spento in produzione: nessun file, 
         # nessuna predizione ensemble). Poi azzera la cache del singleton.
         job_queue.run_daily(retrain_ensemble_job, time=time(hour=5, minute=45))
+        # Sandbox tennis (paper trading, 08/09): SOLO simulazione su SX Bet
+        # (mercati Moneyline type 52, letture pubbliche gratuite). Gated da
+        # TENNIS_SANDBOX_ENABLED=1: scan+settle ogni 6h (primo giro 15 min
+        # dopo il boot) + report giornaliero 05:55 UTC. Mai ordini reali:
+        # il modulo non ha credenziali e non importa da tracker/bot.
+        if os.getenv("TENNIS_SANDBOX_ENABLED", "0") == "1":
+            job_queue.run_repeating(tennis_sandbox_job, interval=6 * 3600,
+                                    first=900)
+            job_queue.run_daily(tennis_sandbox_report_job,
+                                time=time(hour=5, minute=55))
+            logger.info("Sandbox tennis abilitato (paper trading, 6h + report 05:55 UTC)")
         # Piano free: riceve gli stessi segnali con 3 ore di ritardo.
         job_queue.run_daily(free_delayed_job, time=time(hour=17 - IT_OFFSET, minute=0))
         # Alert RLM real-time: ogni 5 minuti dalle 14:00 alle 23:50 ITA
@@ -1589,7 +1685,8 @@ def main() -> None:
                                     first=time(hour=14 - IT_OFFSET, minute=0))
         except ImportError:
             logger.warning("rlm_alert non disponibile, alert RLM disabilitato")
-        logger.info("Job Pro schedulati (ora italiana): 03:30 backup / 06:05 riepilogo ieri / "
+        logger.info("Job Pro schedulati (ora italiana): 03:30 backup / 05:55 sandbox tennis "
+                    "(report) / 06:05 riepilogo ieri / "
                     "08:30 sync / auto-bet 24/7 (ogni 3h da 08:50) / 14:00 pomeriggio / "
                     "14:00-23:50 RLM alert (5') / 17:00 free / 20:00 sera / "
                     "21:30 risultati / 21:00-23:50 EOD (ogni 15') / "

@@ -216,6 +216,16 @@ Architettura attuale:
 > 💰 **Saldo wallet SX**: `venv/bin/python execution_engine.py --balance`
 > sul container mostra `availableBalance` del proxy wallet (verificato
 > 08/09: 12.28 USDC). Prima di affidarsi all'automazione fare un top-up.
+>
+> 🎾 **Sandbox tennis (paper trading, 08/09)**: `tennis_sandbox.py` legge i
+> mercati Moneyline tennis SX Bet (type 52) da API PUBBLICA — **zero
+> ordini reali, zero credenziali, zero crediti the-odds-api**. Baseline
+> Weighted ELO (seme dal mercato, apprende dai settlement delle
+> osservazioni) + filtro anti-EV-spurio + ledger SQLite dedicato
+> (`data/tennis_sandbox/`). Attivo sul container con
+> `TENNIS_SANDBOX_ENABLED=1`: scan+settle ogni 6h + report giornaliero
+> 05:55 UTC su Telegram. CLI: `--scan`, `--settle`, `--loop N`,
+> `--report [--json]`.
 
 > ⚙️ **Staking dinamico** (08/09): nessun importo fisso — Kelly frazionato
 > sul bankroll corrente (in LIVE = saldo reale del wallet SX via
