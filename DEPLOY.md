@@ -230,12 +230,16 @@ Architettura attuale:
 > report giornaliero 05:55 UTC su Telegram (con riepilogo per
 > superficie). CLI: `--scan`, `--settle`, `--loop N`, `--report [--json]`.
 
-> ⚙️ **Staking dinamico** (08/09): nessun importo fisso — Kelly frazionato
-> sul bankroll corrente (in LIVE = saldo reale del wallet SX via
-> `get_balance`). Config: `KELLY_MIN_FRACTION` (0.05), `KELLY_MAX_FRACTION`
-> (0.40), `STAKE_CAP_PCT` (0.10 value), `STAKE_CAP_PCT_STRONG` (0.25
-> strong_value), `STAKE_MIN_EUR` (1.0 = minimo ordine SX), `STAKE_STEP_EUR`
-> (0.01). Giro immediato: `/autobet now` (Telegram, admin).
+> ⚙️ **Staking prudente** (09/09): Kelly **FISSATO al 5%** del Kelly pieno
+> (`KELLY_MIN_FRACTION=KELLY_MAX_FRACTION=0.05` → la frazione dinamica
+> 0.05-0.40 resta nel codice ma con MIN=MAX è sempre 0.05) e **cap 2% del
+> bankroll per singola operazione** (`STAKE_CAP_PCT=0.02` value e
+> `STAKE_CAP_PCT_STRONG=0.02` strong_value), su bankroll corrente (in LIVE
+> = saldo reale del wallet SX via `get_balance`). `STAKE_MIN_EUR` (1.0 =
+> minimo ordine SX), `STAKE_STEP_EUR` (0.01). ⚠️ Il floor exchange 1 USDC
+> prevale sul cap 2%: con bankroll < 50 USDC lo stake effettivo è 1 USDC
+> (>2%); il cap 2% diventa vincolante da 50 USDC in su. Giro immediato:
+> `/autobet now` (Telegram, admin).
 
 > 🧾 **Flat-stake live Calcio 1X2** (09/09): con `AUTO_BET_STAKE_MODE=flat`
 > (+ `AUTO_BET_FLAT_STAKE_EUR=1`) il giro piazza **1 USDC per ogni segnale**
@@ -244,10 +248,15 @@ Architettura attuale:
 > con wallet ~12 USDC entrano max ~3-4 ordini/giorno (minimo ordine SX = 1
 > USDC, niente frazioni). Default `adaptive` (Kelly) se l'env e' assente.
 >
-> 🕐 **Auto-bet 24/7** (08/09): il giro puntate gira ogni 3h da 08:50 ITA
-> (non più una sola volta al giorno). Cap esposizione totale giornaliero
-> multi-giro: `auto_bet._today_placed_stake` sottrae l'esposizione già
-> piazzata dai giri precedenti.
+> 🕐 **Auto-bet 24/7 minuto-per-minuto** (09/09): il giro puntate gira
+> **ogni 60s** (non più ogni 3h) da subito dopo il boot, giorno e notte.
+> Non brucia crediti the-odds-api (segnali dal DB + prezzi SX dall'API
+> pubblica); `max_instances=1` evita giri sovrapposti. Con la guardia 15
+> min pre-kickoff il floor EV (riempimento solo alla quota-segnale o
+> meglio) cattura i miglioramenti di prezzo fino all'ultimo quarto d'ora.
+> Cap esposizione totale giornaliero multi-giro: `auto_bet._today_placed_stake`
+> sottrae l'esposizione già piazzata dai giri precedenti. Avviso
+> kill-switch anti-spam: max 1 alert/giorno (chiave `KS_OFF`).
 
 ---
 

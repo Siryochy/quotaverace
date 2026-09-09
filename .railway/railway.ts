@@ -23,6 +23,23 @@ export default defineRailway(() => {
     BANKROLL_DEFAULT: preserve(),
     ADMIN_CHAT_ID: preserve(),
     TEST_NOTIFY_KEY: preserve(),
+    // Esecuzione LIVE (09/09): AUTO_BET_MODE=live + EXECUTION_PROVIDER +
+    // credenziali SX abilitano gli ordini reali su SX Bet. preserve()
+    // mantiene i valori gia' presenti in Railway senza esportarli: senza
+    // queste dichiarazioni un `railway config apply` li distruggerebbe.
+    AUTO_BET_MODE: preserve(),
+    EXECUTION_PROVIDER: preserve(),
+    SX_API_KEY: preserve(),
+    SX_PRIVATE_KEY: preserve(),
+    // Staking prudente (09/09): Kelly FISSATO al 5% (MIN=MAX=0.05) e cap
+    // 2% per singola operazione (value e strong_value). Il floor exchange
+    // MIN_STAKE_EUR=1.0 (minimo ordine SX Bet in USDC) resta invariato.
+    AUTO_BET_STAKE_MODE: preserve(),
+    KELLY_MIN_FRACTION: preserve(),
+    KELLY_MAX_FRACTION: preserve(),
+    STAKE_CAP_PCT: preserve(),
+    STAKE_CAP_PCT_STRONG: preserve(),
+    MIN_STAKE_EUR: preserve(),
     // BETFAIR_* rimosse il 04/09: Betfair è fuori dall'architettura
     // (refertazione = API-Football, quote/CLV = the-odds-api, auto_bet SIM).
   };

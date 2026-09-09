@@ -1463,15 +1463,16 @@ async def report_morning_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
-    """Giro puntate automatiche (08:50 ITA + ogni 3h, 24/7 dal 08/09).
+    """Giro puntate automatiche (ogni minuto, 24/7 dal 09/09).
 
     SIM di default (paper trading con la quota del segnale, registrate in
     `bets` e saldate a fine partita) oppure LIVE se AUTO_BET_MODE=live e
     provider reale configurato (ordini SX reali con staking dinamico sul
-    saldo del wallet). Gira piu' volte al giorno: i nuovi segnali value
-    delle analisi (04:00/12:00/18:00 UTC) vengono scommessi entro 3h;
-    UNIQUE(match_id, esito) evita doppioni e il cap esposizione e'
-    giornaliero (sottrae l'esposizione dei giri precedenti).
+    saldo del wallet). Gira ogni minuto: i nuovi segnali value delle
+    analisi (04:00/12:00/18:00 UTC) vengono scommessi entro 1 minuto e il
+    floor EV cattura i miglioramenti di prezzo fino alla guardia dei 15
+    min pre-kickoff; UNIQUE(match_id, esito) evita doppioni e il cap
+    esposizione e' giornaliero (sottrae l'esposizione dei giri precedenti).
     """
     loop = asyncio.get_running_loop()
     try:
@@ -1486,11 +1487,20 @@ async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
         try:
             from auto_bet import kill_switch_status
             if kill_switch_status().get("effective") == "off":
+                from tracker import is_notified, mark_notified
+                from datetime import timezone as _tz, timedelta as _td
+                today = (datetime.now(_tz.utc) + _td(hours=2)).strftime("%Y-%m-%d")
+                # Anti-spam (09/09): con il giro OGNI MINUTO l'avviso
+                # kill-switch scattava a ogni run (fino a 1440 msg/giorno).
+                # Massimo 1 alert al giorno, come il drift watchdog.
+                if is_notified("KS_OFF", today):
+                    return
                 text = ("🛑 *AUTO-BET BLOCCATO (kill-switch OFF)*\n\n"
                         "Il giro delle puntate automatiche e' stato saltato: "
                         "nessuna puntata piazzata.\n"
                         "Per riattivare: `/autobet live`")
                 await _send_report_to_recipients(context, text)
+                mark_notified("KS_OFF", today)
         except Exception as e:
             logger.error("auto_bet_job (kill-switch notify): %s", e)
         return
@@ -1694,18 +1704,22 @@ def main() -> None:
                                 first=time(hour=21 - IT_OFFSET, minute=0))
         job_queue.run_daily(report_morning_job, time=time(hour=6, minute=5 - IT_OFFSET))
         job_queue.run_daily(history_sync_job, time=time(hour=8, minute=30 - IT_OFFSET))
-        # Auto-bet 24/7 (08/09): giro ogni 3h, primo giro 10 min dopo il
+        # Auto-bet 24/7 (09/09): giro OGNI MINUTO, primo giro 60s dopo il
         # boot — i segnali value/strong_value nuovi (analisi 04:00/12:00/
         # 18:00 UTC, finestra candidati mobile 24h) vengono scommessi entro
-        # 3h, giorno e notte, anche subito dopo un redeploy. Sicuro: UNIQUE
-        # (match_id, esito) impedisce doppioni e la guardia 15 min evita
-        # ordini a partita iniziata. Il cap esposizione TOTALE resta
+        # 1 minuto, giorno e notte. Il giro NON brucia crediti the-odds-api
+        # (legge i segnali dal DB e i prezzi SX dall'API pubblica); in LIVE
+        # il floor EV riempie solo alla quota-segnale o meglio, quindi la
+        # frequenza minuto-per-minuto cattura i miglioramenti di prezzo fino
+        # alla guardia dei 15 min pre-kickoff. Sicuro: UNIQUE (match_id,
+        # esito) impedisce doppioni e il cap esposizione TOTALE resta
         # giornaliero (sottrae l'esposizione gia' piazzata nei giri
-        # precedenti, vedi auto_bet._today_placed_stake).
-        # NB: first=600 (delay dopo il boot) e NON first=time(...): con
+        # precedenti, vedi auto_bet._today_placed_stake). max_instances=1
+        # evita esecuzioni sovrapposte se un giro supera i 60s.
+        # NB: first=60 (delay dopo il boot) e NON first=time(...): con
         # l'orario gia' passato il primo giro slitterebbe al giorno dopo.
-        job_queue.run_repeating(auto_bet_job, interval=3 * 3600,
-                                first=600)
+        job_queue.run_repeating(auto_bet_job, interval=60,
+                                first=60, max_instances=1)
         job_queue.run_daily(backup_data_job, time=time(hour=3, minute=30))
         job_queue.run_once(backup_data_job, when=10)  # snapshot di base all'avvio
         # Retrain ensemble ML dal ledger live (05:45 UTC + a ogni boot): se
@@ -1747,7 +1761,7 @@ def main() -> None:
             logger.warning("rlm_alert non disponibile, alert RLM disabilitato")
         logger.info("Job Pro schedulati (ora italiana): 03:30 backup / 05:55 sandbox tennis "
                     "(report) / 06:05 riepilogo ieri / "
-                    "08:30 sync / auto-bet 24/7 (ogni 3h da 08:50) / 14:00 pomeriggio / "
+                    "08:30 sync / auto-bet 24/7 (ogni minuto) / 14:00 pomeriggio / "
                     "14:00-23:50 RLM alert (5') / 17:00 free / 20:00 sera / "
                     "21:30 risultati / 21:00-23:50 EOD (ogni 15') / "
                     "watchdog settlement (ogni 4h) / retrain ensemble ML "

@@ -55,8 +55,11 @@ def test_rotazione_intervalli_non_settimanale():
 
 
 def test_auto_bet_24_7_registrato_repeating():
-    """Il giro puntate e' 24/7: run_repeating ogni 3h, non daily."""
+    """Il giro puntate e' 24/7: run_repeating OGNI MINUTO, non daily."""
+    import re
     src = _read("bot.py")
     assert "run_repeating(auto_bet_job" in src
-    assert "interval=3 * 3600" in src
+    # Frequenza continua (09/09): 60s, mai piu' intervalli orari/3h.
+    assert re.search(r"run_repeating\(auto_bet_job[^)]*interval=60\b", src), \
+        "auto_bet_job deve girare ogni minuto (interval=60)"
     assert "days=" not in src.split("run_repeating(auto_bet_job")[1][:300]

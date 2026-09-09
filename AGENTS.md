@@ -164,6 +164,29 @@ cd webapp && npm run build            # build Next.js
 
 ## Stato attuale (aggiornato al 09/09/2026)
 
+- **AUTO-BET LIVE minuto-per-minuto + staking prudente (09/09)** —
+  configurazione operativa richiesta dal proprietario: 1) **Frequenza**:
+  `auto_bet_job` passa da ogni 3h a **ogni 60s** (`run_repeating`
+  interval=60, first=60, `max_instances=1` anti-sovrapposizione) — il
+  giro non brucia crediti the-odds-api (segnali dal DB + prezzi SX
+  dall'API pubblica) e il floor EV cattura i miglioramenti di prezzo fino
+  alla guardia 15 min pre-kickoff. 2) **Kelly FISSATO al 5%**: env
+  `KELLY_MIN_FRACTION=KELLY_MAX_FRACTION=0.05` (la frazione dinamica
+  0.05-0.40 resta nel codice, con MIN=MAX è sempre 0.05). 3) **Cap 2%**
+  per singola operazione: `STAKE_CAP_PCT=0.02` e
+  `STAKE_CAP_PCT_STRONG=0.02`. ⚠️ Il floor exchange 1 USDC prevale sul
+  cap: con wallet ~47 USDC lo stake effettivo è 1 USDC (>2%); il cap 2%
+  diventa vincolante da ~50 USDC in su (top-up consigliato). 4) Soglie
+  EV invariate e già attive (+3% value, strong_value EV>8% + edge ≥+5pp)
+  e drift watchdog ogni 6h invariato. Anti-spam: l'avviso kill-switch
+  OFF (che col giro ogni minuto scattava 1440 volte/giorno) è limitato a
+  **1 alert/giorno** (chiave `KS_OFF` su tracker.is_notified). Le env
+  sopra sono DICHIARATE in `.railway/railway.ts` (preserve) insieme a
+  AUTO_BET_MODE/EXECUTION_PROVIDER/SX_* per non farle distruggere da
+  `railway config apply`; su Railway sono già impostate (l'esecuzione
+  LIVE era già attiva). Startup invariato: `Dockerfile` → `run_all.py`
+  (processo bloccante, i job vivono nella job_queue del bot).
+  Test aggiornati: `test_football_scan_h24.py` ora impone interval=60.
 - **ELO tennis superficie-specifico + time-decay nel sandbox (09/09)** —
   esteso il modello del `tennis_sandbox` prima di affidargli piu' superfici:
   1) **Surface-Specific ELO**: ogni giocatore ha un rating OVERALL + rating
