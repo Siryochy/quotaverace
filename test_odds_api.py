@@ -191,3 +191,80 @@ def test_budget_giornaliero_cap(monkeypatch, tmp_path):
     fixture_engine.fetch_and_analyze_today()
     assert len(calls) == 1
     assert calls[0] == "soccer_italy_serie_a"  # prima per priorita'
+
+
+# ---------------------------------------------------------------------------
+# Stagger rotazione (10/09): le leghe core a 3gg non devono sincronizzarsi
+# tutte nello stesso giorno, altrimenti ci sono 2 giorni su 3 senza analisi.
+# ---------------------------------------------------------------------------
+
+
+def _write_cache(tmp_path, sport_key, ts):
+    (tmp_path / f"toa_{sport_key}.json").write_text(
+        __import__("json").dumps({"ts": ts, "payload": [], "remaining": 500}))
+
+
+def test_stagger_spalma_le_leghe_core():
+    """Le leghe core (intervallo 3) hanno fasi diverse: non scadono tutte
+    lo stesso giorno."""
+    import odds_api
+    core = [k for k in SPORTS_MAP.values() if odds_api.interval_for_sport(k) == 3]
+    assert len(core) >= 6
+    fasi = {odds_api._rotation_phase(k, 3) for k in core}
+    assert len(fasi) >= 2, f"tutte le leghe core sincronizzate: fasi {fasi}"
+
+
+def test_stagger_scadenza_sul_giorno_di_fase(monkeypatch, tmp_path):
+    """Con cache vecchia di 1 giorno, una lega core e' dovuta SOLO sul suo
+    giorno di fase (e non sui giorni vicini)."""
+    import time as _t
+    import odds_api
+    monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+    now = 1_800_000_000.0  # giorno fisso: day = now // 86400
+    monkeypatch.setattr(odds_api.time, "time", lambda: now)
+    day = int(now // 86400)
+
+    key = "soccer_italy_serie_a"
+    interval = odds_api.interval_for_sport(key)
+    phase = odds_api._rotation_phase(key, interval)
+    # cache vecchia di 1 giorno (eta' < ttl di 3 giorni)
+    _write_cache(tmp_path, key, now - 86400)
+    assert odds_api.is_sport_due(key) == (day % interval == phase)
+
+    # cache vecchia di 2 giorni: ancora dentro il ttl, stessa regola di fase
+    _write_cache(tmp_path, key, now - 2 * 86400)
+    assert odds_api.is_sport_due(key) == (day % interval == phase)
+
+
+def test_stagger_non_anticipa_le_leghe_30gg(monkeypatch, tmp_path):
+    """Le leghe a 30gg (dormienti) NON vengono anticipate dal giorno di
+    fase: restano dovute solo a scadenza intervallo (zero costi extra)."""
+    import odds_api
+    monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+    now = 1_800_000_000.0
+    monkeypatch.setattr(odds_api.time, "time", lambda: now)
+
+    key = "soccer_turkey_super_league"
+    assert odds_api.interval_for_sport(key) == 30
+    _write_cache(tmp_path, key, now - 2 * 86400)  # eta' 2 giorni
+    assert odds_api.is_sport_due(key) is False
+    # anche sul giorno di fase (se cadesse oggi) non scatta: niente anticipo
+    phase = odds_api._rotation_phase(key, 30)
+    day = int(now // 86400)
+    if day % 30 == phase:
+        _write_cache(tmp_path, key, now - 86400)
+        assert odds_api.is_sport_due(key) is False
+
+
+def test_stagger_scadenza_per_intervallo_invariata(monkeypatch, tmp_path):
+    """A scadenza intervallo la lega e' dovuta comunque, qualunque sia la
+    fase (la regola di stagger NON allunga mai l'intervallo)."""
+    import odds_api
+    monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+    now = 1_800_000_000.0
+    monkeypatch.setattr(odds_api.time, "time", lambda: now)
+
+    key = "soccer_italy_serie_a"
+    interval = odds_api.interval_for_sport(key)
+    _write_cache(tmp_path, key, now - interval * 86400 - 1)
+    assert odds_api.is_sport_due(key) is True

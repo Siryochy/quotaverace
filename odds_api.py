@@ -211,16 +211,48 @@ def interval_for_sport(sport_key: str) -> int:
     return 7
 
 
+def _rotation_phase(sport_key: str, interval: int) -> int:
+    """Fase stabile (0..interval-1) della lega nel ciclo di rotazione.
+
+    Spalma le scadenze delle leghe con lo STESSO intervallo su giorni
+    diversi: senza, le leghe core (tutte a 3gg) si sincronizzano e vengono
+    interrogate tutte lo stesso giorno -> analisi e segnali nuovi solo 1
+    giorno su 3. Il costo mensile NON cambia (ogni lega resta sul suo
+    intervallo), ma i giri analisi diventano giornalieri.
+    """
+    if interval <= 1:
+        return 0
+    h = 0
+    for ch in sport_key:
+        h = (h * 31 + ord(ch)) % 1000003
+    return h % interval
+
+
 def is_sport_due(sport_key: str) -> bool:
     """True se la cache della lega e' scaduta rispetto al suo intervallo
-    (quindi oggi va interrogata l'API, costo 1 credito)."""
+    (quindi oggi va interrogata l'API, costo 1 credito).
+
+    Regola di stagger (10/09): oltre alla scadenza per intervallo, una
+    lega core (intervallo <= 7gg) diventa "dovuta" anche sul suo giorno
+    di fase (eta' cache >= 1 giorno), cosi' le leghe a 3gg non si
+    sincronizzano tutte nello stesso giorno. Le leghe a 30gg restano
+    dormienti puri (solo scadenza per intervallo): nessun costo extra.
+    """
     cache_file = CACHE_DIR / f"toa_{sport_key}.json"
     if not cache_file.exists():
         return True
     try:
         data = json.loads(cache_file.read_text())
-        ttl = interval_for_sport(sport_key) * 86400
-        return time.time() - data.get("ts", 0) >= ttl
+        interval = interval_for_sport(sport_key)
+        ttl = interval * 86400
+        age = time.time() - data.get("ts", 0)
+        if age >= ttl:
+            return True
+        if interval <= 7 and age >= 86400:
+            day = int(time.time() // 86400)
+            if day % interval == _rotation_phase(sport_key, interval):
+                return True
+        return False
     except Exception:
         return True
 

@@ -184,6 +184,17 @@ cd webapp && npm run build            # build Next.js
   e' "dovuta" (rotazione 3gg top leghe): dopo il 07/09 04:00 il prossimo
   giro con refresh e' il 10/09 04:00 — giorni senza analisi sono attesi
   per design.
+- **Stagger rotazione quote (10/09)**: con le leghe core tutte a 3gg e
+  cache sincronizzate, le analisi avvenivano solo 1 giorno su 3 (gli
+  altri giorni `due` era vuoto → 0 match analizzati → auto-bet senza
+  candidati freschi). `odds_api.is_sport_due` ora applica una FASE stabile
+  per lega (hash → 0..intervallo-1): sul "giorno di fase" (cache con eta'
+  >= 1gg) la lega core (intervallo <= 7gg) diventa dovuta anche prima
+  della scadenza, spalmando le scadenze su giorni diversi → analisi
+  GIORNALIERE a costo invariato (ogni lega resta sul suo intervallo; le
+  leghe 30gg restano dormienti pure, zero costi extra). Test dedicati in
+  test_odds_api.py (fasi distinte, scadenza su giorno di fase, 30gg non
+  anticipate, intervallo mai allungato).
 - **AUTO-BET LIVE minuto-per-minuto + staking prudente (09/09)** —
   configurazione operativa richiesta dal proprietario: 1) **Frequenza**:
   `auto_bet_job` passa da ogni 3h a **ogni 60s** (`run_repeating`
