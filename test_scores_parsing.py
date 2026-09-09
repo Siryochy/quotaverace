@@ -215,6 +215,30 @@ class TestPredictionOutcome1X2:
                                                  "Machida", "Kawasaki")
         assert outcome == "won"
 
+    def test_blackburn_rovers_sconfitta_non_over(self):
+        """REGRESSION 09/09 (pred #98): 'Blackburn Rovers' contiene la
+        sottostringa 'over' (in 'Rovers') ma e' un esito 1X2 di SQUADRA.
+        Prima del fix veniva saldato come Over 2.5 -> won con gol 1-2
+        (totale 3); ora e' la sconfitta della squadra di casa."""
+        outcome, profit = tracker._prediction_outcome(
+            "1X2", "Blackburn Rovers", 3.25, 1, 2,
+            "Blackburn Rovers", "Sheffield United")
+        assert outcome == "lost"
+        assert profit == -1.0
+        # vittoria casa -> won (quota-1)
+        outcome, profit = tracker._prediction_outcome(
+            "1X2", "Blackburn Rovers", 3.25, 2, 1,
+            "Blackburn Rovers", "Sheffield United")
+        assert outcome == "won"
+        assert profit == 2.25
+        # gli OU veri restano intatti
+        outcome, _ = tracker._prediction_outcome(
+            "OU", "Over 2.5", 1.95, 2, 1, "A", "B")
+        assert outcome == "won"
+        outcome, _ = tracker._prediction_outcome(
+            "OU", "Under 2.5", 1.95, 2, 1, "A", "B")
+        assert outcome == "lost"
+
 
 # --- 4b. Audit verdetti: match_results GIÀ corretto ma ledger specchiato ----
 

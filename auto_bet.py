@@ -438,6 +438,13 @@ def _today_value_picks() -> list[dict]:
     """Partite in programma nelle prossime 24h con segnale value/strong_value
     (esito canonico).
 
+    Fonte: ledger `predictions` (status per OGNI esito), NON `match_analysis`
+    che registra solo il best-per-EV: se il best e' rejected ma un altro
+    esito dello stesso match e' value (es. Derby: best=Draw rejected,
+    Derby/West Brom value) il match spariva dai candidati e il bot non
+    piazzava nulla (bug 09/09). Un pick per match: il candidato value con
+    EV piu' alto (comportamento storico di match_analysis.best).
+
     Finestra MOBILE (now .. now+24h) invece del giorno calendario: a fine
     giornata UTC un match con kickoff poco dopo la mezzanotte cadrebbe nel
     giorno dopo e verrebbe perso dal filtro per data. Include market_edge,
@@ -450,16 +457,22 @@ def _today_value_picks() -> list[dict]:
     start = now_utc.isoformat().replace("+00:00", "Z")
     end = (now_utc + timedelta(hours=24)).isoformat().replace("+00:00", "Z")
     rows = c.execute('''SELECT m.id, m.home_team, m.away_team, m.commence_time,
-                               m.league, a.best_esito, a.best_quota, a.market_edge,
-                               a.market_prob, a.best_ev, a.status
-                        FROM matches m JOIN match_analysis a ON m.id = a.match_id
+                               m.league, p.esito, p.quota, p.market_edge,
+                               p.market_prob, p.ev, p.status
+                        FROM matches m JOIN predictions p ON m.id = p.match_id
                         WHERE m.commence_time >= ? AND m.commence_time < ?
-                          AND a.status IN ('value','strong_value')
-                        ORDER BY a.best_ev DESC''', (start, end)).fetchall()
+                          AND p.status IN ('value','strong_value')
+                          AND p.mercato = '1X2'
+                          AND p.esito_finale IS NULL
+                        ORDER BY p.ev DESC''', (start, end)).fetchall()
     conn.close()
+    seen: set[str] = set()
     out = []
     for (mid, home, away, commence, league, esito, quota,
          m_edge, m_prob, ev, status) in rows:
+        if mid in seen:
+            continue  # un pick per match (best EV tra i value)
+        seen.add(mid)
         canon = _canonical_esito(esito, home, away)
         if not canon:
             continue

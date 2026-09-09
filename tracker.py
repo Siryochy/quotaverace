@@ -299,12 +299,19 @@ def _norm_team(name):
 
 
 def _esito_won(esito, sh, sa):
-    """True/False se l'esito e' vincente col risultato (sh, sa); None se non riconosciuto."""
+    """True/False se l'esito e' vincente col risultato (sh, sa); None se non riconosciuto.
+
+    ATTENZIONE (fix 09/09): il match OU deve scattare SOLO per esiti che
+    INIZIANO con 'over'/'under' come parola ('Over 2.5'), mai come
+    sottostringa: 'Blackburn Rovers' contiene 'over' dentro 'Rovers' e
+    veniva saldato come Over 2.5 (won con gol 1+2=3) invece che come
+    sconfitta della squadra (bug pred #98).
+    """
     el = str(esito or "").lower().strip()
-    if "over" in el:
-        return (sh + sa) >= 3
-    if "under" in el:
-        return (sh + sa) <= 2
+    first = (el.split() or [""])[0]
+    if first in ("over", "under"):
+        total = sh + sa
+        return total >= 3 if first == "over" else total <= 2
     if "btts" in el or "gol gol" in el:
         return sh > 0 and sa > 0
     if el == "1" or "casa" in el:
@@ -383,10 +390,12 @@ def _esito_possible(mercato, esito, sh, sa, home=None, away=None):
         if el in ("x", "draw", "pareggio"):
             return sh == sa
         return None
-    if "over" in el:
-        return (sh + sa) >= 3
-    if "under" in el:
-        return (sh + sa) <= 2
+    # match OU solo per esiti che INIZIANO con over/under (parola intera):
+    # 'Blackburn Rovers' contiene 'over' (in 'Rovers') ma e' un 1X2.
+    first = (el.split() or [""])[0]
+    if first in ("over", "under"):
+        total = sh + sa
+        return total >= 3 if first == "over" else total <= 2
     if "btts" in el or "gol gol" in el:
         return sh > 0 and sa > 0
     return None
@@ -598,10 +607,13 @@ def _prediction_outcome(mercato, esito, quota, sh, sa, home, away):
         if pnl == 0:
             return "push", 0.0
         return "lost", round(pnl, 4)
-    if "over" in el:
-        won = (sh + sa) >= 3
-    elif "under" in el:
-        won = (sh + sa) <= 2
+    # match OU SOLO se l'esito inizia con over/under (parola intera): con la
+    # sottostringa 'over' in 'blackburn rovers' la pred 1X2 veniva saldata
+    # come Over 2.5 (bug 09/09, bloccato dal sanity check su pred #98).
+    first = (el.split() or [""])[0]
+    if first in ("over", "under"):
+        total = sh + sa
+        won = total >= 3 if first == "over" else total <= 2
     elif "btts" in el or "gol gol" in el:
         won = (sh > 0 and sa > 0)
     elif el in ("draw", "pareggio", "x"):

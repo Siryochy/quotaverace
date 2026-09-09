@@ -33,6 +33,11 @@ def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
     tracker.save_analysis(mid, 1.7, 1.1, 0.52, 0.27, 0.21, 0.58, 0.08,
                           best_esito, quota, "Pinnacle", status,
                           market_prob=0.45, market_edge=0.07)
+    # Ledger previsioni: dal 09/09 _today_value_picks legge da QUI (status
+    # per ogni esito), non da match_analysis (solo best, che puo' essere
+    # rejected anche quando altri esiti dello stesso match sono value).
+    tracker.save_prediction(mid, "1X2", best_esito, quota, 0.52, 0.08,
+                            market_prob=0.45, market_edge=0.07, status=status)
 
 
 def test_sim_piazzata_con_quota_segnale(monkeypatch, temp_db):
@@ -76,6 +81,30 @@ def test_senza_segnali_nessuna_puntata(monkeypatch, temp_db):
     placed = auto_bet.run_today_bets(stake_eur=5.0)
     assert placed == []
     assert tracker.get_bets() == []
+
+
+def test_best_rejected_ma_esito_value_viene_piazzato(monkeypatch, temp_db):
+    """REGRESSION 09/09: match_analysis registra solo il best-per-EV (che
+    puo' essere rejected), ma il ledger `predictions` ha lo status di OGNI
+    esito. _today_value_picks legge da predictions: un match con best
+    rejected ma esito value DEVE generare una puntata (prima: 0 candidati
+    -> il bot non piazzava mai)."""
+    monkeypatch.setitem(sys.modules, "adaptive_staking", None)
+    start = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+    tracker.save_match("mX", "Serie A", "Osasuna", "Getafe", start)
+    # best-per-EV rejected (come Derby: Draw @3.55 EV 0.151 ma non sano)
+    tracker.save_analysis("mX", 1.7, 1.1, 0.52, 0.27, 0.21, 0.58, 0.151,
+                          "Draw", 3.55, "Pinnacle", "rejected",
+                          market_prob=0.30, market_edge=0.04)
+    # esito value registrato nel ledger previsioni
+    tracker.save_prediction("mX", "1X2", "Osasuna", 2.20, 0.52, 0.08,
+                            market_prob=0.45, market_edge=0.07, status="value")
+    picks = auto_bet._today_value_picks()
+    assert len(picks) == 1
+    assert picks[0]["match_id"] == "mX" and picks[0]["esito_key"] == "1"
+    placed = auto_bet.run_today_bets(stake_eur=5.0)
+    assert len(placed) == 1
+    assert placed[0]["esito_key"] == "1"
 
 
 def test_normalizes_stake_below_minimum(monkeypatch, temp_db):

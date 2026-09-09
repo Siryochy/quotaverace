@@ -46,6 +46,9 @@ def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
     tracker.save_analysis(mid, 1.7, 1.1, 0.52, 0.27, 0.21, 0.58, 0.08,
                           best_esito, quota, "Pinnacle", status,
                           market_prob=0.45, market_edge=0.07)
+    # Ledger previsioni: _today_value_picks legge da QUI dal 09/09.
+    tracker.save_prediction(mid, "1X2", best_esito, quota, 0.52, 0.08,
+                            market_prob=0.45, market_edge=0.07, status=status)
 
 
 class TestOverride:

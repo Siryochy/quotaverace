@@ -105,6 +105,19 @@ class TestEsitoPossible:
         assert tracker._esito_possible(None, "Under 2.5", 1, 1) is True
         assert tracker._esito_possible(None, "Under 2.5", 2, 1) is False
 
+    def test_blackburn_rovers_non_e_over(self):
+        """REGRESSION 09/09: 'Blackburn Rovers' contiene 'over' (in
+        'Rovers') ma e' un esito 1X2, NON un Over 2.5: con gol 1-2 la
+        squadra di casa ha PERSO (possibile=False come 'won' di casa)."""
+        assert tracker._esito_possible("1X2", "Blackburn Rovers", 1, 2,
+                                       "Blackburn Rovers",
+                                       "Sheffield United") is False
+        assert tracker._esito_possible("1X2", "Blackburn Rovers", 2, 1,
+                                       "Blackburn Rovers",
+                                       "Sheffield United") is True
+        # l'esito OU vero continua a funzionare
+        assert tracker._esito_possible("OU", "Over 2.5", 1, 2) is True
+
     def test_ah_non_verificabile(self):
         assert tracker._esito_possible("AH", "Home -0.75", 2, 1) is None
 
