@@ -80,10 +80,15 @@ EV_MIN = float(os.getenv("TENNIS_EV_MIN", "0.03"))
 # Bankroll VIRTUALE di paper trading (mai soldi veri) e staking Kelly
 # frazionato: lo stake di ogni ghost bet e' calcolato dal Kelly pieno
 # (max crescita logaritmica) ridotto del fattore TENNIS_KELLY_FRACTION e
-# mai oltre TENNIS_MAX_STAKE_PCT del bankroll virtuale.
+# mai oltre TENNIS_MAX_STAKE_PCT del bankroll virtuale NE' oltre il tetto
+# assoluto TENNIS_MAX_STAKE_ABS: contenimento delle puntate eccessive
+# (es. stake 50 paper su Alcaraz) finche' l'EV non si stabilizza sul
+# ledger — con i default attuali (0.10/2%/25) lo stake paper massimo e'
+# min(2% del bankroll, 25).
 PAPER_BANKROLL = float(os.getenv("TENNIS_PAPER_BANKROLL", "1000"))
-KELLY_FRACTION = float(os.getenv("TENNIS_KELLY_FRACTION", "0.25"))
-MAX_STAKE_PCT = float(os.getenv("TENNIS_MAX_STAKE_PCT", "0.05"))
+KELLY_FRACTION = float(os.getenv("TENNIS_KELLY_FRACTION", "0.10"))
+MAX_STAKE_PCT = float(os.getenv("TENNIS_MAX_STAKE_PCT", "0.02"))
+MAX_STAKE_ABS = float(os.getenv("TENNIS_MAX_STAKE_ABS", "25"))
 
 # Anti-garbage quote (come SUREBET_MAX_ODDS): i prezzi fuori range sono
 # mercati illiquidi/sporchi, non opportunita'.
@@ -719,11 +724,13 @@ def _open_ledger(db_path: Path) -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 def kelly_stake(prob: float, odds: float, bankroll: float,
                 fraction: Optional[float] = None,
-                max_pct: Optional[float] = None) -> float:
+                max_pct: Optional[float] = None,
+                max_abs: Optional[float] = None) -> float:
     """Stake Kelly frazionario (ghost bet): f = (p*o - 1)/(o - 1).
 
     Ritorna 0 se l'EV non e' positivo (mai stake negativi). Cap al
-    max_pct del bankroll virtuale. Rounding a 2 decimali.
+    max_pct del bankroll virtuale e al tetto assoluto max_abs (default
+    rispettivamente MAX_STAKE_PCT e MAX_STAKE_ABS). Rounding a 2 decimali.
     """
     if not (0.0 < prob < 1.0) or odds <= 1.0 or bankroll <= 0:
         return 0.0
@@ -734,7 +741,8 @@ def kelly_stake(prob: float, odds: float, bankroll: float,
     stake = bankroll * full * (fraction if fraction is not None
                                else KELLY_FRACTION)
     cap = bankroll * (max_pct if max_pct is not None else MAX_STAKE_PCT)
-    return round(min(max(0.0, stake), cap), 2)
+    abs_cap = max_abs if max_abs is not None else MAX_STAKE_ABS
+    return round(min(max(0.0, stake), cap, abs_cap), 2)
 
 
 def devig(p_a: float, p_b: float) -> float:

@@ -314,16 +314,23 @@ class TestKelly:
     def test_ev_positivo(self):
         stake = ts.kelly_stake(0.6, 2.0, bankroll=1000)
         assert stake > 0
-        # full kelly = (0.6*2-1)/(2-1) = 0.2 -> *0.25 = 5% di 1000 = 50
-        assert stake == pytest.approx(50.0, abs=0.01)
+        # full kelly = (0.6*2-1)/(2-1) = 0.2 -> *0.10 = 2% di 1000 = 20
+        assert stake == pytest.approx(20.0, abs=0.01)
 
     def test_ev_negativo_zero(self):
         assert ts.kelly_stake(0.4, 2.0, bankroll=1000) == 0.0
 
     def test_cap_max_pct(self):
         stake = ts.kelly_stake(0.95, 1.2, bankroll=1000)
-        # full = (1.14-1)/0.2 = 0.7 -> 700; cap al 5% = 50
-        assert stake == pytest.approx(50.0, abs=0.01)
+        # full = (1.14-1)/0.2 = 0.7 -> 70; cap al 2% del bankroll = 20
+        # (il tetto assoluto 25 non e' il vincolo)
+        assert stake == pytest.approx(20.0, abs=0.01)
+
+    def test_cap_max_abs(self):
+        # cap percentuale alto (10% di 500 = 50) ma tetto assoluto 25
+        # -> prevale il tetto assoluto: niente stake eccessivi
+        stake = ts.kelly_stake(0.95, 1.2, bankroll=500, max_pct=0.10)
+        assert stake == pytest.approx(25.0, abs=0.01)
 
     def test_input_invalidi(self):
         assert ts.kelly_stake(0.0, 2.0, 1000) == 0.0

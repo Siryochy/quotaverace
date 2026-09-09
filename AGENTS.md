@@ -188,6 +188,27 @@ cd webapp && npm run build            # build Next.js
   con riepilogo per superficie (`🏟️ Per superficie`). Test dedicati
   (decay 30/60/365gg, isolamento superfici, blend, migrazione ledger,
   retrocompatibilita', rilevamento tornei).
+- **Contenimento staking tennis sandbox (09/09)**: ridotti i default di
+  staking per evitare puntate eccessive (osservata una stake paper 50 su
+  Alcaraz) finche' l'EV non si stabilizza: `TENNIS_KELLY_FRACTION`
+  0.25 -> **0.10**, `TENNIS_MAX_STAKE_PCT` 0.05 -> **0.02** (2% del
+  bankroll virtuale) e NUOVO tetto assoluto `TENNIS_MAX_STAKE_ABS`
+  (default **25**) in `kelly_stake` (min tra Kelly frazionato, cap %% e
+  cap assoluto). Con bankroll 1000 lo stake paper massimo passa da 50 a
+  20. Nessun override env su Railway: i nuovi default valgono dal deploy.
+  Test aggiornati (TestKelly: 20 con nuovi default + tetto assoluto 25
+  che prevale sul cap %% alto).
+- **Retraining ensemble ML su produzione (09/09)**: eseguito a mano sul
+  container Railway (`python3 ml_ensemble.py --retrain`) dopo drift
+  rilevato dal monitor (Brier rolling 0.2432 vs baseline 0.2073, LogLoss
+  0.6789 vs 0.6049, 49 previsioni chiuse): Brier di training 0.2403 ->
+  **0.0354**, acc 0.982, n=57 righe, XGBoost, `ensemble_weight` 0.51,
+  salvato su /app/data/ensemble_model.json. Calibrazione isotonica
+  ancora `skipped` (57 < 60 MIN_CALIB_SAMPLES: si attiva da sola col
+  ledger che cresce). NB: il Brier di training NON e' il Brier rolling
+  del drift monitor (quello misura le ultime 30 chiusure fatte dal
+  modello VECCHIO e resta valido finche' non si chiudono nuove
+  previsioni col modello nuovo).
 - **Collaudo LIVE calcio verificato (09/09)** — su Railway il sistema era
   GIÀ in esecuzione live effettiva: env `AUTO_BET_MODE=live` +
   `EXECUTION_PROVIDER=sxbet` (credenziali SX presenti), file kill-switch
