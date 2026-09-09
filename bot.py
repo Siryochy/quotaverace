@@ -1714,12 +1714,15 @@ def main() -> None:
         # alla guardia dei 15 min pre-kickoff. Sicuro: UNIQUE (match_id,
         # esito) impedisce doppioni e il cap esposizione TOTALE resta
         # giornaliero (sottrae l'esposizione gia' piazzata nei giri
-        # precedenti, vedi auto_bet._today_placed_stake). max_instances=1
-        # evita esecuzioni sovrapposte se un giro supera i 60s.
+        # precedenti, vedi auto_bet._today_placed_stake). job_kwargs
+        # max_instances=1 evita esecuzioni sovrapposte se un giro supera i
+        # 60s (in PTB max_instances e' un argomento del Job, non di
+        # JobQueue.run_repeating: va passato via job_kwargs).
         # NB: first=60 (delay dopo il boot) e NON first=time(...): con
         # l'orario gia' passato il primo giro slitterebbe al giorno dopo.
         job_queue.run_repeating(auto_bet_job, interval=60,
-                                first=60, max_instances=1)
+                                first=60,
+                                job_kwargs={"max_instances": 1})
         job_queue.run_daily(backup_data_job, time=time(hour=3, minute=30))
         job_queue.run_once(backup_data_job, when=10)  # snapshot di base all'avvio
         # Retrain ensemble ML dal ledger live (05:45 UTC + a ogni boot): se
