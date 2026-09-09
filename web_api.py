@@ -664,12 +664,16 @@ def _calibration_json(params=None):
         }
 
         cal_info = tm.get("calibration") or {}
+        # calibration_report() (fit riuscito) NON mette "status": il
+        # dict ha solo pre/post brier/ece — lo deriviamo dal calibratore.
+        cal_fitted = bool(ens.calibrator is not None
+                          and ens.calibrator.fitted_)
         cal = {
-            "status": cal_info.get("status", "skipped"),
+            "status": ("fitted" if cal_fitted
+                       else cal_info.get("status", "skipped")),
             "min_required": cal_info.get("min_required"),
             "n_cal": cal_info.get("n"),
-            "fitted": bool(ens.calibrator is not None
-                            and ens.calibrator.fitted_),
+            "fitted": cal_fitted,
             "pre_brier": cal_info.get("pre_brier"),
             "post_brier": cal_info.get("post_brier"),
             "pre_ece": cal_info.get("pre_ece"),
