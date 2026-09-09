@@ -164,6 +164,26 @@ cd webapp && npm run build            # build Next.js
 
 ## Stato attuale (aggiornato al 09/09/2026)
 
+- **FIX regressione 71b2c4c (09/09, deployato c299abe)**: il cleanup OU2.5
+  aveva rimosso il parametro posizionale `p_over` dalla chiamata a
+  `tracker.save_analysis` in `fixture_engine._analyze_match` senza
+  aggiornare la firma → ogni analisi partita crashava con TypeError
+  ("missing 1 required positional argument: 'status'"), abortendo l'intera
+  lega nel giro calendario (il prossimo giro 10/09 04:00 UTC sarebbe
+  fallito). Ripristinato `p_over=None` (colonna legacy `prob_over` del
+  ledger). Stessa regressione su bot.py: `format_segnale_pronto` non ha
+  piu' `quota_over` ma `cmd_test_segnale`/`cmd_segnale` passavano ancora 7
+  argomenti posizionali → `/segnale` e `/test_segnale` rispondevano
+  "Errore nel calcolo. Riprova.". Ora i chiamanti usano keyword e
+  `cmd_segnale` ha perso il lookup legacy delle quote Over (bookmaker
+  sempre "Modello" con caveat). Ripristinata la costante `OU_ENABLED =
+  False` in fixture_engine (documentata qui sotto, tripwire
+  `test_ou_exclusion`); test aggiornati (test_bot: `test_escluso_over_under`
+  asserisce l'ASSENZA di OU). Verificato: suite completa 831 test verdi,
+  smoke test su produzione OK. NB: le analisi girano SOLO quando una lega
+  e' "dovuta" (rotazione 3gg top leghe): dopo il 07/09 04:00 il prossimo
+  giro con refresh e' il 10/09 04:00 — giorni senza analisi sono attesi
+  per design.
 - **AUTO-BET LIVE minuto-per-minuto + staking prudente (09/09)** —
   configurazione operativa richiesta dal proprietario: 1) **Frequenza**:
   `auto_bet_job` passa da ogni 3h a **ogni 60s** (`run_repeating`
