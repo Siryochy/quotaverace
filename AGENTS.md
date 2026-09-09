@@ -228,6 +228,14 @@ cd webapp && npm run build            # build Next.js
   webapp ha solo next/react) con fallback demo se il backend non e'
   raggiungibile. Test dedicati in test_web_api.py (TestCalibration +
   rotte registrate).
+  **Grafico temporale del drift (09/09)**: nuova
+  `drift_monitor.brier_history()` — serie walk-forward del Brier/LogLoss
+  rolling calcolata a ogni chiusura (finestra 30, min 15), downsampling
+  che mantiene SEMPRE l'ultimo punto (il valore corrente); esposta in
+  /api/calibration come `drift_history` e disegnata nella pagina con
+  baseline e soglia drift (1.30x baseline). Test: TestBrierHistory in
+  test_drift_monitor.py. NB: `n` nei punti e' la dimensione della
+  finestra rolling (cap 30), non il conteggio cumulato.
 - **Retraining ensemble ML su produzione (09/09)**: eseguito a mano sul
   container Railway (`python3 ml_ensemble.py --retrain`) dopo drift
   rilevato dal monitor (Brier rolling 0.2432 vs baseline 0.2073, LogLoss
