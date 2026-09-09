@@ -6,17 +6,19 @@ from market_calib import (
     blend_probability,
     favourite_longshot_adjust,
     market_edge as _market_edge,
-    MARKET_EDGE_MIN,  # ri-esportata: soglia +3pp sul mercato (ricerca 2026)
+    MARKET_EDGE_MIN,  # ri-esportata: soglia +2pp sul mercato (09/09)
+    MARKET_EDGE_MODERATE,
+    MARKET_EDGE_STRONG,
 )
 
 
 # === FILTRI DI SANITÀ ===
-EV_MIN = 0.03          # +3% minimo
-EV_MAX = 0.15          # +15% massimo (oltre = anomalia)
-ODDS_MIN = 1.50        # quota minima
-ODDS_MAX = 5.00        # quota massima
-KELLY_FRACTION = 0.25  # 1/4 Kelly
-MAX_STAKE_PCT = 0.03   # cap 3% del bankroll
+EV_MIN = 0.02            # +2% minimo (09/09: abbassato per più segnali)
+EV_MAX = 0.15            # +15% massimo (oltre = anomalia)
+ODDS_MIN = 1.50          # quota minima
+ODDS_MAX = 5.00          # quota massima
+KELLY_FRACTION = 0.25    # 1/4 Kelly
+MAX_STAKE_PCT = 0.03     # cap 3% del bankroll
 
 # PATCH CALIBRAZIONE bucket bassi (06/09): il gap residuo della config
 # 1X2-only e' sui pareggi/trasferte (bucket 0.3-0.4 = 54% del volume con
@@ -141,12 +143,29 @@ def adjusted_probability(model_prob: float, market_prob: float | None,
     return p
 
 
+def get_signal_tier(ev: float, market_edge: float | None = None) -> str:
+    """Classifica un segnale in tier basato su EV e edge vs mercato.
+
+    Tier: strong_value (>= +5pp), value (>= +2pp), moderate (>= 0pp).
+    """
+    if market_edge is not None:
+        if market_edge >= MARKET_EDGE_STRONG:
+            return "strong_value"
+        elif market_edge >= MARKET_EDGE_MODERATE:
+            return "value"
+    if ev >= 0.05:
+        return "strong_value"
+    elif ev >= EV_MIN:
+        return "value"
+    return "moderate"
+
+
 def filter_value_bets(odds_data: List[Dict[str, Any]], ev_threshold: float = EV_MIN) -> List[Dict[str, Any]]:
     """Filtra le quote con EV positivo, applicando filtri di sanità Pro.
 
-    Backward-compatible: se la riga non ha "market_prob" (nessun riferimento
-    di mercato) mantiene il comportamento storico; se la ha, aggiunge i campi
-    market_edge / beats_market e il vincolo "beating the market" alla sanita'.
+    Classifica ogni segnale in tier (strong_value/value/moderate).
+    Backward-compatible: se la riga non ha "market_prob" mantiene il
+    comportamento storico.
     """
     value_signals = []
     for odd in odds_data:
@@ -166,6 +185,7 @@ def filter_value_bets(odds_data: List[Dict[str, Any]], ev_threshold: float = EV_
         odd["sane"] = sane
         odd["sane_reason"] = reason
         if sane and ev >= ev_threshold:
+            odd["tier"] = get_signal_tier(ev, odd.get("market_edge"))
             value_signals.append(odd)
     return sorted(value_signals, key=lambda x: x["ev"], reverse=True)
 

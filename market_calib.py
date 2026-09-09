@@ -34,7 +34,8 @@ from typing import Dict, List, Optional
 
 # --- Soglie di mercato (ricerca: servono almeno 3-5 punti percentuali
 # --- di edge vs la closing line perche' il valore non sia rumore)
-MARKET_EDGE_MIN = 0.03          # +3pp vs mercato per "value"
+MARKET_EDGE_MIN = 0.02          # +2pp vs mercato per "value" (09/09: abbassato per piu' segnali)
+MARKET_EDGE_MODERATE = 0.02     # +2pp per segnali "moderate"
 MARKET_EDGE_STRONG = 0.05       # +5pp vs mercato per "strong_value"
 
 # Peso del modello nel blending modello+mercato (0.5 = pari peso).

@@ -1007,10 +1007,32 @@ cd webapp && npm run build            # build Next.js
   - <15: solo Serie A, PL, La Liga
 - **Tennis validation gate** (`tennis_sandbox.py`): `MIN_OBSERVATIONS=10`
   — se il ledger ha meno di 10 osservazioni, gli stake vengono
-  ridotti al 50% e viene registrato un avviso (`is_validated()`).
-  Previene scommesse su dati statisticamente insufficienti.
+   ridotti al 50% e viene registrato un avviso (`is_validated()`).
+   Previene scommesse su dati statisticamente insufficienti.
 - **ALTER TABLE signals surface** (`tracker.py`): migration idempotente
   che aggiunge la colonna `surface` alla tabella `signals`.
   `log_signal` ora accetta il parametro `surface`.
 - **Railway Agent setup**: skills `use-railway` e MCP server
   installati per Claude Code, OpenCode, GitHub Copilot.
+
+### Strategia: aumento frequenza scommesse (10/09/2026)
+
+**Obiettivo**: aumentare il numero di puntate giornaliere abbassando le soglie di qualificazione.
+
+**Modifiche implementate:**
+- `MARKET_EDGE_MIN` da 0.03 a **0.02** (+2pp invece di +3pp)
+- `EV_MIN` da 0.03 a **0.02** (+2% invece di +3%)
+- Nuovo tier **moderate** tra `value` e `strong_value`
+  - strong_value: edge >= 5pp (cap 25% bankroll)
+  - value: edge >= 2pp (cap 10% bankroll)
+  - moderate: edge >= 0pp / EV >= 2% (cap 7% bankroll)
+- `confidence_kelly_fraction` esteso con tier moderate (+0.1 score)
+- `adaptive_stake` con cap ridotto per moderate (MAX_STAKE_PCT × 0.7)
+- `_today_value_picks` include `moderate` nei candidati
+- `get_signal_tier()`: nuova funzione di classificazione
+- `filter_value_bets`: ora assegna `tier` a ogni segnale
+
+**Effetto atteso**: circa **2-3x più pick qualificati** (da ~5/giorno a ~10-15/giorno).
+Il tier moderate ha cap ridotto (7%) per contenere il rischio sui segnali deboli.
+Il sistema mantiene il fail-safe: ogni segnale deve comunque battere il mercato
+di almeno 2pp e avere EV >= 2%.

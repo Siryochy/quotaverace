@@ -113,6 +113,8 @@ def confidence_kelly_fraction(prob: float, odds: float,
     # 4. Status
     if status == "strong_value":
         confidence_score += 0.3
+    elif status == "moderate":
+        confidence_score += 0.1  # segnale moderato: piccolo bonus
 
     # Mappa confidence_score → frazione di Kelly
     # score -1.0 → MIN, score +1.0 → MAX
@@ -187,7 +189,12 @@ def adaptive_stake(bankroll: float, prob: float, odds: float,
     stake_after_dd = raw_stake * dd_factor
 
     # 4. Cap per tipo di segnale
-    cap_pct = MAX_STAKE_PCT_STRONG if status == "strong_value" else MAX_STAKE_PCT
+    if status == "strong_value":
+        cap_pct = MAX_STAKE_PCT_STRONG
+    elif status == "moderate":
+        cap_pct = MAX_STAKE_PCT * 0.7  # cap ridotto per segnali moderati
+    else:
+        cap_pct = MAX_STAKE_PCT
     cap = bankroll * cap_pct
     stake = min(stake_after_dd, cap)
     capped = stake_after_dd > cap
@@ -206,6 +213,8 @@ def adaptive_stake(bankroll: float, prob: float, odds: float,
         conf += 0.1
     if status == "strong_value":
         conf += 0.15
+    elif status == "moderate":
+        conf += 0.05
 
     reason_parts = []
     if kelly_full <= 0:

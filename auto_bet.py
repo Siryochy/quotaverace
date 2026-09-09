@@ -461,7 +461,7 @@ def _today_value_picks() -> list[dict]:
                                p.market_prob, p.ev, p.status
                         FROM matches m JOIN predictions p ON m.id = p.match_id
                         WHERE m.commence_time >= ? AND m.commence_time < ?
-                          AND p.status IN ('value','strong_value')
+                          AND p.status IN ('value','strong_value','moderate')
                           AND p.mercato = '1X2'
                           AND p.esito_finale IS NULL
                         ORDER BY p.ev DESC''', (start, end)).fetchall()
