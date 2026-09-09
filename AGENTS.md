@@ -195,6 +195,32 @@ cd webapp && npm run build            # build Next.js
   leghe 30gg restano dormienti pure, zero costi extra). Test dedicati in
   test_odds_api.py (fasi distinte, scadenza su giorno di fase, 30gg non
   anticipate, intervallo mai allungato).
+- **PRIMA SCOMMESSA LIVE REALE piazzata (09/09 18:36 UTC) + fix dei 3
+  bug che bloccavano auto_bet (commit `ad50810`)** — il giro automatico
+  (ogni 60s) ha piazzato la bet #18: **Charlton Athletic (1) @ 3.3333,
+  1 USDC, FULLY_FILLED, bet_id reale SX** (prezzo MIGLIORE del segnale
+  3.25: floor EV rispettato), wallet 47.16 → 46.16 USDC. Prima del fix
+  il bot loggava "0 puntate" da giorni NONOSTANTE segnali value attivi
+  nel ledger. Bug fixati:
+  1) **`_today_value_picks` leggeva `match_analysis`** (solo best-per-EV,
+     che può essere `rejected`) invece del ledger `predictions` (status
+     per OGNI esito): Derby (best=Draw EV 0.151 rejected, ma Derby/West
+     Brom value nel ledger) → 0 candidati → il bot non piazzava mai.
+     Ora JOIN su `predictions` (mercato='1X2', status value/strong_value,
+     esito_finale IS NULL), un pick per match = best EV tra i value.
+  2) **`"over" in el` sul settlement** (`_prediction_outcome`/
+     `_esito_won`/`_esito_possible`): 'Blackburn **Rovers**' contiene
+     'over' come sottostringa → la pred 1X2 #98 veniva saldata come
+     Over 2.5 (won coi gol 1-2) e bloccata dal sanity check per sempre.
+     Ora il match OU scatta SOLO se l'esito inizia con 'over'/'under'
+     come parola intera. Pred #98 risaldata: Blackburn `lost` -1.0.
+  3) **TEAM_MAP senza alias** per Derby County/West Bromwich Albion/
+     Cardiff City/FSV Mainz 05/Swansea City/Atalanta BC/AS Roma →
+     `_canonical_esito` non risolveva quegli esiti. Alias aggiunti.
+  Verificato live: `_prediction_outcome` Blackburn='lost'; `_today_value_
+  picks` ora trova i candidati (Charlton, West Brom). Prossimi candidati
+  in finestra: Union Berlin (11/09) e i 20+ segnali del 12/09 — il bot
+  li piazzerà automaticamente appena entrano nella finestra mobile 24h.
 - **AUTO-BET LIVE minuto-per-minuto + staking prudente (09/09)** —
   configurazione operativa richiesta dal proprietario: 1) **Frequenza**:
   `auto_bet_job` passa da ogni 3h a **ogni 60s** (`run_repeating`
