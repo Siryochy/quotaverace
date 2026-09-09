@@ -262,6 +262,28 @@ cd webapp && npm run build            # build Next.js
   Le puntate sim piu' recenti nel DB restano quelle del 05/09 (Over 2.5,
   pre-esclusione OU). Prossimo giro ogni 3h (es. 19:42 UTC) dopo le
   analisi 18:00 UTC.
+- **TRANSIZIONE LIVE UFFICIALE micro-staking calcio 1X2 (09/09)** —
+  direttive operative confermate con verifica sul container:
+  1) LIVE: env `AUTO_BET_MODE=live` + `EXECUTION_PROVIDER=sxbet` +
+     credenziali SX, kill-switch ASSENTE, `kill_switch_status()` =
+     {effective: live, provider_ready: true}, `ExecutionEngine()` =
+     `SxBetProvider` REALE (mai DryRun), **saldo 47.16 USDC** disponibili
+     (proxy 0x97aE…44002, exposure 0), staking `AUTO_BET_STAKE_MODE=
+     adaptive` (env flat RIMOSSA, `EXECUTION_DRY_RUN` assente). Zero
+     ordini reali finora: NON per configurazione (tutto live) ma perche'
+     nessun segnale +EV ha superato i gate dal passaggio a live — il
+     primo ordine arrivera' al primo segnale value che passa il filtro
+     (es. candidato odierno Watford–Stoke 1 @2.32 EV +15%). Le perdite
+     reali del ledger (mode='live') alimenteranno da subito retraining
+     (05:45 UTC + boot) e ML: feedback strutturale, niente conteggi fissi
+     di giocate/giorno (solo segnali +EV + risk cap 40%/30%).
+  2) TENNIS sandbox: limiti ridotti CONFERMATI nel container — env
+     `TENNIS_KELLY_FRACTION`/`TENNIS_MAX_STAKE_PCT`/`TENNIS_MAX_STAKE_ABS`
+     ASSENTI → valgono i default 0.10 / 0.02 / 25 (stake paper max 20 su
+     bankroll 1000); `TENNIS_SANDBOX_ENABLED=1`.
+  3) MONITORAGGIO invariato: calibrazione isotonica fitted (Brier OOF
+     0.2322→0.1479, ECE→0), drift watchdog ogni 6h, retrain 05:45 UTC +
+     boot, `GET /api/drift` + `/api/calibration` attivi.
 
 - **Sandbox tennis + scansione calcio H24/7 (08/09)** — nuovo modulo
   `tennis_sandbox.py` (pattern surebet_engine: indipendente da tracker/bot,
