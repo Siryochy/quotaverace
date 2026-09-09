@@ -101,10 +101,12 @@ class TestFormatSegnalePronto:
         assert "X:" in text
         assert "2:" in text
 
-    def test_contiene_over_under(self):
+    def test_escluso_over_under(self):
+        """OU2.5 escluso definitivamente (06/09): il formatter segnale non
+        deve MAI proporre Over/Under, coerentemente con test_ou_exclusion."""
         text = format_segnale_pronto("Roma", "Empoli", 2.28, 0.63)
-        assert "Over 2.5" in text
-        assert "Under 2.5" in text
+        assert "Over 2.5" not in text
+        assert "Under 2.5" not in text
 
     def test_contiene_header_segnale(self):
         text = format_segnale_pronto("Roma", "Empoli", 2.28, 0.63)

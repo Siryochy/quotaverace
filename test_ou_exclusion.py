@@ -76,6 +76,7 @@ class TestOuEsclusoDefinitivo:
                                          if mm["key"] != "totals"]
         monkeypatch.setattr("fixture_engine.expected_goals", lambda h, a: (1.9, 1.1))
         monkeypatch.setattr("fixture_engine.save_clv", lambda *a, **k: None)
+        monkeypatch.setattr("fixture_engine.save_analysis", lambda *a, **k: None)
         monkeypatch.setattr("fixture_engine.get_analysis_for_match", lambda m: None)
         preds = []
         monkeypatch.setattr("fixture_engine.save_prediction",

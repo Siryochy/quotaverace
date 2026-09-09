@@ -250,7 +250,8 @@ def format_segnale_pronto(home, away, lam_h, lam_a, bookmaker="Generico", bankro
 
 async def cmd_test_segnale(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    text = format_segnale_pronto("Inter", "Napoli", 1.85, 1.12, 2.10, "Bet365", get_bankroll(chat_id))
+    text = format_segnale_pronto("Inter", "Napoli", 1.85, 1.12,
+                                 bookmaker="Bet365", bankroll=get_bankroll(chat_id))
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def cmd_segnale(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -270,26 +271,18 @@ async def cmd_segnale(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     try:
         lam_h, lam_a = expected_goals(home, away)
-        odds_data = get_odds_data()
-        event_name = None
-        for league in ALL_LEAGUES:
-            if home in ALL_LEAGUES[league]: event_name = f"{league} – {home} vs {away}"; break
-        best_over = None
-        if event_name:
-            try:
-                best_over = max((o for o in odds_data if event_name.lower() in o.get("evento","").lower()
-                                 and "over" in o.get("esito","").lower()), key=lambda x: x.get("quota_decimale",0), default=None)
-            except: pass
-        quota, bookmaker = (best_over["quota_decimale"], best_over["bookmaker"]) if best_over else (2.10, "Modello")
-        notes = []
-        if bookmaker == "Modello":
-            notes.append("Quota di MODELLO, non verificata su un bookmaker reale: "
-                         "controlla il miglior prezzo disponibile prima di puntare.")
+        # OU2.5 escluso definitivamente (06/09): niente piu' lookup di quote
+        # Over — il segnale usa le quote di modello 1X2 interne e il bookmaker
+        # e' sempre "Modello" (con nota di caveat).
+        bookmaker = "Modello"
+        notes = ["Quota di MODELLO, non verificata su un bookmaker reale: "
+                 "controlla il miglior prezzo disponibile prima di puntare."]
         fresh = get_odds_freshness_note()
         if fresh:
             notes.append(fresh)
-        text = format_segnale_pronto(home, away, lam_h, lam_a, quota, bookmaker,
-                                     get_bankroll(update.effective_chat.id),
+        text = format_segnale_pronto(home, away, lam_h, lam_a,
+                                     bookmaker=bookmaker,
+                                     bankroll=get_bankroll(update.effective_chat.id),
                                      extra_note=" ".join(notes) if notes else None)
         await update.message.reply_text(text, parse_mode="Markdown")
     except Exception as e:

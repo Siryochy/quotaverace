@@ -32,6 +32,8 @@ def _get_ensemble():
 # (-6.8% ROI su 924 bet, sotto -7.3%): il mercato non viene piu' elaborato,
 # nessuna escape hatch via env (decisione definitiva del proprietario).
 # Il sistema elabora SOLO segnali 1X2 (h2h).
+# Costante di blocco (tripwire test_ou_exclusion): nessun flag riconfigurabile.
+OU_ENABLED = False
 
 TEAM_MAP = {
     "inter milan": "Inter", "ac milan": "Milan", "man united": "Manchester United",
@@ -442,7 +444,10 @@ def _analyze_match(match_id, match, home_db, away_db, league):
                     f"{steam_info['move_pct']:+.1f}% in "
                     f"{steam_info['span_minutes']:.0f} min")
 
-    save_analysis(match_id, lam_h, lam_a, p1, px, p2, best["ev"], best["esito"],
+    # p_over=None: colonna legacy prob_over del ledger (OU escluso, 06/09);
+    # senza l'argomento posizionale la firma di tracker.save_analysis
+    # slitta e ogni analisi crasha con TypeError (regressione 71b2c4c).
+    save_analysis(match_id, lam_h, lam_a, p1, px, p2, None, best["ev"], best["esito"],
                   best["quota"], best["bookmaker"], status,
                   market_prob=best["market_prob"], market_edge=best["market_edge"])
 
