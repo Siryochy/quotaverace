@@ -7,6 +7,7 @@ const LINKS = [
   { href: '/calendario', label: 'Calendario' },
   { href: '/value', label: 'Value' },
   { href: '/movimenti', label: 'Movimenti' },
+  { href: '/calibrazione', label: '🎯 Calibrazione' },
   { href: '/schedina', label: 'Schedina' },
   { href: '/calcola', label: 'Calcola' },
   { href: '/backtest', label: 'Backtest' },

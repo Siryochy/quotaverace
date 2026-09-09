@@ -216,6 +216,18 @@ cd webapp && npm run build            # build Next.js
   il campanello, non l'azione. Nuovo endpoint **GET /api/drift** in
   web_api.py per la verifica REMOTA del drift (stesso check del job,
   comodo per cron/uptime esterni).
+- **Dashboard calibrazione (09/09, webapp + API)**: nuovo endpoint
+  **GET /api/calibration** in web_api.py che aggrega l'istantanea
+  completa per la nuova pagina webapp `/calibrazione` (link nel menu):
+  stato drift (stesso check di /api/drift), metriche training dell'
+  ensemble (modello, acc, Brier, peso ML), stato calibrazione isotonica
+  (pre/post Brier/ECE, n_cal, curva score->prob calibrata dal
+  calibratore) e reliability diagram calcolato sulle previsioni chiuse
+  (confidenza vs frequenza empirica, bin a larghezza uguale come l'ECE).
+  La pagina disegna le curve in SVG puro (zero dipendenze chart: la
+  webapp ha solo next/react) con fallback demo se il backend non e'
+  raggiungibile. Test dedicati in test_web_api.py (TestCalibration +
+  rotte registrate).
 - **Retraining ensemble ML su produzione (09/09)**: eseguito a mano sul
   container Railway (`python3 ml_ensemble.py --retrain`) dopo drift
   rilevato dal monitor (Brier rolling 0.2432 vs baseline 0.2073, LogLoss

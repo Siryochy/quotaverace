@@ -97,11 +97,32 @@ class TestSchedina:
         assert s["bankroll"] == pytest.approx(100.0)
 
 
+class TestCalibration:
+    """Dashboard calibrazione: sezioni coerenti anche con DB vuoto."""
+
+    def test_endpoint_risponde_con_sezioni(self):
+        d = web_api._calibration_json()
+        assert "model" in d and "calibration" in d
+        assert "reliability" in d and "drift" in d
+        assert isinstance(d["reliability"], list)
+
+    def test_modello_e_calibratore_seriali(self):
+        d = web_api._calibration_json()
+        # modello: trained puo' essere False (nessun file) ma la chiave esiste
+        assert "trained" in d["model"]
+        assert "fitted" in d["calibration"]
+        assert isinstance(d["calibration"]["curve"], list)
+
+    def test_drift_integrato(self):
+        d = web_api._calibration_json()
+        assert d["drift"]["status"] in ("ok", "drift", "insufficient")
+
+
 class TestRoutes:
     def test_rotte_esistono(self):
         for route in ("/api/health", "/api/dashboard", "/api/storico", "/api/value",
                       "/api/schedina", "/api/scan", "/api/test_notify",
-                      "/api/training"):
+                      "/api/training", "/api/drift", "/api/calibration"):
             assert route in web_api.ROUTES
         assert "/api/test_notify" in web_api.POST_ROUTES
         assert "/api/auto_bet" in web_api.POST_ROUTES

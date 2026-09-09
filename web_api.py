@@ -9,6 +9,8 @@ Endpoint:
   GET /api/value             -> migliori value bet filtrate
   GET /api/schedina          -> schedina del giorno (picks + multipla)
   GET /api/scan              -> rimosso (04/09): Betfair non è più in architettura
+  GET /api/drift             -> stato drift modello (verifica remota)
+  GET /api/calibration       -> dashboard calibrazione (Brier/ECE, curve)
 
 Uso su Railway: dopo aver deployato il bot, crea un secondo servizio con
   startCommand = "python web_api.py"
@@ -626,6 +628,113 @@ def _drift_json(params=None):
         return {"status": "error", "error": str(e)}
 
 
+def _calibration_json(params=None):
+    """GET /api/calibration — dashboard calibrazione del modello.
+
+    Istantanea completa per la pagina webapp /calibrazione:
+      - stato drift (stesso check di /api/drift: Brier/LogLoss rolling
+        vs baseline sulle previsioni chiuse);
+      - metriche di training dell'ensemble (modello, acc, Brier, peso);
+      - stato calibrazione isotonica (pre/post Brier/ECE, curva
+        score->prob calibrata dal calibratore fit sul volume);
+      - reliability diagram calcolato sulle previsioni chiuse (confidenza
+        vs frequenza empirica, 10 bin) per la curva di calibrazione.
+    """
+    import datetime as _dt
+    import numpy as np
+    from ml_ensemble import get_ensemble, MODEL_PATH
+    from drift_monitor import check_drift, load_settled_predictions
+    from probability_calibration import ECE_BINS
+
+    try:
+        ens = get_ensemble()
+        tm = ens.train_metrics or {}
+
+        model = {
+            "trained": bool(ens.trained),
+            "model_type": ens.model_type if ens.trained else None,
+            "ensemble_weight": (round(ens.ensemble_weight, 3)
+                                if ens.trained else None),
+            "train_metrics": {
+                "accuracy": tm.get("accuracy"),
+                "brier_score": tm.get("brier_score"),
+                "n_samples": tm.get("n_samples"),
+                "model": tm.get("model_type"),
+            },
+        }
+
+        cal_info = tm.get("calibration") or {}
+        cal = {
+            "status": cal_info.get("status", "skipped"),
+            "min_required": cal_info.get("min_required"),
+            "n_cal": cal_info.get("n"),
+            "fitted": bool(ens.calibrator is not None
+                            and ens.calibrator.fitted_),
+            "pre_brier": cal_info.get("pre_brier"),
+            "post_brier": cal_info.get("post_brier"),
+            "pre_ece": cal_info.get("pre_ece"),
+            "post_ece": cal_info.get("post_ece"),
+            "brier_improvement": cal_info.get("brier_improvement"),
+            "curve": [],
+        }
+        if ens.calibrator is not None and ens.calibrator.fitted_:
+            xs = np.asarray(ens.calibrator.x_)
+            ys = np.asarray(ens.calibrator.y_)
+            cal["curve"] = [
+                {"score": round(float(x), 4),
+                 "calibrated": round(float(y), 4)}
+                for x, y in zip(xs, ys)
+            ]
+
+        # Reliability diagram dalle previsioni chiuse (confidenza vs
+        # frequenza empirica, bin a larghezza uguale come l'ECE).
+        preds = load_settled_predictions()
+        reliability = []
+        if preds:
+            probs = np.array([p["prob"] for p in preds], dtype=float)
+            ys_arr = np.array([p["y"] for p in preds], dtype=float)
+            edges = np.linspace(0.0, 1.0, ECE_BINS + 1)
+            for lo, hi in zip(edges[:-1], edges[1:]):
+                if hi < 1.0:
+                    mask = (probs >= lo) & (probs < hi)
+                else:
+                    mask = (probs >= lo) & (probs <= hi)
+                m = int(mask.sum())
+                if m == 0:
+                    continue
+                reliability.append({
+                    "bin": f"{lo:.1f}-{hi:.1f}",
+                    "n": m,
+                    "confidence": round(float(probs[mask].mean()), 4),
+                    "accuracy": round(float(ys_arr[mask].mean()), 4),
+                })
+
+        out = {
+            "generated_at": (_dt.datetime.now(_dt.timezone.utc)
+                             .isoformat().replace("+00:00", "Z")),
+            "model": model,
+            "calibration": cal,
+            "reliability": reliability,
+            "drift": check_drift(),
+        }
+        try:
+            if MODEL_PATH.exists():
+                st = MODEL_PATH.stat()
+                out["model_file"] = {
+                    "exists": True,
+                    "updated_at": (_dt.datetime.fromtimestamp(
+                        st.st_mtime, _dt.timezone.utc)
+                        .isoformat().replace("+00:00", "Z")),
+                    "size_bytes": st.st_size,
+                }
+        except Exception:
+            pass
+        return out
+    except Exception as e:
+        logger.exception("errore /api/calibration")
+        return {"error": str(e)}
+
+
 def _scan_json(params=None):
     """Endpoint rimosso (04/09): lo scanner di catalogo Exchange non esiste
     più. Dal 06/09 l'esecuzione passa dall'aggregatore via
@@ -657,6 +766,7 @@ ROUTES = {
     "/api/training": _training_json,
     "/api/market_signals": _market_signals_json,
     "/api/drift": _drift_json,
+    "/api/calibration": _calibration_json,
 }
 
 POST_ROUTES = {
