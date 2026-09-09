@@ -497,6 +497,23 @@ cd webapp && npm run build            # build Next.js
   crediti/giorno** → copre settembre. ⚠️ **RIPRISTINARE il 1° ottobre**:
   tabella SPORTS_INTERVAL_DAYS completa (git log) + `SUREBET_SPORTS`
   `"baseball_mlb"` → `"basketball_nba,baseball_mlb"` (reset crediti + stagione NBA).
+- **Audit crediti 09/09 + fix H2H-only (dimezza il costo quote)**: timeline
+  remaining reale: 09/01 13:05 → 488 | 09/03 → 372 | 09/04 → 310 |
+  09/07 04:00 → 191 | 09/09 16:47 → **127** (~25/giorno tra 07/09 e 09/09,
+  sopraelevato dal doppio addebito `markets=h2h,totals`). **Causa radice
+  trovata**: the-odds-api addebita `markets × regions` per chiamata, quindi
+  `h2h,totals` su 1 regione = **2 crediti** a fetch. Dal 06/09 il mercato
+  totals (OU) è ESCLUSO dalle selezioni → richiederlo era puro spreco.
+  Fix (commit `d1f1c18`): `markets="h2h"` only (tripwire
+  `test_ou_exclusion.test_odds_request_solo_h2h`), deploy verificato sul
+  container (`8887b972`). Giro serale 09/09 18:00 UTC verificato: 5 partite
+  analizzate (La Liga + Serie B) con cache esistenti (stagger fase + TTL
+  non scaduto → **0 crediti** consumati dal giro) e settlement da cache
+  scores fresche; remaining invariato a 127. Prossimo fetch reale con
+  h2h-only alla prima scadenza TTL (10/09 04:00 UTC → 1 credito/lega
+  invece di 2). Budget residuo ~127 per ~21 giorni ≈ **6/giorno sostenibili**:
+  con settlement 2-3 + value 3,5 (h2h-only) il consumo rientra, ma la
+  rotazione va tenuta d'occhio (niente aggiunte fino al reset del 1° ottobre).
 - **Calibrazione isotonica dell'ensemble** (04/09, `probability_calibration.py`):
   PAVA numpy-only (zero deps, coerente col progetto) che mappa gli score
   grezzi di XGBoost/LR sulle frequenze EMPIRICHE del dataset storico.
