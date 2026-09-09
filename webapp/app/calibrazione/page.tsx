@@ -40,16 +40,27 @@ const DEMO = {
     logloss_rolling: 0.6789, logloss_baseline: 0.6049,
     recommendation: '🔄 RETRAINING consigliato: il modello sta perdendo calibrazione sulle ultime previsioni.',
   },
+  drift_history: [
+    { ts: '2026-08-28T20:00:00Z', n: 15, brier_rolling: 0.1712, logloss_rolling: 0.5211 },
+    { ts: '2026-08-30T20:00:00Z', n: 18, brier_rolling: 0.1804, logloss_rolling: 0.5402 },
+    { ts: '2026-09-01T20:00:00Z', n: 22, brier_rolling: 0.1760, logloss_rolling: 0.5319 },
+    { ts: '2026-09-03T20:00:00Z', n: 27, brier_rolling: 0.1947, logloss_rolling: 0.5810 },
+    { ts: '2026-09-05T20:00:00Z', n: 33, brier_rolling: 0.2188, logloss_rolling: 0.6325 },
+    { ts: '2026-09-07T20:00:00Z', n: 41, brier_rolling: 0.2356, logloss_rolling: 0.6641 },
+    { ts: '2026-09-09T12:00:00Z', n: 49, brier_rolling: 0.2432, logloss_rolling: 0.6789 },
+  ],
   model_file: { exists: true, updated_at: '2026-09-09T05:45:00Z' },
 }
 
 type CurvePoint = { score: number; calibrated: number }
+type HistPoint = { ts: string; n: number; brier_rolling: number; logloss_rolling?: number }
 type RelPoint = { bin: string; n: number; confidence: number; accuracy: number }
 type CalData = {
   model: { trained: boolean; model_type?: string; ensemble_weight?: number; train_metrics?: { accuracy?: number; brier_score?: number; n_samples?: number; model?: string } }
   calibration: { status?: string; fitted?: boolean; n_cal?: number; min_required?: number; pre_brier?: number; post_brier?: number; pre_ece?: number; post_ece?: number; brier_improvement?: number; curve?: CurvePoint[] }
   reliability?: RelPoint[]
   drift?: { status?: string; n?: number; brier_rolling?: number; brier_baseline?: number; logloss_rolling?: number; logloss_baseline?: number; recommendation?: string }
+  drift_history?: HistPoint[]
   model_file?: { exists?: boolean; updated_at?: string }
   error?: string
 }
@@ -99,6 +110,62 @@ function CalChart({ points, line, title, subtitle }: {
   )
 }
 
+function TimeChart({ history, baseline, threshold }: {
+  history: HistPoint[]
+  baseline?: number
+  threshold?: number
+}) {
+  const W = 700, H = 280, PAD = 44
+  const vals = history.map(h => Number(h.brier_rolling))
+  const yMax = Math.max(0.20, ...vals, baseline || 0, threshold || 0) * 1.15
+  const x = (i: number) => {
+    if (history.length <= 1) return W / 2
+    return PAD + (i / (history.length - 1)) * (W - 2 * PAD)
+  }
+  const y = (v: number) => H - PAD - (Math.max(0, v) / yMax) * (H - 2 * PAD)
+  const path = history.map((h, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)},${y(Number(h.brier_rolling)).toFixed(1)}`).join(' ')
+  const ticks = [0, 1, 2, 3, 4].map(i => yMax * i / 4)
+  const labelIdx = history.length <= 1 ? [0] : [0, Math.floor((history.length - 1) / 2), history.length - 1]
+  const fmtDate = (ts: string) => {
+    const d = new Date(ts)
+    return isNaN(d.getTime()) ? ts : d.toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' })
+  }
+  return (
+    <div>
+      <h3 className="font-bold text-lg mb-1">📈 Andamento drift nel tempo</h3>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto bg-gray-900 rounded-lg">
+        {ticks.map(t => (
+          <g key={t}>
+            <line x1={PAD} y1={y(t)} x2={W - PAD} y2={y(t)} stroke="#374151" strokeWidth={1} />
+            <text x={PAD - 6} y={y(t) + 3} textAnchor="end" fill="#9ca3af" fontSize="10">{t.toFixed(2)}</text>
+          </g>
+        ))}
+        {baseline != null && (
+          <line x1={PAD} y1={y(baseline)} x2={W - PAD} y2={y(baseline)} stroke="#34d399" strokeWidth={1.5} strokeDasharray="6 4" />
+        )}
+        {threshold != null && (
+          <line x1={PAD} y1={y(threshold)} x2={W - PAD} y2={y(threshold)} stroke="#ef4444" strokeWidth={1.5} strokeDasharray="2 4" />
+        )}
+        {history.length > 1 && (
+          <path d={path} fill="none" stroke="#f59e0b" strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
+        )}
+        {history.map((h, i) => (
+          <circle key={i} cx={x(i)} cy={y(Number(h.brier_rolling))} r={3.5} fill="#fbbf24" stroke="#111827" strokeWidth={1} />
+        ))}
+        {labelIdx.map(i => (
+          <text key={i} x={x(i)} y={H - PAD + 16} textAnchor="middle" fill="#9ca3af" fontSize="10">{fmtDate(history[i].ts)}</text>
+        ))}
+        <text x={12} y={H / 2} textAnchor="middle" fill="#6b7280" fontSize="11" transform={`rotate(-90 12 ${H / 2})`}>Brier rolling</text>
+      </svg>
+      <div className="flex gap-5 text-xs text-gray-400 mt-2 flex-wrap">
+        <span><span className="inline-block w-4 h-0.5 bg-amber-500 align-middle mr-1" />Brier rolling (finestra {history[0]?.n ?? '—'}→{history[history.length - 1]?.n ?? '—'} chiusure)</span>
+        {baseline != null && <span><span className="inline-block w-4 h-0.5 bg-emerald-400 align-middle mr-1" />baseline {baseline.toFixed(4)}</span>}
+        {threshold != null && <span><span className="inline-block w-4 h-0.5 bg-red-500 align-middle mr-1" />soglia drift {threshold.toFixed(4)} (1.30× baseline)</span>}
+      </div>
+    </div>
+  )
+}
+
 function StatusBadge({ status }: { status: string }) {
   const meta = status === 'ok'
     ? { label: '✅ OK', cls: 'bg-emerald-900 text-emerald-200' }
@@ -136,7 +203,10 @@ export default function Calibrazione() {
   const d = data.drift || {}
   const rel = (data.reliability || []).map(r => ({ x: r.confidence, y: r.accuracy }))
   const curve = (c.curve || []).map(p => ({ x: p.score, y: p.calibrated }))
+  const history = data.drift_history || []
   const driftStatus = d.status || 'unknown'
+  const baseline = d.brier_baseline != null ? Number(d.brier_baseline) : undefined
+  const threshold = baseline != null ? baseline * 1.30 : undefined
   const brierGap = d.brier_rolling != null && d.brier_baseline != null
     ? Number(d.brier_rolling) - Number(d.brier_baseline) : null
 
@@ -176,6 +246,18 @@ export default function Calibrazione() {
           <div className="text-xs text-gray-500">acc {pct(m.train_metrics?.accuracy)} · {m.train_metrics?.model || m.model_type || '—'}</div>
         </div>
       </div>
+
+      {/* Andamento drift nel tempo */}
+      {history.length > 0 ? (
+        <div className="p-4 rounded-xl bg-gray-800 mb-6">
+          <TimeChart history={history} baseline={baseline} threshold={threshold} />
+        </div>
+      ) : (
+        <div className="p-4 rounded-xl bg-gray-800 mb-6 text-gray-400 text-sm">
+          ⏳ Serie temporale drift non disponibile: servono almeno {d.n ?? '—'} previsioni chiuse (ne servono 15).
+          I punti compariranno man mano che il ledger cresce.
+        </div>
+      )}
 
       {/* Calibrazione isotonica */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">

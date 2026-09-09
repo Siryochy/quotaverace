@@ -117,6 +117,13 @@ class TestCalibration:
         d = web_api._calibration_json()
         assert d["drift"]["status"] in ("ok", "drift", "insufficient")
 
+    def test_drift_history_presente(self):
+        """La dashboard espone la serie temporale walk-forward del Brier
+        rolling per il grafico di tendenza."""
+        d = web_api._calibration_json()
+        assert "drift_history" in d
+        assert isinstance(d["drift_history"], list)
+
 
 class TestRoutes:
     def test_rotte_esistono(self):

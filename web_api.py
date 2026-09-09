@@ -638,12 +638,15 @@ def _calibration_json(params=None):
       - stato calibrazione isotonica (pre/post Brier/ECE, curva
         score->prob calibrata dal calibratore fit sul volume);
       - reliability diagram calcolato sulle previsioni chiuse (confidenza
-        vs frequenza empirica, 10 bin) per la curva di calibrazione.
+        vs frequenza empirica, 10 bin) per la curva di calibrazione;
+      - drift_history: serie temporale walk-forward del Brier rolling
+        (drift_monitor.brier_history) per il grafico di tendenza.
     """
     import datetime as _dt
     import numpy as np
     from ml_ensemble import get_ensemble, MODEL_PATH
-    from drift_monitor import check_drift, load_settled_predictions
+    from drift_monitor import (check_drift, load_settled_predictions,
+                               brier_history)
     from probability_calibration import ECE_BINS
 
     try:
@@ -720,6 +723,7 @@ def _calibration_json(params=None):
             "calibration": cal,
             "reliability": reliability,
             "drift": check_drift(),
+            "drift_history": brier_history(),
         }
         try:
             if MODEL_PATH.exists():

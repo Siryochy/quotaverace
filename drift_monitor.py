@@ -54,7 +54,8 @@ def load_settled_predictions(limit: int = 500) -> List[Dict]:
     conn = _get_conn()
     try:
         rows = conn.execute(
-            "SELECT prob, esito_finale, created_at, mercato, esito "
+            "SELECT prob, esito_finale, created_at, mercato, esito, "
+            "COALESCE(settled_at, created_at) AS ts "
             "FROM predictions "
             "WHERE esito_finale IS NOT NULL AND prob IS NOT NULL "
             "ORDER BY COALESCE(settled_at, created_at) DESC LIMIT ?",
@@ -62,12 +63,13 @@ def load_settled_predictions(limit: int = 500) -> List[Dict]:
     finally:
         conn.close()
     out = []
-    for prob, ef, created, mercato, esito in rows:
+    for prob, ef, created, mercato, esito, ts in rows:
         y = _esito_bin(ef)
         if y is None or prob is None or float(prob) <= 0.0:
             continue
         p = min(max(float(prob), 1e-6), 1.0 - 1e-6)
         out.append({"prob": p, "y": y, "created_at": created,
+                    "ts": ts or created,
                     "mercato": mercato, "esito": esito})
     return out
 
@@ -141,6 +143,48 @@ def check_drift(window: int = ROLLING_WINDOW,
                            if degraded else
                            "Modello calibrato: nessun drift rilevato."),
     }
+
+
+def brier_history(window: int = ROLLING_WINDOW,
+                  min_rolling: int = MIN_ROLLING,
+                  max_points: int = 120) -> List[Dict]:
+    """Serie temporale walk-forward del Brier/LogLoss rolling.
+
+    Per ogni previsione chiusa (dalla piu' vecchia) calcola il Brier
+    rolling sulle ultime `window` chiusure: il risultato e' una curva
+    del drift nel tempo (come se il check_drift girasse a ogni nuova
+    chiusura) utile per la dashboard di calibrazione. Ritorna al piu'
+    `max_points` punti (downsampling lineare per serie lunghe).
+    """
+    preds = load_settled_predictions()
+    if not preds:
+        return []
+    # load_settled_predictions ritorna DESC: inverti per il tempo.
+    preds = list(reversed(preds))
+    points = []
+    for i in range(len(preds)):
+        roll = preds[max(0, i - window + 1):i + 1]
+        if len(roll) < min_rolling:
+            continue
+        b = _brier(roll)
+        if b is None:
+            continue
+        ll = _logloss(roll)
+        last = roll[-1]
+        points.append({
+            "ts": last.get("ts") or last.get("created_at") or "",
+            "n": len(roll),
+            "brier_rolling": round(b, 4),
+            "logloss_rolling": round(ll, 4) if ll is not None else None,
+        })
+    if len(points) > max_points:
+        step = len(points) / max_points
+        # Mantieni sempre l'ULTIMO punto: e' il valore corrente del drift
+        # (la coda della serie deve chiudere sul Brier rolling attuale).
+        idxs = [int(i * step) for i in range(max_points - 1)]
+        idxs.append(len(points) - 1)
+        points = [points[i] for i in idxs]
+    return points
 
 
 def format_drift_report(d: Dict) -> List[str]:
