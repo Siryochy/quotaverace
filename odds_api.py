@@ -277,8 +277,12 @@ def _get_odds(sport, frm, to):
     key = _env("ODDS_API_KEY")
     if not key: return [], 999
     try:
+        # SOLO h2h: the-odds-api addebita markets x regions per chiamata
+        # (h2h,totals = 2 crediti). Il mercato totals (Over/Under) e'
+        # escluso dalle selezioni dal 06/09: richiederlo e' puro spreco
+        # (tripwire test_ou_exclusion.test_odds_request_solo_h2h).
         r = requests.get(f"https://api.the-odds-api.com/v4/sports/{sport}/odds", params={
-            "apiKey": key, "regions": "eu", "markets": "h2h,totals",
+            "apiKey": key, "regions": "eu", "markets": "h2h",
             "oddsFormat": "decimal", "commenceTimeFrom": frm, "commenceTimeTo": to,
         }, timeout=30)
         remaining = int(r.headers.get("x-requests-remaining", 999))

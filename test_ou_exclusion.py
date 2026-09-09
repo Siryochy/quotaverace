@@ -12,6 +12,8 @@ Comportamento atteso:
   - OU_ENABLED e' costante False (nessun flag riconfigurabile).
 """
 
+from pathlib import Path
+
 import pytest
 
 import fixture_engine
@@ -35,6 +37,17 @@ def _match():
             ]},
         ],
     }
+
+
+def test_odds_request_solo_h2h():
+    """La richiesta quote the-odds-api NON deve mai includere il mercato
+    totals: the-odds-api addebita markets x regions (h2h,totals = 2
+    crediti/call) e l'OU e' escluso dalle selezioni dal 06/09."""
+    src = Path(fixture_engine.__file__).parent / "odds_api.py"
+    body = src.read_text()
+    assert '"markets": "h2h"' in body
+    assert '"markets": "h2h,totals"' not in body
+    assert 'markets=totals' not in body
 
 
 def _run(monkeypatch):
