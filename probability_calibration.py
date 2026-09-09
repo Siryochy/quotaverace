@@ -20,7 +20,10 @@ Uso (integrato in ml_ensemble.EnsemblePredictor):
 
 Soglia minima di campioni per un calibratore affidabile (fit su un set
 di calibrazione separato, MAI sugli stessi dati di training):
-  MIN_CALIB_SAMPLES = 60  (30% ~ 18 punti di calibrazione con split 70/30)
+  MIN_CALIB_SAMPLES = 50  (30% ~ 15 punti di calibrazione con split 70/30)
+  Abbassata da 60 il 09/09: il ledger live era a 57 chiusure, sotto la
+  vecchia soglia la calibrazione restava disattivata nonostante i dati
+  sufficienti per un primo fit (n_cal = max(15, 30% di 57) = 17).
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 # --- Config ---
-MIN_CALIB_SAMPLES = 60   # campioni totali minimi per attivare la calibrazione
+MIN_CALIB_SAMPLES = 50   # campioni totali minimi per attivare la calibrazione
 CALIB_FRACTION = 0.30    # frazione di campioni riservata al calibratore
 CALIB_RANDOM_STATE = 42  # seed fisso: split riproducibile
 ECE_BINS = 10            # bin per l'Expected Calibration Error

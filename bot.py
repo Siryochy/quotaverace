@@ -1382,6 +1382,53 @@ async def _send_report_to_recipients(context, text: str):
             pass
 
 
+# Stato dell'ultimo alert drift (processo): evita di ripetere l'allerta
+# ogni 6h finche' il drift persiste. Alerta solo al passaggio a "drift"
+# oppure se l'ultimo alert risale a >24h (ricordo periodico).
+_DRIFT_LAST_ALERT: dict = {}
+
+
+async def drift_watchdog_job(context: ContextTypes.DEFAULT_TYPE = None):
+    """Monitoraggio CONTINUO del drift in background (ogni 6h).
+
+    A differenza della sezione 🧠 del report giornaliero (che mostra lo
+    stato una volta al giorno), questo job controlla la calibrazione
+    rolling dell'ensemble con cadenza regolare e allerta admin + iscritti
+    SOLO quando il drift e' rilevato (status="drift"), con anti-spam:
+    niente messaggi quando lo stato e' ok/insufficiente, e al massimo un
+    alert ogni 24h se il drift persiste. Il retraining vero e' gia'
+    schedulato (05:45 UTC + boot): l'alert serve da campanello, non da
+    azione. Lo stato viene comunque loggato a ogni giro.
+    """
+    try:
+        from drift_monitor import check_drift, format_drift_report
+        d = check_drift()
+        status = d.get("status")
+        logger.info("drift_watchdog: status=%s n=%s (rolling %s vs baseline %s)",
+                    status, d.get("n"), d.get("brier_rolling"),
+                    d.get("brier_baseline"))
+        if status != "drift":
+            _DRIFT_LAST_ALERT["status"] = status
+            return
+        now = datetime.now().timestamp()
+        last_ts = _DRIFT_LAST_ALERT.get("ts", 0.0)
+        if _DRIFT_LAST_ALERT.get("status") == "drift" and now - last_ts < 86400:
+            return  # gia' segnalato nelle ultime 24h
+        _DRIFT_LAST_ALERT.update(status="drift", ts=now)
+        lines = ["🔔 *DRIFT MODELLO — monitoraggio automatico*"]
+        lines.extend(format_drift_report(d))
+        lines.append("Il retraining e' schedulato (05:45 UTC + boot); "
+                     "se non si e' ancora risolto, verificare i prossimi "
+                     "settlement.")
+        text = "\n".join(lines)
+        if context is not None:
+            await _send_report_to_recipients(context, text)
+        else:
+            logger.warning("drift_watchdog: %s", " | ".join(lines))
+    except Exception as e:
+        logger.warning("drift_watchdog fallito: %s", e)
+
+
 async def end_of_day_report_job(context: ContextTypes.DEFAULT_TYPE):
     """Riepilogo quando FINISCE L'ULTIMA PARTITA della giornata.
 
@@ -1661,11 +1708,23 @@ def main() -> None:
                                 first=600)
         job_queue.run_daily(backup_data_job, time=time(hour=3, minute=30))
         job_queue.run_once(backup_data_job, when=10)  # snapshot di base all'avvio
-        # Retrain ensemble ML dal ledger live (05:45 UTC): se il dataset e'
-        # maturo crea/aggiorna data/ensemble_model.json sul volume (senza
-        # questo job il ML resterebbe spento in produzione: nessun file, 
-        # nessuna predizione ensemble). Poi azzera la cache del singleton.
+        # Retrain ensemble ML dal ledger live (05:45 UTC + a ogni boot): se
+        # il dataset e' maturo crea/aggiorna data/ensemble_model.json sul
+        # volume (senza questo job il ML resterebbe spento in produzione:
+        # nessun file, nessuna predizione ensemble). Poi azzera la cache del
+        # singleton. Il run_once al boot (09/09) fa si' che la calibrazione
+        # isotonica (soglia MIN_CALIB_SAMPLES abbassata a 50) si attivi
+        # SUBITO al primo deploy che la introduce, senza attendere le 05:45
+        # del giorno dopo; il retrain e' idempotente e non tocca l'API.
         job_queue.run_daily(retrain_ensemble_job, time=time(hour=5, minute=45))
+        job_queue.run_once(retrain_ensemble_job, when=20)  # retrain al boot
+        # Drift watchdog (09/09): monitoraggio CONTINUO in background della
+        # calibrazione rolling ogni 6h. Alerta admin+iscritti SOLO quando il
+        # drift e' rilevato (anti-spam: massimo 1 alert/24h a drift
+        # persistente), stato sempre loggato. Il retraining e' gia' coperto
+        # dal job 05:45 UTC + boot: questo job e' il campanello automatico.
+        job_queue.run_repeating(drift_watchdog_job, interval=6 * 3600,
+                                first=1800)
         # Sandbox tennis (paper trading, 08/09): SOLO simulazione su SX Bet
         # (mercati Moneyline type 52, letture pubbliche gratuite). Gated da
         # TENNIS_SANDBOX_ENABLED=1: scan+settle ogni 6h (primo giro 15 min
@@ -1691,7 +1750,8 @@ def main() -> None:
                     "08:30 sync / auto-bet 24/7 (ogni 3h da 08:50) / 14:00 pomeriggio / "
                     "14:00-23:50 RLM alert (5') / 17:00 free / 20:00 sera / "
                     "21:30 risultati / 21:00-23:50 EOD (ogni 15') / "
-                    "watchdog settlement (ogni 4h) / 05:45 retrain ensemble ML")
+                    "watchdog settlement (ogni 4h) / retrain ensemble ML "
+                    "(05:45 + boot) / drift watchdog (ogni 6h)")
     else: logger.warning("JobQueue non disponibile")
     logger.info("QuotaVerace Pro avviato.")
     application.run_polling()

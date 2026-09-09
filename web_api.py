@@ -611,6 +611,21 @@ def _market_signals_json(params=None):
     return {"summary": summarize_market_signals(signals), "signals": signals}
 
 
+def _drift_json(params=None):
+    """GET /api/drift — stato del drift modello (verifica REMOTA).
+
+    Stesso check del drift watchdog di bot.py: Brier/LogLoss rolling vs
+    baseline sulle previsioni chiuse. Utile per il monitoraggio continuo
+    esterno (cron/uptime) senza dover entrare nel container.
+    """
+    try:
+        from drift_monitor import check_drift
+        return check_drift()
+    except Exception as e:
+        logger.exception("errore /api/drift")
+        return {"status": "error", "error": str(e)}
+
+
 def _scan_json(params=None):
     """Endpoint rimosso (04/09): lo scanner di catalogo Exchange non esiste
     più. Dal 06/09 l'esecuzione passa dall'aggregatore via
@@ -641,6 +656,7 @@ ROUTES = {
     "/api/test_notify": _test_notify,
     "/api/training": _training_json,
     "/api/market_signals": _market_signals_json,
+    "/api/drift": _drift_json,
 }
 
 POST_ROUTES = {

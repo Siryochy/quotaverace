@@ -198,6 +198,24 @@ cd webapp && npm run build            # build Next.js
   20. Nessun override env su Railway: i nuovi default valgono dal deploy.
   Test aggiornati (TestKelly: 20 con nuovi default + tetto assoluto 25
   che prevale sul cap %% alto).
+- **Calibrazione isotonica ATTIVA in produzione (09/09)**: soglia
+  `MIN_CALIB_SAMPLES` abbassata da 60 a **50** in
+  `probability_calibration.py` (il ledger era fermo a 57 chiusure: con
+  30% OOF servivano comunque 17 punti di calibrazione). In piu' il retrain
+  ora gira anche al BOOT (`run_once(retrain_ensemble_job, when=20)` in
+  bot.py): al primo deploy che introduce la nuova soglia la calibrazione
+  si attiva SUBITO, senza attendere le 05:45 UTC del giorno dopo (il job
+  e' idempotente, zero API). Verificato in simulazione: 57 campioni ->
+  calibrator fitted (n_cal=17, pre_brier 0.3163 -> post_brier 0.2412,
+  ECE 0.3152 -> 0.0).
+- **Drift watchdog in background (09/09, bot.py)**: nuovo job
+  `drift_watchdog_job` ogni 6h (first=1800) che controlla la calibrazione
+  rolling e allerta admin+iscritti SOLO su status="drift" (anti-spam:
+  transizione a drift oppure 1 alert/24h se persiste; stato sempre
+  loggato). Il retraining e' gia' coperto da 05:45 UTC + boot: l'alert e'
+  il campanello, non l'azione. Nuovo endpoint **GET /api/drift** in
+  web_api.py per la verifica REMOTA del drift (stesso check del job,
+  comodo per cron/uptime esterni).
 - **Retraining ensemble ML su produzione (09/09)**: eseguito a mano sul
   container Railway (`python3 ml_ensemble.py --retrain`) dopo drift
   rilevato dal monitor (Brier rolling 0.2432 vs baseline 0.2073, LogLoss
