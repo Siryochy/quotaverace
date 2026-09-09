@@ -11,13 +11,60 @@ CACHE_DIR = DATA_DIR
 ODDS_TTL = 86400          # cache 24h = 1 chiamata/giorno per lega
 MIN_REMAINING = 20        # stop sotto 20 crediti
 
-# Una partita iniziata da piu' di STALE_INPLAY_HOURS ma ancora senza punteggio
-# finale indica una cache scritta MENTRE la partita era in corso: servirne i
-# risultati blocca il settlement delle puntate per un'intera giornata (bug
-# 01/09: le 3 bet delle 16:40 non sono state mai saldate perche' results_job
-# delle 19:30 UTC rileggeva la cache del pomeriggio con completed=False).
-STALE_INPLAY_HOURS = 3.0
+# Soglie proattive per rotazione intelligente
+CREDIT_LOW = 50           # sotto 50: disattiva leghe non-core (intervallo >7gg)
+CREDIT_CRITICAL = 30      # sotto 30: solo top 6 leghe core
+CREDIT_EMERGENCY = 15     # sotto 15: solo Serie A, PL, La Liga
 
+CORE_LEAGUES_HIGH = {"soccer_italy_serie_a", "soccer_england_pl", "soccer_spain_la_liga",
+                      "soccer_germany_bundesliga", "soccer_france_ligue_one",
+                      "soccer_efl_champ"}
+CORE_LEAGUES_EMERGENCY = {"soccer_italy_serie_a", "soccer_england_pl", "soccer_spain_la_liga"}
+
+def get_remaining() -> int:
+    """Legge i crediti minimi residui da tutte le cache toa_*.json."""
+    remaining = []
+    if CACHE_DIR.exists():
+        for f in CACHE_DIR.glob("toa_*.json"):
+            try:
+                d = json.loads(f.read_text())
+                if d.get("remaining") is not None:
+                    remaining.append(int(d["remaining"]))
+            except Exception:
+                continue
+    return min(remaining) if remaining else None
+
+def should_query_sport(sport_key: str) -> bool:
+    """Decide se una sport key deve essere interrogata in base ai crediti.
+
+    Logica proattiva (09/09):
+    - remaining >= 50: tutto attivo (default)
+    - remaining < 50: solo leghe core (intervallo <= 7gg)
+    - remaining < 30: solo top 6 leghe core
+    - remaining < 15: solo Serie A, PL, La Liga
+
+    Previene il rischio di esaurire i crediti a fine mese
+    senza preavviso.
+    """
+    rem = get_remaining()
+    if rem is None:
+        return True  # no cache data: assume ok
+    if rem >= CREDIT_LOW:
+        return True
+    # Sotto soglia: verifica la lega
+    for lg, key in SPORTS_MAP.items():
+        if key == sport_key:
+            interval = SPORTS_INTERVAL_DAYS.get(lg, 7)
+            if rem >= CREDIT_CRITICAL:
+                # Solo leghe con intervallo <= 7gg (core)
+                return interval <= 7
+            elif rem >= CREDIT_EMERGENCY:
+                # Solo top 6 leghe core
+                return lg in CORE_LEAGUES_HIGH
+            else:
+                # Emergenza: solo top 3
+                return lg in CORE_LEAGUES_EMERGENCY
+    return True  # sport non mappato: allow (probabilmente tennis subet)
 
 def _cache_is_stale_for_settlement(payload: list) -> bool:
     """True se la cache punteggi non e' attendibile per il settlement.
@@ -268,14 +315,16 @@ def _get_odds(sport, frm, to):
     if cache_file.exists():
         try:
             data = json.loads(cache_file.read_text())
-            # TTL effettivo = intervallo di rotazione della lega (giorni*24h):
-            # le leghe core ogni giorno, le altre meno spesso (risparmio crediti).
             ttl = interval_for_sport(sport) * 86400
             if time.time() - data.get("ts", 0) < ttl:
                 return data.get("payload", []), data.get("remaining", 999)
         except Exception: pass
     key = _env("ODDS_API_KEY")
     if not key: return [], 999
+    # Filtro proattivo crediti: non interrogare se sotto soglia
+    if not should_query_sport(sport):
+        logger.info(f"Crediti bassi: {sport} saltata per risparmio crediti")
+        return [], 0
     try:
         # SOLO h2h: the-odds-api addebita markets x regions per chiamata
         # (h2h,totals = 2 crediti). Il mercato totals (Over/Under) e'

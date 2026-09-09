@@ -244,9 +244,74 @@ def _health_json(params=None):
     # Refertazione e quote/CLV: the-odds-api (API-Football solo storico
     # ratings 2022-2024). Dal 06/09 l'ESECUZIONE passa dall'aggregatore
     # (execution_engine.py, BetInAsia BLACK/MollyBet). Il flag
-    # betfair_enabled resta per compatibilità col frontend, sempre False.
+    # betfair_enabled resta per compatibilita col frontend, sempre False.
     return {"status": "ok", "api_football_key": bool(os.getenv("API_FOOTBALL_KEY")),
             "quota": creds, "betfair_enabled": False, "betfair": None}
+
+
+def _credits_json(params=None):
+    """Crediti the-odds-api dettaglio per sport + stato complessivo.
+
+    GET /api/credits
+    Ritorna: remaining_min, sport_count, dettagli per sport con cache
+    attiva, giorni al reset, stato operativita.
+    """
+    from odds_api import get_quota, SPORTS_MAP
+    import json, os, glob
+    from pathlib import Path
+    from datetime import datetime, timedelta
+
+    remaining = []
+    sport_details = []
+    if DATA_DIR.exists():
+        for f in sorted(DATA_DIR.glob("toa_*.json")):
+            try:
+                d = json.loads(f.read_text())
+                if d.get("remaining") is not None:
+                    remaining.append(int(d["remaining"]))
+                    sport_key = f.name.replace("toa_scores_", "").replace("toa_soccer_", "")
+                    sport_title = SPORTS_MAP.get(sport_key, sport_key)
+                    ts = d.get("ts", 0)
+                    updated = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M UTC") if isinstance(ts, (int, float)) else str(ts)
+                    sport_details.append({
+                        "sport": sport_title,
+                        "sport_key": sport_key,
+                        "remaining": int(d["remaining"]),
+                        "updated": updated,
+                        "matches": len(d.get("payload", []))
+                    })
+            except Exception:
+                continue
+
+    min_rem = min(remaining) if remaining else None
+    sport_count = len(remaining)
+
+    # Giorni al reset (01/10/2026)
+    reset_date = datetime(2026, 10, 1)
+    now = datetime.utcnow()
+    days_to_reset = max(0, (reset_date - now).days)
+
+    # Stima consumo giornaliero
+    daily_est = 25  # stima da AGENTS.md
+    sustainable_daily = min_rem / days_to_reset if days_to_reset > 0 and min_rem else 0
+    status = "ok"
+    if min_rem is not None:
+        if min_rem <= 5: status = "critical"
+        elif min_rem <= 10: status = "danger"
+        elif min_rem <= 20: status = "warning"
+        elif min_rem <= 50: status = "low"
+
+    return {
+        "status": status,
+        "remaining_min": min_rem,
+        "sports_cached": sport_count,
+        "days_to_reset": days_to_reset,
+        "reset_date": reset_date.strftime("%Y-%m-%d"),
+        "estimated_daily_consumption": daily_est,
+        "sustainable_daily": round(sustainable_daily, 1),
+        "sports": sorted(sport_details, key=lambda x: x["remaining"]),
+        "thresholds": {"critical": 5, "danger": 10, "warning": 20, "low": 50}
+    }
 
 
 def _segnali_json(params=None):
@@ -758,6 +823,7 @@ def _scan_json(params=None):
 
 ROUTES = {
     "/api/health": _health_json,
+    "/api/credits": _credits_json,
     "/api/dashboard": _dashboard_json,
     "/api/storico": _storico_json,
     "/api/value": _odds_json,

@@ -451,6 +451,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/surebet` – scanner arbitraggi\n"
         "`/setbankroll <€>` – imposta bankroll\n"
         "`/autobet [off|sim|live|now]` – kill-switch/esegui ora (admin)\n"
+        "`/sxscan` – scan segnali SX Bet ora (admin)\n"
         "`/subscribe` – attiva notifiche Pro\n"
         "`/risultati` – statistiche reali dei segnali\n"
         "`/backtest` – calibrazione EV atteso vs ROI realizzato\n"
@@ -1058,6 +1059,46 @@ async def cmd_autobet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"❌ Errore: {e}")
 
 
+async def cmd_sxscan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/sxscan — giro immediato dello scan SX Bet + stato settlement (admin).
+
+    Stesso lavoro di sx_signals_job ma on-demand: scan dei mercati 1X2
+    calcio sull'order book SX (API pubblica), salvataggio dei segnali value
+    nel ledger (l'auto-bet li piazza al giro successivo) e settlement delle
+    bet sx-* aperte.
+    """
+    admin_ids = _admin_chat_ids()
+    if admin_ids and update.effective_chat.id not in admin_ids:
+        await update.message.reply_text("⛔ Comando riservato agli admin.")
+        return
+    await update.message.reply_text("📡 Scan SX Bet in corso (sola lettura)...")
+    loop = asyncio.get_running_loop()
+
+    def _pass():
+        from sx_signals import scan, settle_sx_bets
+        return scan(), settle_sx_bets()
+
+    try:
+        signals, settle_res = await loop.run_in_executor(_scan_executor, _pass)
+    except Exception as e:
+        logger.error("cmd_sxscan: %s", e)
+        await update.message.reply_text(f"❌ Errore scan SX: {e}")
+        return
+    text = f"📡 *SCAN SX BET* — {len(signals)} segnali value salvati"
+    if signals:
+        rows = "\n".join(
+            f"• {s['home']} vs {s['away']} — {s['esito']} @ {s['quota']:.2f} "
+            f"(EV {s['ev'] * 100:+.1f}%) [{s['status']}]"
+            for s in signals[:10])
+        text += f"\n\n{rows}"
+    if settle_res.get("open"):
+        text += (f"\n\n💰 Bet SX aperte: {settle_res['open']} | saldate ora: "
+                 f"{settle_res.get('settled', 0)} "
+                 f"(fonte: {settle_res.get('source') or 'nessuna'})")
+    text += "\n\n💡 Il giro auto-bet le piazza al prossimo tick (1 min)."
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
 async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/backup — snapshot manuale del DB + dataset ML (solo admin)."""
     admin_ids = _admin_chat_ids()
@@ -1317,14 +1358,33 @@ async def settlement_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
             "SELECT COUNT(*) FROM bets WHERE esito_finale IS NULL").fetchone()[0]
         open_preds = c.execute(
             "SELECT COUNT(*) FROM predictions WHERE esito_finale IS NULL").fetchone()[0]
+        # Timeout per puntate LIVE >6h senza settlement
+        timeout_6h = 0
+        try:
+            timeout_6h = c.execute(
+                "SELECT COUNT(*) FROM bets WHERE mode='live' "
+                "AND esito_finale IS NULL AND settled_at IS NULL "
+                "AND datetime('now') > datetime(created_at, '+6 hours')"
+            ).fetchone()[0]
+        except Exception:
+            pass
         conn.close()
     except Exception:
+        timeout_6h = 0
         pass
     if updated or settlements or sanity:
         logger.info("settlement_watchdog: %d risultati, %d bet saldate, "
                     "pendenze: %d bet / %d previsioni, %d sanity check",
                     updated, len(settlements), open_bets, open_preds,
                     len(sanity))
+    if timeout_6h > 0:
+        logger.warning("settlement_watchdog: %d puntate LIVE senza settlement >6h",
+                       timeout_6h)
+        await _send_report_to_recipients(context,
+            f"\u23f0 **Settlement Timeout**\n\n"
+            f"{timeout_6h} puntate LIVE hanno >6h senza settlement.\n"
+            f"Il sistema di refertazione non ha ancora scaricato i risultati.\n"
+            f"Verifica manuale consigliata su Railway ssh.")
     if settlements:
         await _send_bet_settlements(context, settlements)
     for alert in sanity:
@@ -1422,6 +1482,53 @@ async def drift_watchdog_job(context: ContextTypes.DEFAULT_TYPE = None):
         logger.warning("drift_watchdog fallito: %s", e)
 
 
+async def credit_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
+    """Monitoraggio crediti the-odds-api ogni 6h.
+
+    Legge le cache toa_*.json per trovare i crediti residui,
+    invia alert Telegram sotto le soglie (50, 20, 10, 5)
+    e avvisa se remaining < MIN_REMAINING (stop quote).
+    """
+    from odds_api import get_quota
+    try:
+        quota = get_quota()
+        if quota is None:
+            logger.warning("credit_watchdog: unable to read credit cache")
+            return
+        remaining, n_sports = quota
+        logger.info("credit_watchdog: remaining=%d (%d sports cached)",
+                    remaining, n_sports)
+
+        # Alert thresholds
+        if remaining <= 5:
+            text = f"\u26a0\ufe0f **CREDITI CRITICI**\n\n" \
+                   f"Il piano the-odds-api ha solo **{remaining}** crediti rimasti.\n" \
+                   f"Probabile stop quote nelle prossime ore.\n" \
+                   f"Sport con dati: {n_sports}\n" \
+                   f"\u23f0 Reset piano: 01/10/2026"
+            await _send_report_to_recipients(context, text)
+        elif remaining <= 10:
+            text = f"\ud83d\udd34 **Crediti bassi**\n\n" \
+                   f"Remaining: **{remaining}** crediti ({n_sports} sport)\n" \
+                   f"Fascia di allarme attiva. Ridurre rotazione non-core.\n" \
+                   f"\u23f0 Reset: 01/10/2026"
+            await _send_report_to_recipients(context, text)
+        elif remaining <= 20:
+            text = f"\ud83d\udfe0 **Crediti sotto la soglia**\n\n" \
+                   f"Remaining: **{remaining}** crediti ({n_sports} sport)\n" \
+                   f"Sotto MIN_REMAINING ({remaining} < 20).\n" \
+                   f"Attenzione: le prossime chiamate API potrebbero fallire."
+            await _send_report_to_recipients(context, text)
+        elif remaining <= 50:
+            text = f"\ud83d\udfe1 **Crediti in calo**\n\n" \
+                   f"Remaining: **{remaining}** crediti ({n_sports} sport)\n" \
+                   f"Consumo ~6/giorno. Reset 01/10.\n" \
+                   f"Monitorare: {remaining} / 6 = ~{remaining//6} giorni rimasti."
+            await _send_report_to_recipients(context, text)
+    except Exception as e:
+        logger.error(f"credit_watchdog_job error: {e}")
+
+
 async def end_of_day_report_job(context: ContextTypes.DEFAULT_TYPE):
     """Riepilogo quando FINISCE L'ULTIMA PARTITA della giornata.
 
@@ -1509,6 +1616,51 @@ async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
             f"📌 {'ORDINI REALI' if mode == 'live' else 'Simulazione: nessun ordine reale inviato.'}")
     await _send_report_to_recipients(context, text)
     logger.info("auto_bet_job: %d puntate (%s), €%.2f", len(placed), mode, total)
+
+
+async def sx_signals_job(context: ContextTypes.DEFAULT_TYPE):
+    """Scan SX Bet (ogni SX_SCAN_INTERVAL_MIN, default 15') + settlement sx-*.
+
+    Genera segnali value 1X2 SOLO dai prezzi dell'order book SX Bet (API
+    pubblica: zero chiavi, zero crediti the-odds-api) e li salva nel ledger
+    predictions/matches/match_analysis: il giro auto-bet (ogni minuto) li
+    vede come qualunque altro segnale value e — con AUTO_BET_MODE=live e
+    provider SX configurato — piazza l'ordine reale sullo STESSO exchange
+    che ha generato il prezzo (resolve_match_market matcha nomi+kickoff,
+    e il floor EV protegge dai movimenti avversi). Fa anche da settlement
+    dedicato per le bet sx-* (punteggi via the-odds-api se configurata,
+    altrimenti API-Football): senza risultato disponibile le bet restano
+    aperte (fail-closed). Silenzioso se non ci sono nuovi segnali.
+    """
+    if os.getenv("SX_SIGNALS_ENABLED", "1") != "1":
+        return
+    loop = asyncio.get_running_loop()
+
+    def _pass():
+        from sx_signals import scan, settle_sx_bets
+        sig = scan()
+        st = settle_sx_bets()
+        return sig, st
+
+    try:
+        signals, settle_res = await loop.run_in_executor(_scan_executor, _pass)
+    except Exception as e:
+        logger.error("sx_signals_job: %s", e)
+        return
+    if settle_res.get("settled"):
+        logger.info("sx_signals_job: %d bet SX saldate (fonte %s)",
+                    settle_res["settled"], settle_res.get("source"))
+    if not signals:
+        return
+    rows = "\n".join(
+        f"  • {s['home']} vs {s['away']} — {s['esito']} @ {s['quota']:.2f} "
+        f"(EV {s['ev'] * 100:+.1f}%) [{s['status']}]" for s in signals[:8])
+    text = (f"📡 *SEGNALI SX BET* — {len(signals)} nuovi value salvati\n\n"
+            f"{rows}\n\n"
+            "📌 Prezzi dall'order book SX Bet (API pubblica): il giro "
+            "auto-bet li piazzera' se LIVE e' attivo.")
+    await _send_report_to_recipients(context, text)
+    logger.info("sx_signals_job: %d nuovi segnali value", len(signals))
 
 
 async def history_sync_job(context: ContextTypes.DEFAULT_TYPE):
@@ -1662,6 +1814,7 @@ def main() -> None:
     application.add_handler(CommandHandler("backtest_mc", cmd_backtest_mc))
     application.add_handler(CommandHandler("backup", cmd_backup))
     application.add_handler(CommandHandler("autobet", cmd_autobet))
+    application.add_handler(CommandHandler("sxscan", cmd_sxscan))
     application.add_handler(CommandHandler("sync", cmd_sync))
     application.add_handler(CommandHandler("quota", cmd_quota))
     application.add_handler(CommandHandler("riepilogo", cmd_riepilogo))
@@ -1716,6 +1869,14 @@ def main() -> None:
         job_queue.run_repeating(auto_bet_job, interval=60,
                                 first=60,
                                 job_kwargs={"max_instances": 1})
+        # Scan SX Bet (09/09): segnali value 1X2 SOLO dai prezzi SX (API
+        # pubblica, zero crediti the-odds-api) + settlement bet sx-*. Ogni
+        # 15 min (SX_SCAN_INTERVAL_MIN): l'auto-bet (ogni minuto) piazza al
+        # giro successivo i segnali nuovi. SX_SIGNALS_ENABLED=0 per spegnerlo.
+        _sx_min = max(5, int(os.getenv("SX_SCAN_INTERVAL_MIN", "15")))
+        job_queue.run_repeating(sx_signals_job, interval=_sx_min * 60,
+                                first=90,
+                                job_kwargs={"max_instances": 1})
         job_queue.run_daily(backup_data_job, time=time(hour=3, minute=30))
         job_queue.run_once(backup_data_job, when=10)  # snapshot di base all'avvio
         # Retrain ensemble ML dal ledger live (05:45 UTC + a ogni boot): se
@@ -1735,6 +1896,11 @@ def main() -> None:
         # dal job 05:45 UTC + boot: questo job e' il campanello automatico.
         job_queue.run_repeating(drift_watchdog_job, interval=6 * 3600,
                                 first=1800)
+        # Credit watchdog (09/09): monitoraggio ogni 6h.
+        # Alerta admin+iscritti sotto le soglie (50, 20, 10, 5).
+        # Zero API cost: legge solo le cache toa_*.json.
+        job_queue.run_repeating(credit_watchdog_job, interval=6 * 3600,
+                                first=300)
         # Sandbox tennis (paper trading, 08/09): SOLO simulazione su SX Bet
         # (mercati Moneyline type 52, letture pubbliche gratuite). Gated da
         # TENNIS_SANDBOX_ENABLED=1: scan+settle ogni 6h (primo giro 15 min

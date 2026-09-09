@@ -104,6 +104,11 @@ def _get_conn():
     _bet_cols = [r[1] for r in c.execute("PRAGMA table_info(bets)")]
     if "settled_at" not in _bet_cols:
         c.execute("ALTER TABLE bets ADD COLUMN settled_at TEXT")
+    # Migrazione: colonna surface nella tabella signals (09/09)
+    # per supportare il tracking delle superfici nel modulo tennis.
+    sig_cols = [r[1] for r in c.execute("PRAGMA table_info(signals)")]
+    if "surface" not in sig_cols:
+        c.execute("ALTER TABLE signals ADD COLUMN surface TEXT")
     _ensure_unique_constraints(c)
     conn.commit()
     return conn
@@ -1021,10 +1026,16 @@ def init_db():
               "(SELECT MAX(id) FROM match_analysis GROUP BY match_id)")
     conn.commit(); conn.close()
 
-def log_signal(chat_id, evento, esito, quota, probabilita, ev):
+def log_signal(chat_id, evento, esito, quota, probabilita, ev,
+               surface: str = None):
     conn = _get_conn(); c = conn.cursor()
-    c.execute('''INSERT INTO signals VALUES (NULL,?,?,?,?,?,?,?,?,?)''',
-              (chat_id, evento, esito, quota, probabilita, ev, datetime.now().isoformat(), None, 0.0))
+    c.execute(
+        '''INSERT INTO signals
+        (chat_id, evento, esito, quota, probabilita, ev, timestamp,
+         esito_finale, profit, surface)
+        VALUES (?,?,?,?,?,?,?,NULL,0.0,?)''',
+        (chat_id, evento, esito, quota, probabilita, ev,
+         datetime.now().isoformat(), surface))
     conn.commit(); conn.close()
 
 def get_signals(chat_id=None, limit=50):

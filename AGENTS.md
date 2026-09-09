@@ -985,3 +985,32 @@ cd webapp && npm run build            # build Next.js
 - Integrazione XGBoost quando il dataset ML raggiunge 500+ campioni
   (attualmente Logistic Regression numpy-only per evitare deps pesanti).
 - Cambiare `IT_OFFSET` da 2 a 1 a fine ottobre (ora legale invernale).
+
+### Miglioramenti 10/09/2026
+
+- **Credit watchdog** (`bot.py`): job ogni 6h che legge le cache
+  `toa_*.json` e invia alert Telegram sotto le soglie
+  (50→warning, 20→alert, 10→danger, 5→critical). Zero costo API.
+  Registrato in `main()` con `run_repeating`.
+- **Settlement watchdog**: timeout per puntate LIVE >6h senza
+  settlement — avviso automatico se una bet `mode='live'` resta
+  aperta senza `esito_finale` per oltre 6 ore.
+- **GET /api/credits** (`web_api.py`): endpoint REST che restituisce
+  remaining_min, sport_cached, days_to_reset, dettagli per sport,
+  soglie di allarme e stato operatività.
+- **Filtro proattivo crediti** (`odds_api.py`): `should_query_sport()`
+  e `get_remaining()` — disattiva automaticamente le leghe a basso
+  valore quando i crediti scendono sotto 50/30/15:
+  - >=50: tutto attivo
+  - <50: solo leghe core (intervallo ≤7gg)
+  - <30: solo top 6 leghe
+  - <15: solo Serie A, PL, La Liga
+- **Tennis validation gate** (`tennis_sandbox.py`): `MIN_OBSERVATIONS=10`
+  — se il ledger ha meno di 10 osservazioni, gli stake vengono
+  ridotti al 50% e viene registrato un avviso (`is_validated()`).
+  Previene scommesse su dati statisticamente insufficienti.
+- **ALTER TABLE signals surface** (`tracker.py`): migration idempotente
+  che aggiunge la colonna `surface` alla tabella `signals`.
+  `log_signal` ora accetta il parametro `surface`.
+- **Railway Agent setup**: skills `use-railway` e MCP server
+  installati per Claude Code, OpenCode, GitHub Copilot.

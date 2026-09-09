@@ -95,6 +95,9 @@ MAX_STAKE_ABS = float(os.getenv("TENNIS_MAX_STAKE_ABS", "25"))
 MIN_ODDS = float(os.getenv("TENNIS_MIN_ODDS", "1.10"))
 MAX_ODDS = float(os.getenv("TENNIS_MAX_ODDS", "30"))
 
+# Validazione statistica prima di considerare segnali affidabili
+MIN_OBSERVATIONS = int(os.getenv("TENNIS_MIN_OBSERVATIONS", "10"))
+
 # Anti-EV-spurio: coerenza del mercato. Su un exchange i due best back
 # devono avere somma degli inversi ~1 (nessun margine). Se e' ben sotto 1
 # (book sporchi/illiquidi, es. favorito @1.13 e sfavorito @50: somma
@@ -781,6 +784,17 @@ class TennisSandbox:
             self._conn = _open_ledger(self.ledger_path)
         return self._conn
 
+    def is_validated(self) -> bool:
+        """Restituisce True se il modulo tennis ha abbastanza dati
+        per operare con fiducia (MIN_OBSERVATIONS nel ledger).
+
+        Prima di validazione: gli stake vengono ridotti del 50%
+        e viene inviato un avviso.
+        """
+        c = self.conn.cursor()
+        obs = c.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+        return obs >= MIN_OBSERVATIONS
+
     def _insert_observation(self, market: Dict, price_a: float,
                             price_b: float,
                             surface: Optional[str] = None) -> None:
@@ -842,7 +856,15 @@ class TennisSandbox:
         Telegram), non solo il conteggio.
         """
         result = {"markets": 0, "with_book": 0, "signals": 0, "errors": 0,
-                  "signal_list": []}
+                  "signal_list": [], "validated": self.is_validated()}
+        if not self.is_validated():
+            obs = self.conn.cursor().execute(
+                           "SELECT COUNT(*) FROM observations").fetchone()[0]
+            logger.info(f"tennis sandbox: NON validato ({obs}/{MIN_OBSERVATIONS} obs). "
+                       f"Stake ridotto al 50% per validazione.")
+            result["signal_stake_reduction"] = 0.5
+        else:
+            result["signal_stake_reduction"] = 1.0
         markets = self.client.active_markets(max_markets=max_markets)
         result["markets"] = len(markets)
         for m in markets:
@@ -903,6 +925,15 @@ class TennisSandbox:
                     if ev < self.ev_min:
                         continue
                     stake = kelly_stake(prob, price, self.bankroll)
+                    # Riduzione stake se non validato statisticamente
+                    reduction = result.get("signal_stake_reduction", 1.0)
+                    if reduction < 1.0:
+                        obs = self.conn.cursor().execute(
+                            "SELECT COUNT(*) FROM observations").fetchone()[0]
+                        logger.info(f"tennis sandbox: stake ridotto "
+                                    f"({reduction:.0%}) per validazione "
+                                    f"in corso ({obs}/{MIN_OBSERVATIONS} obs)")
+                    stake *= reduction
                     self._insert_or_update_signal(
                         m, sel, price, prob, ev, stake, surface)
                     result["signals"] += 1
