@@ -44,13 +44,11 @@ MAX_KELLY_FRACTION = float(os.getenv("KELLY_MAX_FRACTION", "0.40"))
 # margine matematico (strong_value). Su wallet piccoli (es. 12 USDC) i cap
 # alti permettono stake minimi sensati; il Kelly frazionato resta il freno
 # principale (mai oltre il 40% del Kelly pieno).
-MAX_STAKE_PCT = float(os.getenv("STAKE_CAP_PCT", "0.10"))        # value
-MAX_STAKE_PCT_STRONG = float(os.getenv("STAKE_CAP_PCT_STRONG", "0.25"))
+MAX_STAKE_PCT = float(os.getenv("STAKE_CAP_PCT", "0.07"))        # value
+MAX_STAKE_PCT_STRONG = float(os.getenv("STAKE_CAP_PCT_STRONG", "0.10"))
 DRAWDOWN_THRESHOLD = 0.10      # Riduci stakes se drawdown > 10%
 DRAWDOWN_REDUCTION = 0.50      # Riduci stakes del 50% al drawdown massimo
-# Floor = minimo ordine dell'exchange (SX Bet: 1 USDC); step 0.01 = nessun
-# arrotondamento grossolano (prima erano 2.00 EUR / 0.50 EUR fissi).
-MIN_STAKE_EUR = float(os.getenv("STAKE_MIN_EUR", "1.0"))
+MIN_STAKE_EUR = float(os.getenv("STAKE_MIN_EUR", "0.01"))
 STAKE_STEP = float(os.getenv("STAKE_STEP_EUR", "0.01"))
 
 
@@ -192,7 +190,7 @@ def adaptive_stake(bankroll: float, prob: float, odds: float,
     if status == "strong_value":
         cap_pct = MAX_STAKE_PCT_STRONG
     elif status == "moderate":
-        cap_pct = MAX_STAKE_PCT * 0.7  # cap ridotto per segnali moderati
+        cap_pct = 0.04  # cap fisso 4% per segnali moderati
     else:
         cap_pct = MAX_STAKE_PCT
     cap = bankroll * cap_pct

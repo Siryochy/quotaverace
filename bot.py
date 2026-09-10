@@ -1617,6 +1617,21 @@ async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
     await _send_report_to_recipients(context, text)
     logger.info("auto_bet_job: %d puntate (%s), €%.2f", len(placed), mode, total)
 
+    # Notifica real-time per ordini FULLY_FILLED
+    try:
+        filled = [p for p in placed if p.get("status") == "FULLY_FILLED"
+                  and p.get("mode") == "live"]
+        for p in filled:
+            msg = (f"✅ *ORDINE FULLY_FILLED*\n\n"
+                   f"🏟️ {p['home']} vs {p['away']}\n"
+                   f"🎯 {p['esito_key']} @ {p['price']:.2f}\n"
+                   f"💰 Stake: €{p['stake']:.2f}\n"
+                   f"📋 Bet ID: `{p.get('bet_id', 'N/A')}`\n"
+                   f"📈 ROI atteso: {(p.get('price', 0) / p.get('prob', 1) - 1) * 100:.1f}%")
+            await _send_report_to_recipients(context, msg)
+    except Exception as e:
+        logger.warning("auto_bet_job (fully_filled notify): %s", e)
+
 
 async def sx_signals_job(context: ContextTypes.DEFAULT_TYPE):
     """Scan SX Bet (ogni SX_SCAN_INTERVAL_MIN, default 15') + settlement sx-*.

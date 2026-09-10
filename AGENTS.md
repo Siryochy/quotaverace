@@ -1023,16 +1023,25 @@ cd webapp && npm run build            # build Next.js
 - `MARKET_EDGE_MIN` da 0.03 a **0.02** (+2pp invece di +3pp)
 - `EV_MIN` da 0.03 a **0.02** (+2% invece di +3%)
 - Nuovo tier **moderate** tra `value` e `strong_value`
-  - strong_value: edge >= 5pp (cap 25% bankroll)
-  - value: edge >= 2pp (cap 10% bankroll)
-  - moderate: edge >= 0pp / EV >= 2% (cap 7% bankroll)
+  - strong_value: edge >= 5pp (cap 10% bankroll)
+  - value: edge >= 2pp (cap 7% bankroll)
+  - moderate: edge >= 0pp / EV >= 2% (cap 4% bankroll)
 - `confidence_kelly_fraction` esteso con tier moderate (+0.1 score)
-- `adaptive_stake` con cap ridotto per moderate (MAX_STAKE_PCT × 0.7)
+- `adaptive_stake` con cap ridotto per moderate (4% fisso)
 - `_today_value_picks` include `moderate` nei candidati
 - `get_signal_tier()`: nuova funzione di classificazione
 - `filter_value_bets`: ora assegna `tier` a ogni segnale
+- **MIN_STAKE_EUR**: 1.0 -> **0.01** (rimosso floor 2 EUR, minimo exchange USDC)
+- **Notifica FULLY_FILLED** (`bot.py`): dopo ogni giro auto_bet,
+  per ogni ordine `status == "FULLY_FILLED"` e `mode == "live"`
+  viene inviato un messaggio Telegram in tempo reale con
+  partita, esito, quota, stake e bet_id.
 
-**Effetto atteso**: circa **2-3x più pick qualificati** (da ~5/giorno a ~10-15/giorno).
-Il tier moderate ha cap ridotto (7%) per contenere il rischio sui segnali deboli.
+**Effetto atteso**: circa **2-3x piu' pick qualificati** (da ~5/giorno a ~10-15/giorno).
+Il tier moderate ha cap ridotto (4%) per contenere il rischio sui segnali deboli.
 Il sistema mantiene il fail-safe: ogni segnale deve comunque battere il mercato
 di almeno 2pp e avere EV >= 2%.
+
+**Notifiche**: l'admin riceve un messaggio Telegram ogni volta che un
+ordine LIVE viene FULLY_FILLED, con tutti i dettagli (match, esito,
+quota, stake, bet_id).
