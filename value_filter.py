@@ -16,7 +16,7 @@ from market_calib import (
 EV_MIN = 0.02            # +2% minimo (09/09: abbassato per più segnali)
 EV_MAX = 0.15            # +15% massimo (oltre = anomalia)
 ODDS_MIN = 1.50          # quota minima
-ODDS_MAX = 5.00          # quota massima
+ODDS_MAX = 3.00          # quota massima
 KELLY_FRACTION = 0.25    # 1/4 Kelly
 MAX_STAKE_PCT = 0.03     # cap 3% del bankroll
 
