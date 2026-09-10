@@ -1380,11 +1380,6 @@ async def settlement_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
     if timeout_6h > 0:
         logger.warning("settlement_watchdog: %d puntate LIVE senza settlement >6h",
                        timeout_6h)
-        await _send_report_to_recipients(context,
-            f"\u23f0 **Settlement Timeout**\n\n"
-            f"{timeout_6h} puntate LIVE hanno >6h senza settlement.\n"
-            f"Il sistema di refertazione non ha ancora scaricato i risultati.\n"
-            f"Verifica manuale consigliata su Railway ssh.")
     if settlements:
         await _send_bet_settlements(context, settlements)
     for alert in sanity:
@@ -1674,7 +1669,6 @@ async def sx_signals_job(context: ContextTypes.DEFAULT_TYPE):
             f"{rows}\n\n"
             "📌 Prezzi dall'order book SX Bet (API pubblica): il giro "
             "auto-bet li piazzera' se LIVE e' attivo.")
-    await _send_report_to_recipients(context, text)
     logger.info("sx_signals_job: %d nuovi segnali value", len(signals))
 
 
@@ -1736,7 +1730,6 @@ async def tennis_sandbox_job(context: ContextTypes.DEFAULT_TYPE):
             f"{len(signals)} nuovi segnali +EV, {len(settled)} settlement\n\n"
             + "\n".join(rows) +
             "\n\n📌 Simulazione: nessun ordine reale, nessun costo.")
-    await _send_report_to_recipients(context, text)
     logger.info("tennis_sandbox_job: %d segnali, %d settlement",
                 len(signals), len(settled))
 
