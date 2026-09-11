@@ -1563,6 +1563,26 @@ delle nuove leghe per il blend dinamico. Aggiunte tre difese:
   meno). Nuova CLI `--verify-ids` (una chiamata per lega, nessuna scrittura)
 e `--reset-markers`.
 
+**🔑 ROTAZIONE CHIAVE API-FOOTBALL (11/09 sera) — account ANCORA sospeso.**
+Il proprietario ha resettato la chiave e l'ha incollata in chat: la chiave e'
+stata considerata **compromessa** (regola 7) e va ruotata di nuovo appena la
+sync funziona (Opzione A: lui la imposta da `railway variables --service api
+--set`, l'agente verifica soltanto). La variabile e' stata aggiornata su
+Railway con `railway variables --service api --set API_FOOTBALL_KEY=...`
+(`API_FOOTBALL_KEY: preserve()` era gia' dichiarata in `.railway/railway.ts`,
+quindi `railway config apply` non la distrugge) e il redeploy automatico ha
+girato (deployment `afd45ab2-3338-4fd1-b703-7deea1122751`).
+Verifica SENZA esporre la chiave: confronto dell'impronta sha256
+(`len 32`, `sha256[0:12] = 5a6df8a8325e` identica a quella del valore atteso)
++ chiamata live a `/status`. Esito: **la chiave e' arrivata correttamente ma
+l'account e' ancora sospeso** — `{'access': 'Your account is suspended,
+check on https://dashboard.api-football.com.'}`, stesso errore dal container
+e da una rete indipendente.  \nConseguenza: `--verify-ids` e la sync NON sono
+stati lanciati (avrebbero dato 41/41 BAD bruciando quota per nulla). Il
+reset della chiave NON rimuove la sospensione dell'account: va sbloccata dal
+dashboard (o aprendo un ticket / con un account nuovo); tutto il resto e'
+pronto e verificato, basta lanciare i due comandi quando l'API risponde.
+
 **⚠️ BLOCCO ESTERNO SUL PASSO 3 — account API-Football SOSPESO.**
 Verificato sia in locale sia SUL CONTAINER con una chiamata reale a
 `/leagues`: `{'access': 'Your account is suspended, check on
