@@ -39,8 +39,9 @@ class TestTools:
         assert "stake_eur" > 0 if False else r["stake_eur"] >= 0  # stake comunque calcolato
 
     def test_value_filter_sano_positivo(self):
-        # prob 0.55 con quota 2.0 => EV +10%, dentro la finestra Pro (3%-15%)
-        r = ai_commander._tool_value_filter(0.55, 2.0)
+        # prob 0.62 con quota 1.70 => EV +5.4%, dentro la finestra Pro
+        # (favorito netto: dal 11/09 le quote > 1.80 sono fuori strategia)
+        r = ai_commander._tool_value_filter(0.62, 1.70)
         assert r["ev"] > 0
         assert r["sane"] is True
         assert r["stake_eur"] > 0
@@ -61,9 +62,14 @@ class TestTools:
         r = ai_commander._tool_set_bankroll(1)
         assert r["bankroll"] == 10.0
 
-    def test_recent_signals_vuoto(self):
+    def test_recent_signals_vuoto(self, monkeypatch, tmp_path):
+        # DB vuoto su tmp: il test non deve dipendere dal contenuto del DB
+        # locale (data/quotaverace.db puo' avere righe di sviluppo).
+        import tracker
+        monkeypatch.setattr(tracker, "DB_PATH", tmp_path / "empty.db")
+        tracker.init_db()
         r = ai_commander._tool_recent_signals()
-        assert r["count"] == 0
+        assert r["count"] == 0 and r["signals"] == []
 
     def test_performance_struttura(self):
         r = ai_commander._tool_performance(30)

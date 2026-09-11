@@ -41,11 +41,16 @@ BASE_KELLY_FRACTION = 0.25     # 1/4 Kelly base
 MIN_KELLY_FRACTION = float(os.getenv("KELLY_MIN_FRACTION", "0.05"))
 MAX_KELLY_FRACTION = float(os.getenv("KELLY_MAX_FRACTION", "0.40"))
 # Cap % del bankroll per singola bet: cresce SOLO sui segnali a forte
-# margine matematico (strong_value). Su wallet piccoli (es. 12 USDC) i cap
-# alti permettono stake minimi sensati; il Kelly frazionato resta il freno
+# margine matematico (strong_value). Il Kelly frazionato resta il freno
 # principale (mai oltre il 40% del Kelly pieno).
-MAX_STAKE_PCT = float(os.getenv("STAKE_CAP_PCT", "0.07"))        # value
-MAX_STAKE_PCT_STRONG = float(os.getenv("STAKE_CAP_PCT_STRONG", "0.10"))
+# CAP SEVERO (11/09/2026, con la strategia solo-favoriti): 1% per value e
+# moderate, 2% per strong_value. Le quote corte dei favoriti fanno calcolare
+# al Kelly frazioni MAGGIORI (stake piu' grandi a parita' di bankroll),
+# quindi il cap per singola operazione e' la seconda barriera al rischio di
+# bancarotta. ⚠️ Il floor ordine exchange (1 USDC) prevale: con bankroll
+# sotto ~50-100 USDC lo stake effettivo resta 1 USDC.
+MAX_STAKE_PCT = float(os.getenv("STAKE_CAP_PCT", "0.01"))        # value
+MAX_STAKE_PCT_STRONG = float(os.getenv("STAKE_CAP_PCT_STRONG", "0.02"))
 DRAWDOWN_THRESHOLD = 0.10      # Riduci stakes se drawdown > 10%
 DRAWDOWN_REDUCTION = 0.50      # Riduci stakes del 50% al drawdown massimo
 MIN_STAKE_EUR = float(os.getenv("STAKE_MIN_EUR", "0.01"))
@@ -187,12 +192,8 @@ def adaptive_stake(bankroll: float, prob: float, odds: float,
     stake_after_dd = raw_stake * dd_factor
 
     # 4. Cap per tipo di segnale
-    if status == "strong_value":
-        cap_pct = MAX_STAKE_PCT_STRONG
-    elif status == "moderate":
-        cap_pct = 0.04  # cap fisso 4% per segnali moderati
-    else:
-        cap_pct = MAX_STAKE_PCT
+    # strong_value -> 2%; value e moderate (segnali piu' deboli) -> 1%.
+    cap_pct = MAX_STAKE_PCT_STRONG if status == "strong_value" else MAX_STAKE_PCT
     cap = bankroll * cap_pct
     stake = min(stake_after_dd, cap)
     capped = stake_after_dd > cap

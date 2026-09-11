@@ -36,16 +36,17 @@ def _env_clean(monkeypatch):
 
 
 def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
-                      quota=2.20, status="value", commence=None):
+                      quota=1.65, status="value", commence=None):
     start = commence or (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
     tracker.save_match(mid, "Serie A", home, away, start)
     best_esito = home if esito == "1" else (away if esito == "2" else "Draw")
     tracker.save_analysis(mid, 1.7, 1.1, 0.52, 0.27, 0.21, 0.58, 0.08,
                           best_esito, quota, "Pinnacle", status,
-                          market_prob=0.45, market_edge=0.07)
+                          market_prob=0.60, market_edge=0.07)
     # Ledger previsioni: _today_value_picks legge da QUI dal 09/09.
+    # quota 1.65 / prob. 0.60 = favorito netto (strategia 11/09).
     tracker.save_prediction(mid, "1X2", best_esito, quota, 0.52, 0.08,
-                            market_prob=0.45, market_edge=0.07, status=status)
+                            market_prob=0.60, market_edge=0.07, status=status)
 
 
 def _fixed_stake(monkeypatch):
@@ -57,7 +58,7 @@ def _filled():
     """Esito positivo simulato di _live_fill: ordine SX riempito."""
     return {"ok": True, "market_id": "0xbb4826699a0c7d80", "selection_id": 1,
             "bet_id": "0xabc123", "status": "FULLY_FILLED",
-            "price": 2.20, "stake": 5.0}
+            "price": 1.65, "stake": 5.0}
 
 
 def _sx_catalogue(home="Osasuna", away="Getafe", ts=None):
@@ -80,7 +81,7 @@ class TestLiveMode:
         """AUTO_BET_MODE=live + ordine riempito: riga `bets` con mode='live',
         market_id/selection_id/bet_id reali e stake/prezzo matched."""
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=2.20)
+        _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(auto_bet, "_live_fill",
@@ -92,7 +93,7 @@ class TestLiveMode:
         assert p["mode"] == "live" and p["status"] == "FULLY_FILLED"
         assert p["market_id"] == "0xbb4826699a0c7d80"
         assert p["selection_id"] == 1 and p["bet_id"] == "0xabc123"
-        assert p["price"] == 2.20 and p["stake"] == 5.0
+        assert p["price"] == 1.65 and p["stake"] == 5.0
 
         bets = tracker.get_bets()
         assert len(bets) == 1
@@ -100,14 +101,14 @@ class TestLiveMode:
         assert b["mode"] == "live"
         assert b["market_id"] == "0xbb4826699a0c7d80"
         assert b["selection_id"] == 1 and b["bet_id"] == "0xabc123"
-        assert b["price"] == 2.20 and b["stake"] == 5.0
+        assert b["price"] == 1.65 and b["stake"] == 5.0
         assert tracker.bet_exists_open("m1", "1") is True
 
     def test_ordine_non_riempito_non_lascia_righe(self, monkeypatch, temp_db):
         """Ordine rifiutato/non riempito dall'exchange: nessuna riga sul
         ledger (un FAILED verrebbe saldato come perdita reale)."""
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=2.20)
+        _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(
@@ -125,7 +126,7 @@ class TestLiveMode:
         """Mercato SX non trovato/ambiguo (o prezzo sotto il floor EV):
         _live_fill ritorna None -> nessun ordine, nessuna riga."""
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=2.20)
+        _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(auto_bet, "_live_fill",
@@ -143,7 +144,7 @@ class TestLiveBankroll:
         """In LIVE il bankroll del Kelly e' il saldo del wallet (12.28
         USDC nell'esempio), non la cassa."""
         import adaptive_staking
-        _seed_value_match(quota=2.20)
+        _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 12.28)
@@ -164,7 +165,7 @@ class TestLiveBankroll:
     def test_wallet_sotto_minimo_nessuna_puntata(self, monkeypatch, temp_db):
         """Wallet sotto il minimo ordine (1 USDC): fail-closed, niente righe."""
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=2.20)
+        _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 0.5)
@@ -175,7 +176,7 @@ class TestLiveBankroll:
     def test_stake_clamp_al_minimo_exchange(self, monkeypatch, temp_db):
         """Stake micro sotto 1 USDC: alzato al floor dell'exchange (1.0)."""
         import adaptive_staking
-        _seed_value_match(quota=2.20)
+        _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 12.28)
@@ -196,7 +197,7 @@ class TestLiveBankroll:
     def test_stake_mai_oltre_il_wallet(self, monkeypatch, temp_db):
         """In LIVE lo stake non supera mai il saldo disponibile del wallet."""
         import adaptive_staking
-        _seed_value_match(quota=2.20)
+        _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 3.0)
@@ -219,7 +220,7 @@ class TestLiveBankroll:
         """Wallet non leggibile (rete/errore): fallback sul bankroll cassa,
         il giro prosegue in live."""
         import adaptive_staking
-        _seed_value_match(quota=2.20)
+        _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: None)
@@ -243,8 +244,8 @@ class TestLiveBankroll:
         dai giri precedenti (already_placed >= cap), il nuovo giro non
         piazza nulla (fail-closed)."""
         import adaptive_staking
-        _seed_value_match(mid="e1", home="Osasuna", away="Getafe", quota=2.20)
-        _seed_value_match(mid="e2", home="Bari", away="Crotone", quota=2.20)
+        _seed_value_match(mid="e1", home="Osasuna", away="Getafe", quota=1.65)
+        _seed_value_match(mid="e2", home="Bari", away="Crotone", quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 12.28)
@@ -261,19 +262,19 @@ class TestLiveBankroll:
         """Rippegno parziale: si registra lo stake/prezzo EFFETTIVAMENTE
         riempiti (non il richiesto)."""
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=2.20)
+        _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         filled = _filled()
         filled["stake"] = 3.0          # fill parziale di 5 richiesti
-        filled["price"] = 2.30         # matched meglio del floor 2.20
+        filled["price"] = 1.70         # matched meglio del floor 1.65
         monkeypatch.setattr(auto_bet, "_live_fill",
                             lambda pick, stake, floor: filled)
 
         placed = auto_bet.run_today_bets(stake_eur=5.0)
-        assert placed[0]["stake"] == 3.0 and placed[0]["price"] == 2.30
+        assert placed[0]["stake"] == 3.0 and placed[0]["price"] == 1.70
         b = tracker.get_bets()[0]
-        assert b["stake"] == 3.0 and b["price"] == 2.30
+        assert b["stake"] == 3.0 and b["price"] == 1.70
 
 
 class TestFlatLive:
@@ -286,7 +287,7 @@ class TestFlatLive:
     def _seed_n(self, n, league_prefix=True):
         for i in range(n):
             _seed_value_match(mid=f"f{i}", home=f"Home{i}", away=f"Away{i}",
-                              esito="1" if i % 2 == 0 else "2", quota=2.20)
+                              esito="1" if i % 2 == 0 else "2", quota=1.65)
         if league_prefix:
             conn = tracker._get_conn()
             conn.execute("UPDATE matches SET league = 'Lega' || rowid "
@@ -350,7 +351,7 @@ class TestFlatLive:
 class TestModeSelection:
     def test_default_senza_env_resta_sim(self, monkeypatch, temp_db):
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=2.20)
+        _seed_value_match(quota=1.65)
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert len(placed) == 1 and placed[0]["mode"] == "sim"
 
@@ -359,7 +360,7 @@ class TestModeSelection:
         nessun ordine reale — fallback SIM (allow_sim default True)."""
         monkeypatch.setenv("AUTO_BET_MODE", "live")
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=2.20)
+        _seed_value_match(quota=1.65)
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert len(placed) == 1 and placed[0]["mode"] == "sim"
 
@@ -367,7 +368,7 @@ class TestModeSelection:
         """allow_sim=False senza provider configurato: nessuna puntata."""
         monkeypatch.setenv("AUTO_BET_MODE", "live")
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=2.20)
+        _seed_value_match(quota=1.65)
         placed = auto_bet.run_today_bets(stake_eur=5.0, allow_sim=False)
         assert placed == []
         assert tracker.get_bets() == []
@@ -429,36 +430,36 @@ class TestLiveFill:
             return self.order
 
     def test_floor_ev_best_sotto_quota_salta(self, monkeypatch):
-        """Best SX 2.10 < floor segnale 2.20: niente ordine (EV perso)."""
+        """Best SX 1.60 < floor segnale 1.65: niente ordine (EV perso)."""
         import execution_engine as ee
-        prov = self._Prov(best=2.10)
+        prov = self._Prov(best=1.60)
         self._setup(monkeypatch, prov)
-        res = auto_bet._live_fill(self._pick(), stake=5.0, floor=2.20)
+        res = auto_bet._live_fill(self._pick(), stake=5.0, floor=1.65)
         assert res is None
         assert prov.place_calls == []
 
     def test_ordine_riempito_al_floor_o_meglio(self, monkeypatch):
         import execution_engine as ee
-        order = ee.OrderResult(True, "0x9", "FULLY_FILLED", 2.20, 2.30,
+        order = ee.OrderResult(True, "0x9", "FULLY_FILLED", 1.65, 1.70,
                                5.0, 12.0)
         prov = self._Prov(best=None, order=order)
         self._setup(monkeypatch, prov)
-        res = auto_bet._live_fill(self._pick(), stake=5.0, floor=2.20)
+        res = auto_bet._live_fill(self._pick(), stake=5.0, floor=1.65)
         assert res and res["ok"] is True
         assert res["market_id"] == "m-home" and res["selection_id"] == 1
         assert res["bet_id"] == "0x9" and res["status"] == "FULLY_FILLED"
-        assert res["price"] == 2.30 and res["stake"] == 5.0
+        assert res["price"] == 1.70 and res["stake"] == 5.0
         # ordine richiesto al floor EV (bound), non sotto
         assert prov.place_calls[0][2] == "BACK"
-        assert prov.place_calls[0][3] == 2.20
+        assert prov.place_calls[0][3] == 1.65
 
     def test_ordine_rifiutato_riporta_ok_false(self, monkeypatch):
         import execution_engine as ee
-        order = ee.OrderResult(False, None, "FAILURE", 2.20, None, 0.0, 5.0,
+        order = ee.OrderResult(False, None, "FAILURE", 1.65, None, 0.0, 5.0,
                                error="INSUFFICIENT_FUNDS")
         prov = self._Prov(best=None, order=order)
         self._setup(monkeypatch, prov)
-        res = auto_bet._live_fill(self._pick(), stake=5.0, floor=2.20)
+        res = auto_bet._live_fill(self._pick(), stake=5.0, floor=1.65)
         assert res is not None and res["ok"] is False
         assert res["status"] == "FAILURE"
 
@@ -471,5 +472,5 @@ class TestLiveFill:
             m["open_date"] = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat().replace("+00:00", "Z")
         prov = self._Prov(best=None, order=None, catalogue=c1 + c2)
         self._setup(monkeypatch, prov)
-        res = auto_bet._live_fill(self._pick(), stake=5.0, floor=2.20)
+        res = auto_bet._live_fill(self._pick(), stake=5.0, floor=1.65)
         assert res is None

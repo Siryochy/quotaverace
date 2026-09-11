@@ -213,6 +213,21 @@ Architettura attuale:
 > (volume condiviso, precede `AUTO_BET_MODE`): `/autobet off` = stop totale,
 > `/autobet sim` = pausa ordini reali, `/autobet live` = ripristina.
 >
+> 🎯 **SOLO FAVORITI NETTI (11/09/2026)**: il gate di `value_filter.py`
+> ammette solo esiti con quota **1.50-1.80** che il mercato considera
+> favoriti (prob. devigata ≥ 50% e massima del match). Vietate le
+> scommesse su sfavorite/quote alte (rischio bancarotta). Se nessun esito
+> qualifica, il match non genera segnali né righe di ledger. Soglie:
+> `ODDS_MAX=1.80`, `FAVOURITES_ONLY=True`, `MIN_FAVOURITE_MARKET_PROB=0.50`
+> in `value_filter.py`; `eligible_favourites()` sceglie il miglior EV tra
+> i favoriti.
+>
+> ⏸️ **Pausa settlement (11/09/2026)**: `/settlement off` (admin) scrive
+> `data/execution/settlement_paused.json` sul volume (oppure env
+> `SETTLEMENT_PAUSED=1`): `settle_bets`/`settle_predictions`/`settle_cassa`
+> non chiudono nulla e `_update_results` non scarica risultati (zero
+> crediti the-odds-api). `/settlement on` riattiva, `/settlement` = stato.
+>
 > 💰 **Saldo wallet SX**: `venv/bin/python execution_engine.py --balance`
 > sul container mostra `availableBalance` del proxy wallet (verificato
 > 08/09: 12.28 USDC). Prima di affidarsi all'automazione fare un top-up.
@@ -230,11 +245,14 @@ Architettura attuale:
 > report giornaliero 05:55 UTC su Telegram (con riepilogo per
 > superficie). CLI: `--scan`, `--settle`, `--loop N`, `--report [--json]`.
 
-> ⚙️ **Staking prudente** (09/09): Kelly **FISSATO al 5%** del Kelly pieno
+> ⚙️ **Staking prudente** (09/09, cap rafforzato l'11/09): Kelly
+> **FISSATO al 5%** del Kelly pieno
 > (`KELLY_MIN_FRACTION=KELLY_MAX_FRACTION=0.05` → la frazione dinamica
-> 0.05-0.40 resta nel codice ma con MIN=MAX è sempre 0.05) e **cap 2% del
-> bankroll per singola operazione** (`STAKE_CAP_PCT=0.02` value e
-> `STAKE_CAP_PCT_STRONG=0.02` strong_value), su bankroll corrente (in LIVE
+> 0.05-0.40 resta nel codice ma con MIN=MAX è sempre 0.05) e **cap per
+> singola operazione 1% del bankroll per value/moderate e 2% per
+> strong_value** (`STAKE_CAP_PCT=0.01`, `STAKE_CAP_PCT_STRONG=0.02` —
+> le env su Railway vincono sui default di `adaptive_staking.py`), su
+> bankroll corrente (in LIVE
 > = saldo reale del wallet SX via `get_balance`). `STAKE_MIN_EUR` (1.0 =
 > minimo ordine SX), `STAKE_STEP_EUR` (0.01). ⚠️ Il floor exchange 1 USDC
 > prevale sul cap 2%: con bankroll < 50 USDC lo stake effettivo è 1 USDC

@@ -1,4 +1,5 @@
 """Tracker SQLite per segnali, calendario e analisi"""
+import json
 import logging
 import math
 import sqlite3
@@ -12,16 +13,59 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = DATA_DIR / "quotaverace.db"
 
+SETTLEMENT_PAUSE_FILE = DATA_DIR / "execution" / "settlement_paused.json"
+
+
+def settlement_paused() -> bool:
+    """True se il settlement automatico e' in pausa (11/09/2026).
+
+    Pausa richiesta dal proprietario durante il cambio di strategia: nessuna
+    chiusura automatica di bet/previsioni/cassa. L'override vive sul volume
+    (data/execution/settlement_paused.json) e sopravvive ai redeploy; si
+    attiva anche via env `SETTLEMENT_PAUSED=1` (fail-safe per il container).
+    """
+    env = os.getenv("SETTLEMENT_PAUSED", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    try:
+        data = json.loads(SETTLEMENT_PAUSE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return bool(data.get("paused"))
+
+
+def set_settlement_paused(paused: bool) -> dict:
+    """Attiva/disattiva la pausa del settlement (scrittura atomica)."""
+    SETTLEMENT_PAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data = {"paused": bool(paused),
+            "updated_at": datetime.now().isoformat()}
+    tmp = SETTLEMENT_PAUSE_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, SETTLEMENT_PAUSE_FILE)
+    return data
+
+
+def settlement_pause_status() -> dict:
+    """Stato della pausa settlement per bot/API."""
+    return {"paused": settlement_paused(),
+            "env": os.getenv("SETTLEMENT_PAUSED", "") or None,
+            "file": str(SETTLEMENT_PAUSE_FILE)}
+
 # Ordine di preferenza dei verdetti nel dedup (prima = meglio): il verdetto
 # definitivo batte quello provvisorio. Le righe APERTE (esito_finale NULL)
 # sono trattate come 'lost' provvisorio: qualsiasi riga gia' chiusa la batte.
 PREFERRED_OUTCOME_ORDER = {"won": 0, "push": 1, "lost": 2}
 
 class Signal:
-    def __init__(self, id, chat_id, evento, esito, quota, probabilita, ev, timestamp, esito_finale, profit):
+    # `surface` = ultima colonna della tabella signals (migrazione 09/09, usata
+    # dal ledger tennis): senza il parametro get_signals crashava con
+    # "takes 11 positional arguments but 12 were given".
+    def __init__(self, id, chat_id, evento, esito, quota, probabilita, ev,
+                 timestamp, esito_finale, profit, surface=None):
         self.id = id; self.chat_id = chat_id; self.evento = evento; self.esito = esito
         self.quota = quota; self.probabilita = probabilita; self.ev = ev
         self.timestamp = timestamp; self.esito_finale = esito_finale; self.profit = profit
+        self.surface = surface
 
 def _get_conn():
     conn = sqlite3.connect(str(DB_PATH))
@@ -414,11 +458,16 @@ def settle_cassa():
     disponibile restano in 'in gioco'. Ritorna il numero saldate in questa
     chiamata.
 
+    PAUSA SETTLEMENT (11/09): con la pausa attiva non chiude nulla (ritorna 0).
+
     SANITY CHECK: se i gol registrati sono corrotti (punteggio negativo/
     non numerico) o l'esito calcolato è in contraddizione EVIDENTE coi gol
     (es. esito '2' vinto con vittoria casa), la riga NON viene chiusa: resta
     in gioco e viene loggata, per non pagare un verdetto su dati falsi.
     """
+    if settlement_paused():
+        logger.info("settle_cassa: settlement in PAUSA, nessuna riga chiusa")
+        return 0
     conn = _get_conn()
     _create_results_table(conn)
     c = conn.cursor()
@@ -644,7 +693,12 @@ def settle_predictions():
 
     Ritorna (saldate, push): numero di previsioni chiuse in questa chiamata
     e quante di queste si sono concluse in push (es. handicap pari).
+
+    PAUSA SETTLEMENT (11/09): con la pausa attiva ritorna (0, 0).
     """
+    if settlement_paused():
+        logger.info("settle_predictions: settlement in PAUSA, nessuna riga chiusa")
+        return 0, 0
     conn = _get_conn()
     _create_results_table(conn)
     c = conn.cursor()
@@ -803,7 +857,13 @@ def settle_bets(return_details: bool = False):
     Ritorna (saldate, push); con `return_details=True` anche la lista dei
     verdetti appena emessi: {match_id, league, home, away, mercato, esito,
     price, stake, mode, outcome, profit} — serve alle notifiche Telegram.
+
+    PAUSA SETTLEMENT (11/09): con la pausa attiva ritorna (0, 0) — e con
+    return_details=True anche la lista vuota.
     """
+    if settlement_paused():
+        logger.info("settle_bets: settlement in PAUSA, nessuna riga chiusa")
+        return (0, 0, []) if return_details else (0, 0)
     conn = _get_conn()
     _create_results_table(conn)
     c = conn.cursor()

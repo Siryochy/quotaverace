@@ -669,8 +669,14 @@ def run_backtest(matches: List[Dict], ensemble: bool = True,
                     row["market_edge"] = p_fin - cand["market_prob"]
             prob = row["prob"]
             ev = row["ev"]
+            # Harness di RICERCA: l'universo di selezione e' definito dai
+            # suoi flag (--max-odds, --high-prob-shrink), quindi non applica
+            # il gate di produzione solo-favoriti (11/09). La produzione
+            # usa invece i default di value_filter (quota <= 1.80 + esito
+            # favorito di mercato).
             sane, _ = is_sane(prob, cand["quota"], ev,
-                              market_prob=cand["market_prob"])
+                              market_prob=cand["market_prob"],
+                              odds_max=MAX_ODDS, favourites_only=False)
             if not sane:
                 continue
             status = ("strong_value" if (ev > 0.08 and row["market_edge"] >= 0.05)

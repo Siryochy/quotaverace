@@ -25,29 +25,30 @@ def temp_db(monkeypatch):
 
 
 def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
-                      quota=2.10, status="value", commence=None):
+                      quota=1.65, status="value", commence=None):
     start = commence or (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
     tracker.save_match(mid, "Serie A", home, away, start)
     # esito "1" -> best_esito = nome squadra di casa (come da API bookmaker)
     best_esito = home if esito == "1" else (away if esito == "2" else "Draw")
     tracker.save_analysis(mid, 1.7, 1.1, 0.52, 0.27, 0.21, 0.58, 0.08,
                           best_esito, quota, "Pinnacle", status,
-                          market_prob=0.45, market_edge=0.07)
+                          market_prob=0.60, market_edge=0.07)
     # Ledger previsioni: dal 09/09 _today_value_picks legge da QUI (status
     # per ogni esito), non da match_analysis (solo best, che puo' essere
     # rejected anche quando altri esiti dello stesso match sono value).
+    # quota 1.65 / prob. mercato 0.60 = favorito netto (strategia 11/09).
     tracker.save_prediction(mid, "1X2", best_esito, quota, 0.52, 0.08,
-                            market_prob=0.45, market_edge=0.07, status=status)
+                            market_prob=0.60, market_edge=0.07, status=status)
 
 
 def test_sim_piazzata_con_quota_segnale(monkeypatch, temp_db):
     """SIM-only: puntata simulata con la quota del segnale, mode='sim'."""
     monkeypatch.setitem(sys.modules, "adaptive_staking", None)
-    _seed_value_match(quota=2.20)
+    _seed_value_match(quota=1.65)
     placed = auto_bet.run_today_bets(stake_eur=5.0)
     assert len(placed) == 1
     p = placed[0]
-    assert p["esito_key"] == "1" and p["price"] == 2.20 and p["stake"] == 5.0
+    assert p["esito_key"] == "1" and p["price"] == 1.65 and p["stake"] == 5.0
     assert p["mode"] == "sim" and p["status"] == "SUCCESS"
     # registrata nel DB
     bets = tracker.get_bets()
@@ -66,7 +67,7 @@ def test_no_duplicate_bet_on_rerun(monkeypatch, temp_db):
 
 def test_skips_near_start(monkeypatch, temp_db):
     iniziata = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
-    _seed_value_match(quota=2.20, commence=iniziata)
+    _seed_value_match(quota=1.65, commence=iniziata)
     placed = auto_bet.run_today_bets(stake_eur=5.0)
     assert placed == []
 
@@ -97,8 +98,8 @@ def test_best_rejected_ma_esito_value_viene_piazzato(monkeypatch, temp_db):
                           "Draw", 3.55, "Pinnacle", "rejected",
                           market_prob=0.30, market_edge=0.04)
     # esito value registrato nel ledger previsioni
-    tracker.save_prediction("mX", "1X2", "Osasuna", 2.20, 0.52, 0.08,
-                            market_prob=0.45, market_edge=0.07, status="value")
+    tracker.save_prediction("mX", "1X2", "Osasuna", 1.65, 0.68, 0.12,
+                            market_prob=0.60, market_edge=0.08, status="value")
     picks = auto_bet._today_value_picks()
     assert len(picks) == 1
     assert picks[0]["match_id"] == "mX" and picks[0]["esito_key"] == "1"
@@ -131,11 +132,11 @@ def test_auto_bet_usa_stake_adaptivo(monkeypatch, temp_db):
     monkeypatch.setattr(adaptive_staking, "adaptive_stake", _fake_adaptive)
     monkeypatch.setattr(adaptive_staking, "bankroll_stats",
                         lambda: {"current": 100.0, "peak": 100.0})
-    _seed_value_match(quota=2.20)
+    _seed_value_match(quota=1.65)
     placed = auto_bet.run_today_bets(stake_eur=5.0)
     assert len(placed) == 1
     assert placed[0]["stake"] == 7.5            # stake adattivo, non 5.0
-    assert calls["odds"] == 2.20                # quota del segnale
+    assert calls["odds"] == 1.65                # quota del segnale
 
 
 class TestCorrelationCap:
@@ -212,7 +213,7 @@ class TestCorrelationCap:
             .replace("+00:00", "Z")
         for i in range(4):
             _seed_value_match(mid=f"sim{i}", home=f"Home{i}", away=f"Away{i}",
-                              esito="1", quota=2.10, status="value",
+                              esito="1", quota=1.65, status="value",
                               commence=start)
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert len(placed) == 4
@@ -286,7 +287,7 @@ class TestTotalExposureCap:
             .replace("+00:00", "Z")
         for i in range(9):
             _seed_value_match(mid=f"tc{i}", home=f"Home{i}", away=f"Away{i}",
-                              esito="1", quota=2.10, status="value",
+                              esito="1", quota=1.65, status="value",
                               commence=start)
         # Leghe diverse per match: evita il correlation cap (che agirebbe
         # prima) e isola il cap TOTALE. Il seed usa sempre "Serie A": lo
@@ -364,9 +365,9 @@ class TestFlatStake:
         (niente Kelly, niente stake fisso dal parametro)."""
         monkeypatch.setitem(sys.modules, "adaptive_staking", None)
         monkeypatch.setattr(auto_bet, "STAKE_MODE", "flat")
-        _seed_value_match(mid="m1", quota=2.20)
+        _seed_value_match(mid="m1", quota=1.65)
         _seed_value_match(mid="m2", home="Bari", away="Crotone", esito="2",
-                          quota=2.10)
+                          quota=1.70)
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert len(placed) == 2
         assert all(p["stake"] == 1.0 for p in placed)
@@ -377,7 +378,7 @@ class TestFlatStake:
         monkeypatch.setitem(sys.modules, "adaptive_staking", None)
         monkeypatch.setattr(auto_bet, "STAKE_MODE", "flat")
         monkeypatch.setattr(auto_bet, "FLAT_STAKE_EUR", 0.5)
-        _seed_value_match(quota=2.20)
+        _seed_value_match(quota=1.65)
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert placed == []
 

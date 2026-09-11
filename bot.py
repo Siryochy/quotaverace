@@ -451,6 +451,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/surebet` – scanner arbitraggi\n"
         "`/setbankroll <€>` – imposta bankroll\n"
         "`/autobet [off|sim|live|now]` – kill-switch/esegui ora (admin)\n"
+        "`/settlement [on|off]` – pausa settlement automatico (admin)\n"
         "`/sxscan` – scan segnali SX Bet ora (admin)\n"
         "`/subscribe` – attiva notifiche Pro\n"
         "`/risultati` – statistiche reali dei segnali\n"
@@ -558,6 +559,19 @@ def _update_results():
     from tracker import (save_result, get_results_stats, get_leagues_with_open_rows,
                           settle_cassa, settle_predictions, settle_bets)
     from rating_engine import compute_ratings
+    # PAUSA SETTLEMENT (11/09/2026): durante il cambio di strategia nessuna
+    # riga viene chiusa automaticamente. Si esce PRIMA di fetch_scores, cosi'
+    # la pausa non consuma crediti the-odds-api.
+    from tracker import settlement_paused
+    if settlement_paused():
+        logger.info("_update_results: settlement in PAUSA — nessun risultato "
+                    "scaricato, nessuna riga chiusa")
+        try:
+            from tracker import get_results_stats
+            stats = get_results_stats()
+        except Exception:
+            stats = {}
+        return 0, stats, [], []
     # --- STEP 1: scarica risultati PRIMA di saldare ---
     # Refertazione ESCLUSIVAMENTE via the-odds-api (fetch_scores): la stessa
     # chiave delle quote restituisce anche i risultati FINITI delle partite
@@ -1056,6 +1070,57 @@ async def cmd_autobet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text(text, parse_mode="Markdown")
     except Exception as e:
         logger.error("cmd_autobet: %s", e)
+        await update.message.reply_text(f"❌ Errore: {e}")
+
+
+async def cmd_settlement(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/settlement [on|off|stato] — pausa del settlement automatico (admin).
+
+    - `/settlement` o `/settlement stato`: stato attuale;
+    - `/settlement off`: PAUSA il settlement (nessuna chiusura automatica di
+      bet/previsioni/cassa e nessun download risultati);
+    - `/settlement on`: riattiva il settlement.
+
+    L'override e' persistente (data/execution/settlement_paused.json, volume
+    condiviso) e ha precedenza; la env `SETTLEMENT_PAUSED=1` lo attiva in
+    modo fail-safe (la rimozione del file non basta finche' resta a 1).
+    """
+    admin_ids = _admin_chat_ids()
+    if admin_ids and update.effective_chat.id not in admin_ids:
+        await update.message.reply_text("⛔ Comando riservato agli admin.")
+        return
+    from tracker import (settlement_pause_status, set_settlement_paused)
+    arg = (context.args[0] if context.args else "").strip().lower()
+    try:
+        if arg in ("off", "stop", "pause", "pausa"):
+            set_settlement_paused(True)
+            await update.message.reply_text(
+                "🛑 *SETTLEMENT IN PAUSA*\n\n"
+                "Nessuna chiusura automatica di bet/previsioni/cassa e "
+                "nessun download risultati.\n"
+                "Per riattivare: `/settlement on`", parse_mode="Markdown")
+        elif arg in ("on", "start", "resume", "riattiva"):
+            set_settlement_paused(False)
+            await update.message.reply_text(
+                "▶️ *SETTLEMENT RIATTIVATO*\n\n"
+                "Le prossime chiusure automatiche tornano attive. "
+                "Usa `/settlement` per lo stato.", parse_mode="Markdown")
+        else:
+            st = settlement_pause_status()
+            state = ("🛑 IN PAUSA" if st["paused"] else "🟢 ATTIVO")
+            extra = ("\n⚠️ Env `SETTLEMENT_PAUSED=1` impostata: la pausa "
+                     "resta attiva finche' non la togli su Railway."
+                     if st.get("env") else "")
+            await update.message.reply_text(
+                "⚙️ *SETTLEMENT — stato*\n\n"
+                f"• Settlement automatico: {state}\n"
+                f"• File override: `{st['file']}`{extra}\n\n"
+                "Comandi:\n"
+                "`/settlement off` – pausa\n"
+                "`/settlement on` – riattiva",
+                parse_mode="Markdown")
+    except Exception as e:
+        logger.error("cmd_settlement: %s", e)
         await update.message.reply_text(f"❌ Errore: {e}")
 
 
@@ -1822,6 +1887,7 @@ def main() -> None:
     application.add_handler(CommandHandler("backtest_mc", cmd_backtest_mc))
     application.add_handler(CommandHandler("backup", cmd_backup))
     application.add_handler(CommandHandler("autobet", cmd_autobet))
+    application.add_handler(CommandHandler("settlement", cmd_settlement))
     application.add_handler(CommandHandler("sxscan", cmd_sxscan))
     application.add_handler(CommandHandler("sync", cmd_sync))
     application.add_handler(CommandHandler("quota", cmd_quota))

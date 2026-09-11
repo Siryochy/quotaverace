@@ -1,0 +1,191 @@
+"""Tripwire della STRATEGIA SOLO FAVORITI (11/09/2026).
+
+Direttiva del proprietario: vietato tassativamente puntare su squadre
+sfavorite o quote alte (anche sotto a 3.0), per contenere il rischio di
+bancarotta. I test bloccano ogni regressione che riapra il gate:
+
+1. value_filter: cap quota 1.80 + esito favorito di mercato;
+2. fixture_engine: un match senza favorito netto resta "rejected" e NON
+   scrive previsioni (nessun esito sfavorito finisce nel ledger);
+3. sx_signals: un book senza favorito giocabile non produce segnali;
+4. auto_bet: una riga storica di segnale a quota alta non diventa ordine.
+"""
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+import tracker
+
+
+@pytest.fixture()
+def temp_db(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        db_path = Path(td) / "test.db"
+        monkeypatch.setattr(tracker, "DB_PATH", db_path)
+        tracker.init_db()
+        yield db_path
+
+
+def _match(home_price, draw_price, away_price, mid="fx1"):
+    return {
+        "id": mid,
+        "home_team": "Roma", "away_team": "Empoli",
+        "commence_time": "2026-09-12T18:45:00Z",
+        "bookmakers": [{"title": "BookA", "markets": [
+            {"key": "h2h", "outcomes": [
+                {"name": "Roma", "price": home_price},
+                {"name": "Draw", "price": draw_price},
+                {"name": "Empoli", "price": away_price}]}]}],
+    }
+
+
+def _analyze(monkeypatch, match, mid):
+    """Esegue _analyze_match con i confini esterni stubbati."""
+    import fixture_engine
+    monkeypatch.setattr("fixture_engine.expected_goals", lambda h, a: (1.8, 1.2))
+    # Modello che stima il favorito a ~66% (segnale +EV sulla quota 1.65)
+    monkeypatch.setattr("fixture_engine.prob_1x2",
+                        lambda lh, la: (0.66, 0.20, 0.14))
+    # Blend deterministico: prob finale = prob del modello (il devig del
+    # mercato resta reale per market_prob/market_edge).
+    monkeypatch.setattr("fixture_engine.adjusted_probability",
+                        lambda model_prob, market_prob, price, league="",
+                        model_samples=0: model_prob)
+    monkeypatch.setattr("fixture_engine.save_clv", lambda *a, **k: None)
+    monkeypatch.setattr("fixture_engine.get_analysis_for_match", lambda m: None)
+    monkeypatch.setattr("fixture_engine.record_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr("fixture_engine.detect_rlm", lambda *a, **k: None)
+    monkeypatch.setattr("fixture_engine.detect_steam", lambda *a, **k: None)
+    saved = {}
+    monkeypatch.setattr("fixture_engine.save_analysis",
+                        lambda *a, **k: saved.update({"args": a, "kwargs": k}))
+    preds = []
+    monkeypatch.setattr("fixture_engine.save_prediction",
+                        lambda *a, **k: preds.append((a, k)))
+    status = fixture_engine._analyze_match(mid, match, "Roma", "Empoli", "Serie A")
+    return status, saved, preds
+
+
+class TestFixtureEngineGate:
+    def test_match_senza_favorito_netto_rejected(self, temp_db, monkeypatch):
+        """Quote tutte sopra il cap (2.60/3.30/2.70): nessun segnale.
+
+        Prima dell'11/09 il match generava candidati anche su X/2 a quota
+        alta; ora non entra nulla, nemmeno nel ledger.
+        """
+        status, saved, preds = _analyze(
+            monkeypatch, _match(2.60, 3.30, 2.70), "fx_no_fav")
+        assert status == "rejected"
+        assert preds == []
+        # status propagato alla riga di analisi (args[11] = status)
+        assert saved["args"][11] == "rejected"
+
+    def test_favorito_netto_analizzato(self, temp_db, monkeypatch):
+        """Favorito a 1.65 (prob. di mercato > 50%): il match resta giocabile."""
+        status, saved, preds = _analyze(
+            monkeypatch, _match(1.65, 3.90, 5.80), "fx_fav")
+        assert status in ("value", "strong_value", "no_value")
+        # Nel ledger entra SOLO il favorito (nessun esito sfavorito:
+        # l'esito e' il nome della squadra di casa, come dal feed bookmaker).
+        esiti = [a[2] for a, _ in preds]
+        assert set(esiti) <= {"Roma"}
+        assert all(a[3] <= 1.80 for a, _ in preds)
+
+    def test_sfavorita_fuori_dal_ledger(self, temp_db, monkeypatch):
+        """Favorito 1.60: X e 2 non compaiono tra le previsioni."""
+        status, _, preds = _analyze(
+            monkeypatch, _match(1.60, 4.00, 6.00), "fx_fav2")
+        assert all(a[3] <= 1.80 for a, _ in preds)
+
+
+class TestSxSignalsGate:
+    def test_book_senza_favorito_nessun_segnale(self, temp_db, monkeypatch):
+        """Order book con quote [2.5, 3.33, 3.33]: fuori strategia -> 0 segnali."""
+        import sx_signals
+        from execution_engine import SX_PROB_SCALE
+        from test_sx_signals import FakeSxProvider, _raw_markets
+
+        class NoFavouriteProvider(FakeSxProvider):
+            """Book senza favorito giocabile (tutti gli esiti > 1.80)."""
+
+            def _get(self, path, params=None):
+                if path == "orderbook-v3/snapshot":
+                    p = {"mkt1": 2.50, "mkt2": 3.3333,
+                         "mkt3": 3.3333}[(params or {}).get("marketHash")]
+                    return {"data": {
+                        "outcomeOne": [{"percentageOdds":
+                                        int(SX_PROB_SCALE / p),
+                                        "size": 10 * 10 ** 6}],
+                        "outcomeTwo": [{"percentageOdds":
+                                        int(SX_PROB_SCALE /
+                                            (1.0 / (1.0 - 1.0 / p))),
+                                        "size": 10 * 10 ** 6}],
+                    }}
+                return super()._get(path, params)
+
+        monkeypatch.setattr(sx_signals, "expected_goals", lambda h, a: (1.6, 1.1))
+        monkeypatch.setattr(sx_signals, "prob_1x2", lambda lh, la: (0.45, 0.28, 0.27))
+        monkeypatch.setattr(sx_signals, "adjusted_probability",
+                            lambda model_prob, market_prob, price, league=None:
+                            model_prob)
+        saved = sx_signals.scan(provider=NoFavouriteProvider(_raw_markets()))
+        assert saved == []
+        conn = tracker._get_conn()
+        n = conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
+        conn.close()
+        assert n == 0
+
+
+class TestStakeCapSevero:
+    """Cap per singola bet (11/09/2026): le quote corte dei favoriti fanno
+    calcolare al Kelly frazioni maggiori, quindi 1% (value/moderate) e 2%
+    (strong_value) sono la seconda barriera al rischio di bancarotta."""
+
+    def test_tripwire_cap(self):
+        import adaptive_staking as st
+        assert st.MAX_STAKE_PCT <= 0.01
+        assert st.MAX_STAKE_PCT_STRONG <= 0.02
+
+    def test_stake_cappato_per_tier(self):
+        import adaptive_staking as st
+        bankroll = 1000.0
+        kw = dict(prob=0.70, odds=1.65, market_edge=0.10,
+                  ml_confidence=0.9, has_clv_positive=True,
+                  peak_bankroll=bankroll)
+        strong = st.adaptive_stake(bankroll, status="strong_value", **kw)
+        value = st.adaptive_stake(bankroll, status="value", **kw)
+        moderate = st.adaptive_stake(bankroll, status="moderate", **kw)
+        assert strong["stake"] <= 20.0 + 1e-6      # 2% di 1000
+        assert value["stake"] <= 10.0 + 1e-6       # 1% di 1000
+        assert moderate["stake"] <= 10.0 + 1e-6    # mai piu' dei value
+        assert strong["capped"] and value["capped"]
+
+
+class TestAutoBetDefenceInDepth:
+    def test_riga_storica_quota_alta_non_ordina(self, temp_db, monkeypatch):
+        """Difesa in profondita': una prediction a quota 2.10 con status
+        'value' (scritta prima del cambio strategia) NON diventa un ordine."""
+        import auto_bet
+        start = (datetime.now(timezone.utc) + timedelta(hours=3)) \
+            .isoformat().replace("+00:00", "Z")
+        tracker.save_match("old1", "Serie A", "Osasuna", "Getafe", start)
+        tracker.save_prediction("old1", "1X2", "Osasuna", 2.10, 0.55, 0.08,
+                                market_prob=0.45, market_edge=0.07,
+                                status="value")
+        assert auto_bet._today_value_picks() == []
+        assert auto_bet.run_today_bets(stake_eur=5.0) == []
+        assert tracker.get_bets() == []
+
+    def test_prediction_su_prob_bassa_non_ordina(self, temp_db):
+        """Quota entro il cap ma mercato che la considera sfavorita (45%):
+        non e' un favorito netto -> nessun ordine."""
+        import auto_bet
+        start = (datetime.now(timezone.utc) + timedelta(hours=3)) \
+            .isoformat().replace("+00:00", "Z")
+        tracker.save_match("old2", "Serie A", "Osasuna", "Getafe", start)
+        tracker.save_prediction("old2", "1X2", "Osasuna", 1.75, 0.50, 0.03,
+                                market_prob=0.45, market_edge=0.05,
+                                status="moderate")
+        assert auto_bet._today_value_picks() == []

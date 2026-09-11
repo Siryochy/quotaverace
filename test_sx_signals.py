@@ -39,8 +39,13 @@ def _raw_markets() -> list:
 
 
 def _book_for(market_hash: str) -> dict:
-    """Order book taker canned: quote 1X2 ~ [2.5, 3.3333, 3.3333] (inv_sum 1.0)."""
-    prices = {"mkt1": 2.5, "mkt2": 3.3333, "mkt3": 3.3333}
+    """Order book taker canned: quote 1X2 [1.70, 3.90, 5.80] (inv_sum ~1.02).
+
+    Dal 11/09 la strategia ammette SOLO favoriti netti (quota <= 1.80): il
+    book deve avere un favorito giocabile, altrimenti scan() giustamente
+    non produce segnali.
+    """
+    prices = {"mkt1": 1.70, "mkt2": 3.90, "mkt3": 5.80}
     p = prices[market_hash]
     # outcomeOne = lato esito (back a quota p); outcomeTwo = complementare.
     return {"data": {
@@ -105,9 +110,9 @@ def test_scan_saves_value_signals(temp_db, monkeypatch):
     """scan() con provider fake: salva match/analisi/predictions con
     match_id sx-*, classifica il best esito e il candidato 1 esce value."""
     monkeypatch.setattr(sx_signals, "expected_goals",
-                        lambda h, a: (1.6, 1.1))
+                        lambda h, a: (1.9, 0.8))
     monkeypatch.setattr(sx_signals, "prob_1x2",
-                        lambda lh, la: (0.45, 0.28, 0.27))
+                        lambda lh, la: (0.66, 0.20, 0.14))
     # Blend deterministico: prob finale = prob modello (il devig SX resta
     # quello reale, usato per market_prob/market_edge).
     monkeypatch.setattr(sx_signals, "adjusted_probability",
@@ -120,7 +125,7 @@ def test_scan_saves_value_signals(temp_db, monkeypatch):
     assert sig["match_id"] == SX
     assert sig["esito"] == "1" and sig["status"] == "strong_value"
 
-    # Ledger: matches + 3 predictions (una per esito) + match_analysis.
+    # Ledger: matches + match_analysis + UNICA prediction (il favorito).
     conn = tracker._get_conn()
     mrow = conn.execute("SELECT home_team, away_team, league FROM matches "
                         "WHERE id=?", (SX,)).fetchone()
@@ -131,7 +136,8 @@ def test_scan_saves_value_signals(temp_db, monkeypatch):
                       (SX,)).fetchone()[0]
     conn.close()
     assert mrow == ("Alpha", "Beta", "Serie A")
-    assert [p[0] for p in preds] == ["1", "2", "X"]
+    # Strategia solo favoriti (11/09): X e 2 non entrano nemmeno nel ledger.
+    assert [p[0] for p in preds] == ["1"]
     assert dict(preds)["1"] == "strong_value"
     assert na == 1
 
@@ -140,7 +146,7 @@ def test_scan_saves_value_signals(temp_db, monkeypatch):
     picks = [p for p in _today_value_picks() if p["match_id"] == SX]
     assert len(picks) == 1
     assert picks[0]["esito_key"] == "1"
-    assert picks[0]["quota"] == pytest.approx(2.5, abs=0.01)
+    assert picks[0]["quota"] == pytest.approx(1.70, abs=0.01)
 
 
 def test_scan_skips_incoherent_books(temp_db, monkeypatch):

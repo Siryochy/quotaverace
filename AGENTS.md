@@ -1045,3 +1045,70 @@ di almeno 2pp e avere EV >= 2%.
 **Notifiche**: l'admin riceve un messaggio Telegram ogni volta che un
 ordine LIVE viene FULLY_FILLED, con tutti i dettagli (match, esito,
 quota, stake, bet_id).
+
+### Cambio di strategia: STOP + SOLO FAVORITI NETTI (11/09/2026)
+
+**Direttiva del proprietario**: fermare subito le puntate e vietare
+**tassativamente** le scommesse su squadre sfavorite/quote alte (anche
+sotto a 3.0), riprogettando la logica verso i soli **favoriti netti**
+per evitare il rischio di bancarotta.
+
+**1) STOP IMMEDIATO (produzione, verificato sul container)**
+- `data/execution/auto_bet_mode.json` = `{"mode": "off"}` sul volume
+  Railway → `kill_switch_status()` = {override: off, env_mode: live,
+  effective: off, provider_ready: true}; `_execution_mode()` = "off".
+  Nessun ordine reale né simulato finché non si usa `/autobet live`.
+- **PAUSA SETTLEMENT** (nuovo, `tracker.py`): flag persistente
+  `data/execution/settlement_paused.json` (+ env `SETTLEMENT_PAUSED=1`)
+  letto da `settlement_paused()`. Con la pausa attiva `settle_bets`,
+  `settle_predictions`, `settle_cassa` e `settle_sx_bets` NON chiudono
+  nulla e `bot._update_results` esce **prima** di `fetch_scores` (zero
+  crediti the-odds-api). Nuovo comando admin
+  **`/settlement [on|off|stato]`** per riattivare da Telegram.
+  Il tennis sandbox (ledger paper separato) continua a girare: serve
+  all'apprendimento ELO e non tocca il bankroll reale.
+
+**2) NUOVO GATE: SOLO FAVORITI NETTI (`value_filter.py`)**
+- `ODDS_MAX` da **3.00 → 1.80** (favorito forte, prob. implicita ~55%);
+- nuovo `FAVOURITES_ONLY = True` + `MIN_FAVOURITE_MARKET_PROB = 0.50`:
+  con prob. di mercato nota l'esito deve essere il **favorito** (≥ 50%);
+- nuova `eligible_favourites(candidates)`: tiene solo i candidati con
+  prob. di mercato **massima** del mercato, ≥ 50% e quota ≤ 1.80;
+  `favourites_gate_reason()` fornisce il motivo standard.
+- **Selezione del segnale cambiata**: il candidato giocabile non è più
+  il max-EV assoluto ma il **miglior EV tra i favoriti netti**
+  (`fixture_engine._analyze_match` e `sx_signals.scan`). Se nessun esito
+  qualifica, il match è `rejected` e **non scrive nemmeno una riga** nel
+  ledger `predictions`: gli esiti sfavoriti non esistono più per il
+  sistema. Il CLV viene registrato solo per i favoriti (niente prezzi di
+  esiti scartati nelle medie di chiusura).
+- **Difesa in profondità** (`auto_bet._today_value_picks`): il cap quota
+  e la prob. di mercato sono rifiltrati a valle, così eventuali righe
+  storiche (scritte prima dell'11/09) non possono mai diventare ordini.
+- Tier/EV/edge minimi **invariati** (EV ≥ 2%, edge ≥ 2pp, tier
+  value/strong_value/moderate come dal 10/09).
+
+**3) Test**: nuovo `test_favourites_only.py` (tripwire di gate su
+`value_filter`, `fixture_engine`, `sx_signals`, `auto_bet` — incluso il
+caso "riga storica a quota 2.10 → nessun ordine") e nuovo
+`test_settlement_pause.py` (flag, env, i tre settle bloccati, riattivazione
+che salda ancora, `_update_results` che non scarica risultati in pausa).
+`test_value_filter`/`test_market_calib`/`test_sx_signals`/`test_auto_bet*`
+aggiornati ai favoriti netti (quote ≤ 1.80, prob. di mercato ≥ 50%).
+
+**Numeri del ledger al momento della decisione** (chiusure per fascia
+quota, campioni piccoli): 1.50-1.80 +0.107 (3 chiuse), 1.80-2.00 −0.213
+(5), 2.00-2.50 +0.327 (19), 2.50-3.00 −0.196 (20), ≥3.00 −0.158 (22).
+⚠️ Nota tecnica: con quote più corte il Kelly calcola frazioni MAGGIORI,
+quindi lo stake per singola bet sale.
+
+**4) CAP STAKE SEVERO (stessa direttiva)**: `adaptive_staking` scende da
+7%/10% a **1% del bankroll per value e moderate** e **2% per
+strong_value** (default di codice; env Railway `STAKE_CAP_PCT=0.01` e
+`STAKE_CAP_PCT_STRONG=0.02`, entrambe in `preserve()` in
+`.railway/railway.ts`). Il vecchio cap fisso 4% dei moderate è rimosso:
+i segnali deboli non possono valere più dei value. `value_filter.MAX_STAKE_PCT`
+allineato a 1% (era 3%) così i tool (schedina/`/value`) mostrano lo stesso
+cap che il bot applica. ⚠️ Il floor ordine exchange (1 USDC) prevale
+sempre: sotto ~50-100 USDC di wallet lo stake effettivo resta 1 USDC.
+Tripwire: `test_favourites_only.TestStakeCapSevero`.

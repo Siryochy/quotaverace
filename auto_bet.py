@@ -449,8 +449,15 @@ def _today_value_picks() -> list[dict]:
     giornata UTC un match con kickoff poco dopo la mezzanotte cadrebbe nel
     giorno dopo e verrebbe perso dal filtro per data. Include market_edge,
     market_prob, best_ev e status per l'adaptive staking.
+
+    STRATEGIA SOLO FAVORITI (11/09): il filtro quota/prob. di mercato e'
+    ripetuto QUI (difesa in profondita') oltre che nel motore, cosi' eventuali
+    righe storiche di segnali su sfavorite/quote alte — o scritte da moduli
+    non aggiornati — non possono mai trasformarsi in un ordine.
     """
     from tracker import _get_conn
+    from value_filter import (ODDS_MAX, MIN_FAVOURITE_MARKET_PROB,
+                              FAVOURITES_ONLY)
     conn = _get_conn()
     c = conn.cursor()
     now_utc = datetime.now(timezone.utc)
@@ -470,6 +477,17 @@ def _today_value_picks() -> list[dict]:
     out = []
     for (mid, home, away, commence, league, esito, quota,
          m_edge, m_prob, ev, status) in rows:
+        if FAVOURITES_ONLY:
+            if quota is None or float(quota) > ODDS_MAX:
+                logger.info("auto_bet: skip %s %s @ %s (quota > %.2f: "
+                            "strategia solo favoriti)", mid, esito, quota,
+                            ODDS_MAX)
+                continue
+            if m_prob is not None and float(m_prob) < MIN_FAVOURITE_MARKET_PROB:
+                logger.info("auto_bet: skip %s %s (prob. mercato %.2f < %.2f)",
+                            mid, esito, float(m_prob),
+                            MIN_FAVOURITE_MARKET_PROB)
+                continue
         if mid in seen:
             continue  # un pick per match (best EV tra i value)
         seen.add(mid)

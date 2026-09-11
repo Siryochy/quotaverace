@@ -11,7 +11,8 @@ from leagues_data import ALL_LEAGUES
 from poisson_engine import expected_goals, prob_1x2, ah_outcome_probs
 from value_filter import (compute_ev, kelly_fraction, kelly_euro, is_sane,
                            combined_quota, combined_probability, multipla_stake,
-                           adjusted_probability, get_pro_stake)
+                           adjusted_probability, get_pro_stake,
+                           eligible_favourites, favourites_gate_reason)
 from market_calib import market_implied, MARKET_EDGE_STRONG
 from tracker import (save_match, get_today_matches, save_analysis, get_analysis_for_match,
                       clear_old_matches, save_clv, save_prediction)
@@ -390,7 +391,19 @@ def _analyze_match(match_id, match, home_db, away_db, league):
 
     if not candidates:
         return "no_odds"
-    best = max(candidates, key=lambda c: c["score"])
+    # STRATEGIA SOLO FAVORITI (11/09): il candidato giocabile e' il miglior
+    # EV tra i FAVORITI NETTI (quota <= ODDS_MAX e prob. di mercato massima).
+    # Se nessun esito qualifica il match non genera segnali: gli esiti
+    # sfavoriti/quote alte non finiscono ne' in schedina ne' nel ledger.
+    shortlist = eligible_favourites(candidates)
+    ah_shortlist = eligible_favourites(ah_candidates)
+    favourites_ok = bool(shortlist)
+    if favourites_ok:
+        best = max(shortlist, key=lambda c: c["score"])
+    else:
+        # Solo per telemetria: l'esito col mercato piu' probabile, che sara'
+        # registrato come rejected (nessuna puntata possibile).
+        best = max(candidates, key=lambda c: (c.get("market_prob") or 0.0))
 
     # Snapshot prezzo per line movement tracking.
     try:
@@ -407,9 +420,12 @@ def _analyze_match(match_id, match, home_db, away_db, league):
     # La quota Pinnacle (se presente nel feed) e' la closing line sharp.
     signal_started = get_analysis_for_match(match_id) is None
     try:
-        save_clv(match_id, str(best["esito"]), best["quota"],
-                 signal_started=signal_started,
-                 pinnacle_quota=pinnacle_prices.get(best.get("esito_key")))
+        # Solo un candidato FAVORITO e' un segnale: registrare il CLV di un
+        # esito scartato sporcherebbe le medie di chiusura.
+        if favourites_ok:
+            save_clv(match_id, str(best["esito"]), best["quota"],
+                     signal_started=signal_started,
+                     pinnacle_quota=pinnacle_prices.get(best.get("esito_key")))
     except Exception as e:
         logger.warning(f"Errore tracking CLV per {match_id}: {e}")
 
@@ -422,8 +438,11 @@ def _analyze_match(match_id, match, home_db, away_db, league):
     except Exception:
         pass
 
-    sane, reason = is_sane(best["prob"], best["quota"], best["ev"],
-                           market_prob=best["market_prob"])
+    if favourites_ok:
+        sane, reason = is_sane(best["prob"], best["quota"], best["ev"],
+                               market_prob=best["market_prob"])
+    else:
+        sane, reason = False, favourites_gate_reason()
     if not sane:
         status = "rejected"
         # Log solo a livello debug per non sporcare la dashboard
@@ -459,7 +478,9 @@ def _analyze_match(match_id, match, home_db, away_db, league):
     # Handicap — OU2.5 escluso definitivamente il 06/09) col suo stato, per
     # la verifica a fine partita e la calibrazione del modello per mercato.
     try:
-        for cand in candidates + ah_candidates:
+        # Solo favoriti netti (1X2 e AH) entrano nel ledger: gli esiti
+        # scartati dal gate non vengono nemmeno registrati.
+        for cand in shortlist + ah_shortlist:
             st = _candidate_status(cand)
             if st == "rejected":
                 continue

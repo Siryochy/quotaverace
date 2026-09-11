@@ -47,7 +47,8 @@ from execution_engine import SxBetProvider, pct_scaled_to_decimal, sx_units_to_s
 from market_calib import market_implied, MARKET_EDGE_STRONG
 from poisson_engine import expected_goals, prob_1x2
 from tracker import save_match, save_analysis, save_prediction
-from value_filter import compute_ev, is_sane, adjusted_probability
+from value_filter import (compute_ev, is_sane, adjusted_probability,
+                          eligible_favourites, favourites_gate_reason)
 
 logger = logging.getLogger("sx_signals")
 
@@ -321,10 +322,21 @@ def scan(provider: Optional[SxBetProvider] = None) -> List[dict]:
         # match_id deterministico: save_match fa INSERT OR REPLACE,
         # save_analysis sostituisce e save_prediction aggiorna le
         # predizioni non ancora saldate (idempotenza tra giri).
+        # STRATEGIA SOLO FAVORITI (11/09): si gioca solo il miglior EV tra i
+        # favoriti netti; senza favoriti il match non genera segnali.
+        shortlist = eligible_favourites(candidates)
+        if shortlist:
+            best_c = max(shortlist, key=lambda c: c["ev"])
+        else:
+            best_c = max(candidates,
+                         key=lambda c: (c.get("market_prob") or 0.0))
         save_match(match_id, league_name, home, away, kickoff_iso)
-        best_c = max(candidates, key=lambda c: c["ev"])
-        sane, reason = is_sane(best_c["prob"], best_c["quota"], best_c["ev"],
-                               market_prob=best_c["market_prob"])
+        if shortlist:
+            sane, reason = is_sane(best_c["prob"], best_c["quota"],
+                                   best_c["ev"],
+                                   market_prob=best_c["market_prob"])
+        else:
+            sane, reason = False, favourites_gate_reason()
         if not sane:
             status = "rejected"
         elif best_c["ev"] > 0.08 and (best_c["market_edge"] is None
@@ -339,7 +351,7 @@ def scan(provider: Optional[SxBetProvider] = None) -> List[dict]:
                       "SX Bet", status,
                       market_prob=best_c["market_prob"],
                       market_edge=best_c["market_edge"])
-        for cand in candidates:
+        for cand in shortlist:
             # Stessa classificazione per-candidato del flusso the-odds-api
             # (_candidate_status): nel ledger finiscono anche i no_value.
             csane, _ = is_sane(cand["prob"], cand["quota"], cand["ev"],

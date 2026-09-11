@@ -39,16 +39,17 @@ def ks_file(tmp_path, monkeypatch):
 
 
 def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
-                      quota=2.20, status="value"):
+                      quota=1.65, status="value"):
     start = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
     tracker.save_match(mid, "Serie A", home, away, start)
     best_esito = home if esito == "1" else (away if esito == "2" else "Draw")
     tracker.save_analysis(mid, 1.7, 1.1, 0.52, 0.27, 0.21, 0.58, 0.08,
                           best_esito, quota, "Pinnacle", status,
-                          market_prob=0.45, market_edge=0.07)
+                          market_prob=0.60, market_edge=0.07)
     # Ledger previsioni: _today_value_picks legge da QUI dal 09/09.
+    # quota 1.65 / prob. 0.60 = favorito netto (strategia 11/09).
     tracker.save_prediction(mid, "1X2", best_esito, quota, 0.52, 0.08,
-                            market_prob=0.45, market_edge=0.07, status=status)
+                            market_prob=0.60, market_edge=0.07, status=status)
 
 
 class TestOverride:
@@ -114,7 +115,7 @@ class TestRunTodayBets:
         """Kill-switch off: nessuna riga sul ledger anche con segnali."""
         monkeypatch.setitem(sys.modules, "adaptive_staking", None)
         monkeypatch.delenv("AUTO_BET_MODE", raising=False)
-        _seed_value_match(quota=2.20)
+        _seed_value_match(quota=1.65)
         auto_bet.set_kill_switch("off")
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert placed == []
@@ -127,7 +128,7 @@ class TestRunTodayBets:
         monkeypatch.setenv("AUTO_BET_MODE", "live")
         # provider "pronto" ma l'override sim impedisce gli ordini reali
         monkeypatch.setattr(auto_bet, "_provider_ready", lambda: True)
-        _seed_value_match(quota=2.20)
+        _seed_value_match(quota=1.65)
         auto_bet.set_kill_switch("sim")
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert len(placed) == 1

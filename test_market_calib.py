@@ -109,8 +109,9 @@ class TestValueFilterMarketGate:
 
     def test_sane_false_senza_edge(self):
         from value_filter import is_sane
-        # EV ok ma prob 52% vs mercato 56% -> -4pp, sotto soglia +3pp
-        ok, reason = is_sane(0.52, 2.10, 0.092, market_prob=0.56)
+        # EV ok (+3.7%) ma prob 61% vs mercato 60% -> +1pp, sotto soglia
+        # (favorito netto: quota 1.70, prob. di mercato 60%)
+        ok, reason = is_sane(0.61, 1.70, 0.037, market_prob=0.60)
         assert not ok
         assert "non batte il mercato" in reason
 
@@ -122,9 +123,12 @@ class TestValueFilterMarketGate:
 
     def test_sane_backward_compat(self):
         from value_filter import is_sane
-        # 0.55*2.00-1 = +10% EV, dentro la fascia; senza mercato passa
-        ok, _ = is_sane(0.55, 2.00, 0.10)
+        # Senza market_prob il gate "favorito" non si applica, ma il cap
+        # quota della strategia solo-favoriti (11/09) resta vincolante.
+        ok, _ = is_sane(0.60, 1.75, 0.05)
         assert ok
+        ok, reason = is_sane(0.55, 2.00, 0.10)
+        assert not ok and "quota troppo alta" in reason
 
 
 class TestAnalyzeMatchMarket:

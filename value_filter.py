@@ -16,9 +16,22 @@ from market_calib import (
 EV_MIN = 0.02            # +2% minimo (09/09: abbassato per più segnali)
 EV_MAX = 0.15            # +15% massimo (oltre = anomalia)
 ODDS_MIN = 1.50          # quota minima
-ODDS_MAX = 3.00          # quota massima
+
+# === STRATEGIA SOLO FAVORITI (11/09/2026) ===
+# Direttiva del proprietario dopo il passaggio a live: vietato tassativamente
+# puntare su squadre sfavorite o quote alte (motivo: rischio bancarotta).
+# Il gate ha DUE vincoli, entrambi obbligatori:
+#   1. quota <= ODDS_MAX (1.80 = favorito forte, prob. implicita ~55%);
+#   2. l'esito deve essere il FAVORITO NETTO del mercato: prob. devigata
+#      >= MIN_FAVOURITE_MARKET_PROB e la PIU' ALTA del mercato 1X2.
+# La sola quota non basta: con un overround alto un 1.80 puo' non essere il
+# favorito. Nessun escape hatch silenzioso: gli esiti fuori gate restano
+# "rejected" e non finiscono ne' in schedina ne' nel ledger.
+ODDS_MAX = 1.80          # quota massima (era 3.00)
+FAVOURITES_ONLY = True   # solo pronostici sui favoriti netti
+MIN_FAVOURITE_MARKET_PROB = 0.50   # prob. di mercato minima del favorito
 KELLY_FRACTION = 0.25    # 1/4 Kelly
-MAX_STAKE_PCT = 0.03     # cap 3% del bankroll
+MAX_STAKE_PCT = 0.01     # cap 1% del bankroll (11/09: era 3%, staking prudente)
 
 # PATCH CALIBRAZIONE bucket bassi (06/09): il gap residuo della config
 # 1X2-only e' sui pareggi/trasferte (bucket 0.3-0.4 = 54% del volume con
@@ -96,7 +109,9 @@ def market_edge(model_prob: float, market_prob: float) -> float:
 
 def is_sane(prob: float, odds: float, ev: float,
             market_prob: float | None = None,
-            market_edge_min: float = MARKET_EDGE_MIN) -> tuple[bool, str]:
+            market_edge_min: float = MARKET_EDGE_MIN,
+            odds_max: float = ODDS_MAX,
+            favourites_only: bool = FAVOURITES_ONLY) -> tuple[bool, str]:
     """Verifica se il segnale supera i filtri di sanità.
 
     Con market_prob disponibile, aggiunge il vincolo "beating the market":
@@ -104,11 +119,26 @@ def is_sane(prob: float, odds: float, ev: float,
     a quella implicita nel mercato (devig). Questo e' il test decisivo
     della strategia value betting: EV positivo contro un bookmaker non basta,
     bisogna battere la closing line.
+
+    In piu' (11/09) applica la STRATEGIA SOLO FAVORITI: quota entro ODDS_MAX
+    e, se la prob. di mercato e' nota, esito che il mercato considera
+    favorito (prob. >= MIN_FAVOURITE_MARKET_PROB).
+
+    `odds_max`/`favourites_only` permettono all'harness di ricerca
+    (`historical_backtest.py`, che ha gia' i suoi flag --max-odds e
+    --high-prob-shrink) di non applicare DUE volte il gate di produzione:
+    la produzione usa sempre i default (= costanti sopra).
     """
     if odds < ODDS_MIN:
         return False, f"quota troppo bassa ({odds:.2f} < {ODDS_MIN})"
-    if odds > ODDS_MAX:
-        return False, f"quota troppo alta ({odds:.2f} > {ODDS_MAX})"
+    if odds > odds_max:
+        return False, (f"quota troppo alta ({odds:.2f} > {odds_max}): "
+                       "strategia solo favoriti netti")
+    if favourites_only and market_prob is not None \
+            and market_prob < MIN_FAVOURITE_MARKET_PROB:
+        return False, (f"non è il favorito di mercato (prob. "
+                       f"{market_prob*100:.1f}% < "
+                       f"{MIN_FAVOURITE_MARKET_PROB*100:.0f}%)")
     if ev < EV_MIN:
         return False, f"EV troppo basso ({ev*100:.1f}% < {EV_MIN*100:.0f}%)"
     if ev > EV_MAX:
@@ -141,6 +171,45 @@ def adjusted_probability(model_prob: float, market_prob: float | None,
     if LOW_PROB_SHRINK < 1.0 and market_prob is not None and p < LOW_PROB_THRESHOLD:
         p = market_prob + (p - market_prob) * LOW_PROB_SHRINK
     return p
+
+
+def eligible_favourites(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Filtra i candidati tenendo SOLO i favoriti netti (strategia 11/09).
+
+    Un candidato qualifica se: ha la prob. di mercato devigata, questa e'
+    >= MIN_FAVOURITE_MARKET_PROB, e' la PIU' ALTA tra i candidati dello
+    stesso mercato e la sua quota non supera ODDS_MAX.
+
+    Va chiamata sui candidati di UN SOLO mercato (i tre esiti 1X2, oppure
+    le due linee di un Asian Handicap): il confronto "chi e' il favorito"
+    ha senso solo tra esiti alternativi dello stesso mercato.
+    Ritorna [] se nessun candidato qualifica: il match non genera segnali.
+    """
+    if not candidates:
+        return []
+    if not FAVOURITES_ONLY:
+        return list(candidates)
+    valid = [c for c in candidates if c.get("market_prob") is not None]
+    if not valid:
+        return []
+    top = max(float(c["market_prob"]) for c in valid)
+    out = []
+    for c in valid:
+        mp = float(c["market_prob"])
+        if mp < MIN_FAVOURITE_MARKET_PROB:
+            continue
+        if mp < top - 1e-9:
+            continue
+        if float(c.get("quota") or 0.0) > ODDS_MAX:
+            continue
+        out.append(c)
+    return out
+
+
+def favourites_gate_reason() -> str:
+    """Messaggio standard quando nessun esito e' un favorito netto."""
+    return (f"nessun favorito netto (quota {ODDS_MIN:.2f}-{ODDS_MAX:.2f} e "
+            f"prob. di mercato >= {MIN_FAVOURITE_MARKET_PROB*100:.0f}%)")
 
 
 def get_signal_tier(ev: float, market_edge: float | None = None) -> str:
