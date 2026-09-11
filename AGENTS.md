@@ -1575,17 +1575,31 @@ lega e logga), ma finche' l'account non viene riattivato il passo 3 resta
 `venv/bin/python football_hist.py --verify-ids` e poi `/sync` (o
 `football_hist.py --seasons 2`).
 
-**STATO CONTAINER (11/09 sera)**: prima del deploy il container girava codice
-SENZA `SX_LEAGUE_ALIASES`, `repair_sx_leagues`, `team_names` (verificato via
-`railway ssh`: attributi assenti). Dopo il push (deploy automatico Railway)
-il repair si esegue SUL container, cosi' sana anche i residui del volume:
-`railway ssh --service api -- python3 sx_signals.py repair`. Il repair ora
-usa l'inferenza dai roster: i residui belgi salvati come `Premier League`
-(KV Mechelen, RSC Anderlecht) diventano `Belgian First Div` — verificato in
-locale (`_infer_league_from_teams('KV Mechelen','RSC Anderlecht',
-'Premier League') -> 'Belgian First Div'`).
+**STATO CONTAINER — DEPLOY + REPAIR ESEGUITI (11/09 sera).**
+Prima del push il container girava codice SENZA `SX_LEAGUE_ALIASES`,
+`repair_sx_leagues`, `team_names` (verificato via `railway ssh`: attributi
+assenti). Push su main `82aaa35..da9e88e` -> deploy automatico Railway
+(deployment `8fc2711b-c126-4ddb-8239-d00a20779a14`), verificato con
+`railway ssh ... python3 -c "import team_names"`.
+Repair eseguito SUL container (`python3 sx_signals.py repair`):
+**`{'checked': 118, 'updated': 17, 'inferred': 5}`** — 5 residui MLS
+(`League One` -> `MLS`, inferiti dai roster) + 1 residuo belga
+(`Premier League` -> `Belgian First Div`) + 11 righe corrette dall'etichetta
+SX viva (`Liga Profesional` -> `Argentina Primera`, `Primera Division` ->
+`Chile Primera`, `Primera Nacional`/`Primera A` = etichette SX grezze non
+coperte, prima mappate per errore su `Primeira Liga`).
+Verifica post-deploy sul container: kill-switch `effective: off`,
+settlement in pausa, `ODDS_MIN/MAX 1.3/1.8` + favouriti only, cap
+`1%/2%` con cap severo attivo, liquidita' `25/5/25/x2.0`, `team_names`
+popolato. Ledger SX: 25 leghe distinte, **23/25 con sport key
+the-odds-api** (restano fuori solo `Primera A` e `Primera Nacional`, non
+coperte per scelta). `team_ratings` invariato a 200 (il repair non tocca i
+rating). Health API 200.
+⚠️ Crediti the-odds-api al momento del deploy: **58 residui** — con
+settlement in pausa e kill-switch off il consumo e' solo la rotazione value
+(~3,5/giorno).
 
-**Verifica finale in locale (prima del deploy)**: 130 test verdi sul set
-toccato (league_mapping, team_names, football_hist, odds_api, rating_engine,
-poisson_engine, sx_signals, market_calib); tutti gli id hanno roster; nessun
-roster vuoto in `ALL_LEAGUES`.
+**Verifica finale in locale (prima del deploy)**: 338 test verdi sul set
+ampio + 130 sul set mirato (league_mapping, team_names, football_hist,
+odds_api, rating_engine, poisson_engine, sx_signals, market_calib); tutti
+gli id hanno roster; nessun roster vuoto in `ALL_LEAGUES`.
