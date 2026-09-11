@@ -28,6 +28,13 @@ def temp_db(monkeypatch):
         yield db_path
 
 
+@pytest.fixture(autouse=True)
+def _isolate_daily_stop(tmp_path, monkeypatch):
+    """Lo stop-loss giornaliero usa un file temporaneo (mai il volume reale)."""
+    import auto_bet
+    monkeypatch.setattr(auto_bet, "DAILY_STOP_FILE", tmp_path / "daily_stop.json")
+
+
 def _match(home_price, draw_price, away_price, mid="fx1"):
     return {
         "id": mid,

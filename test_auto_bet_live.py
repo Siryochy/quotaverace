@@ -35,6 +35,12 @@ def _env_clean(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_daily_stop(tmp_path, monkeypatch):
+    """Lo stop-loss giornaliero usa un file temporaneo (mai il volume reale)."""
+    monkeypatch.setattr(auto_bet, "DAILY_STOP_FILE", tmp_path / "daily_stop.json")
+
+
 def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
                       quota=1.65, status="value", commence=None):
     start = commence or (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")

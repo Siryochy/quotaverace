@@ -43,15 +43,17 @@ def _book_for(market_hash: str) -> dict:
 
     Dal 11/09 la strategia ammette SOLO favoriti netti (quota <= 1.80): il
     book deve avere un favorito giocabile, altrimenti scan() giustamente
-    non produce segnali.
+    non produce segnali. Dal 11/09 sera la leg giocata pretende anche
+    `SX_MIN_EXEC_DEPTH_USDC` (25 USDC al floor): la fixture usa 40 USDC per
+    lato, cosi' il filtro di liquidita' non e' cio' che il test verifica.
     """
     prices = {"mkt1": 1.70, "mkt2": 3.90, "mkt3": 5.80}
     p = prices[market_hash]
     # outcomeOne = lato esito (back a quota p); outcomeTwo = complementare.
     return {"data": {
-        "outcomeOne": [{"percentageOdds": _pct(p), "size": 10 * 10 ** 6}],
+        "outcomeOne": [{"percentageOdds": _pct(p), "size": 40 * 10 ** 6}],
         "outcomeTwo": [{"percentageOdds": _pct(1.0 / (1.0 - 1.0 / p)),
-                        "size": 10 * 10 ** 6}],
+                        "size": 40 * 10 ** 6}],
     }}
 
 

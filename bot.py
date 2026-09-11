@@ -241,7 +241,7 @@ def format_segnale_pronto(home, away, lam_h, lam_a, bookmaker="Generico", bankro
         f"   Kelly grezzo: {pro['kelly_pct']:.1f}% | Cap: €{pro['stake_cap']:.2f} (3%)\n"
         f"   *Stake finale: €{stake_euro:.2f}* ({pro['stake_pct_of_bankroll']:.1f}% bankroll)\n\n"
         f"🛡 *Filtri applicati:*\n"
-        f"   EV: 3%-15% | Odds: 1.50-5.00 | Kelly: 1/4 | Cap: 3%\n\n"
+        f"   EV: 2%-15% | Odds: 1.30-1.80 | Edge ≥ +3pp | Kelly: 1/4 | Cap: 1-2%\n\n"
         f"{valore_label}\n{raccomandazione}\n\n📅 *Data:* oggi"
     )
     if extra_note:
@@ -321,7 +321,7 @@ async def cmd_setbankroll(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         amount = float(args[0].replace(",","."))
         set_bankroll(chat_id, amount)
-        await update.message.reply_text(f"✅ Bankroll: €{amount:.2f}\n\n🛡 Sistema Pro attivo:\n• Kelly 1/4 | Cap 3%\n• EV 3%-15% | Odds 1.50-5.00", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Bankroll: €{amount:.2f}\n\n🛡 Sistema Pro attivo:\n• Kelly 1/4 | Cap 1-2%\n• EV 2%-15% | Odds 1.30-1.80 | Edge ≥ +3pp", parse_mode="Markdown")
     except ValueError:
         await update.message.reply_text("❌ Numero non valido.", parse_mode="Markdown")
 
@@ -362,12 +362,12 @@ async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(
         "🔔 *Iscrizione attivata!* (piano: FREE)\n\nRiceverai:\n"
         "• Schedina mattutina alle 8:00\n"
-        "• Notifiche value bet (EV 3%-15%, Odds 1.50-5.00)\n"
+        "• Notifiche value bet (EV 2%-15%, Odds 1.30-1.80, Edge ≥ +3pp)\n"
         "• Aggiornamenti pomeriggio e sera\n\n"
         "🛡 *Filtri Pro attivi:*\n"
         "• Kelly 1/4 | Cap puntata 3%\n"
         "• EV min +3% | EV max +15%\n"
-        "• Odds 1.50-5.00\n\n"
+        "• Odds 1.30-1.80 (solo favoriti netti)\n\n"
         "💎 *Premium* (segnali istantanei, strong value, surebet): "
         "`/premium` per info.", parse_mode="Markdown")
 
@@ -460,10 +460,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/quota` – crediti API rimanenti\n"
         "`/campionati` – elenco squadre\n"
         "`/ai <pertanyaan>` – Comandante AI (Gemini)\n\n"
-        "🛡 *Filtri Pro attivi:*\n"
-        "• EV: +3% to +15%\n"
-        "• Odds: 1.50 to 5.00\n"
-        "• Kelly: 1/4 | Cap: 3% bankroll"
+        "🛡 *Filtri Pro attivi (solo favoriti netti):*\n"
+        "• Quota: 1.30–1.80 | EV: +2% to +15%\n"
+        "• Edge vs mercato: +3pp (value) / +5pp (strong)\n"
+        "• Kelly frazionato | Cap: 1% value, 2% strong\n"
+        "• Stop-loss giornaliero: -5% → 24h"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -516,9 +517,9 @@ def format_value_bets(odds_data, bankroll=100.0):
     enriched = enrich_odds_with_probs(odds_data)
     value_signals = filter_value_bets(enriched, ev_threshold=0.03)
     if not value_signals:
-        return "📊 *Value Bet Pro*\n\nNessun segnale che supera i filtri (EV 3%-15%, Odds 1.50-5.00)." + DISCLAIMER
+        return "📊 *Value Bet Pro*\n\nNessun segnale che supera i filtri (EV 2%-15%, Odds 1.30-1.80, Edge ≥ +3pp)." + DISCLAIMER
     msg = "📊 *VALUE BET PRO — Filtri attivi*\n"
-    msg += "🛡 EV: 3%-15% | Odds: 1.50-5.00 | Kelly 1/4 | Cap 3%\n"
+    msg += "🛡 EV: 2%-15% | Odds: 1.30-1.80 | Edge ≥ +3pp | Kelly 1/4 | Cap 1-2%\n"
     msg += "🎯 Bonus: confronto col mercato (devig power)\n"
     msg += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
     for sig in value_signals[:5]:
@@ -581,10 +582,19 @@ def _update_results():
     # le leghe con scommesse attive (o chiuse da <48h) su partite già iniziate
     # — zero righe aperte = zero chiamate fetch_scores per quella lega.
     leagues = get_leagues_with_open_rows()
+    # Risoluzione lega -> sport key: chiave SPORTS_MAP oppure alias/etichetta
+    # (fix mapping leghe 11/09). Una lega non mappata NON viene saltata in
+    # silenzio: senza sport key the-odds-api non puo' refertare, quindi logga.
+    try:
+        from sx_signals import league_to_sport as _league_to_sport
+    except Exception:
+        _league_to_sport = None
     updated = 0
     for lg in leagues:
-        sport = SPORTS_MAP.get(lg)
+        sport = SPORTS_MAP.get(lg) or (_league_to_sport(lg) if _league_to_sport else None)
         if not sport:
+            logger.warning("_update_results: lega '%s' non mappata a uno sport "
+                           "key the-odds-api — risultati non scaricati", lg)
             continue
         for m in fetch_scores(sport, days_from=2):
             if not m.get("id"):
@@ -799,6 +809,23 @@ def format_daily_report(since: str, label: str) -> str:
             lines.append(line)
     except Exception:
         pass
+
+    # Scarti per liquidita' SX Bet (11/09): opportunita' non giocate perche'
+    # il book era troppo sottile (segnale scartato o ordine saltato).
+    # Diagnostica utile a tarare le soglie SX_MIN_*_USDC.
+    try:
+        from liquidity_monitor import summary as _liq_summary
+        _liq = _liq_summary(days=1)
+        if _liq["events"]:
+            _k = ", ".join(f"{k}: {v}" for k, v in
+                           sorted(_liq["by_kind"].items()))
+            line = (f"💧 *Scarti liquidita' SX:* {_liq['events']} "
+                    f"({_k})")
+            if _liq["missed_profit"]:
+                line += f" | edge perso ~{_liq['missed_profit']:.2f} USDC"
+            lines.append(line)
+    except Exception as e:
+        logger.warning("monitor liquidita' nel report fallito: %s", e)
 
     # Audit qualita' dataset ML: un dataset sporco viene IMPARATO dal
     # modello come verita'. Controlla solo le previsioni/puntate chiuse
@@ -1060,10 +1087,15 @@ async def cmd_autobet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             # wallet e' troppo piccolo per rispettare il cap, l'admin deve
             # saperlo SUBITO (altrimenti sembra che il bot non funzioni).
             from auto_bet import (MIN_STAKE_EUR, cap_hard_active,
-                                   _live_wallet_balance)
+                                   _live_wallet_balance, daily_stop_status)
             cap_line = ("✅ attivo (il floor exchange non alza lo stake)"
                         if cap_hard_active() else
                         "❌ disattivato (vale il floor exchange)")
+            _ds = daily_stop_status()
+            stop_line = (f"🛑 *ATTIVO* fino a {str(_ds.get('until'))[:16]} "
+                         f"(perdita ≥ {_ds['loss_pct']:.0f}% giornaliera)"
+                         if _ds.get("stopped") else
+                         f"🟢 non attivo (soglia -{_ds['loss_pct']:.0f}%)")
             wallet_warn = ""
             try:
                 bal = _live_wallet_balance()
@@ -1086,6 +1118,7 @@ async def cmd_autobet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 f"{'✅ sì' if st['provider_ready'] else '❌ no'}\n"
                 f"• Cap per bet: 1% value/moderate · 2% strong_value\n"
                 f"• Cap severo: {cap_line}\n"
+                f"• Stop-loss giornaliero: {stop_line}\n"
                 f"{wallet_warn}\n"
                 "Comandi:\n"
                 "`/autobet off` – stop totale\n"
@@ -1357,7 +1390,7 @@ async def notify_job(context: ContextTypes.DEFAULT_TYPE, delayed: bool = False):
                 f"🏟 {sig['evento']}\n"
                 f"🎯 {sig['esito']} @ {sig['quota_decimale']:.2f} ({sig['bookmaker']})\n"
                 f"📈 EV: +{ev_pct:.2f}% | Stake ref: €{pro['stake']:.2f} ({pro['stake_pct_of_bankroll']:.1f}%)\n\n"
-                f"🛡 Filtri: EV 3%-15% | Odds 1.50-5.00 | Kelly 1/4 | Cap 3%\n\n"
+                f"🛡 Filtri: EV 2%-15% | Odds 1.30-1.80 | Edge ≥ +3pp | Kelly 1/4 | Cap 1-2%\n\n"
                 f"💡 `/segnale` per analisi dettagliata"
             )
             for chat_id in subscribers:
@@ -1613,6 +1646,41 @@ async def credit_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"credit_watchdog_job error: {e}")
 
 
+async def liquidity_monitor_job(context: ContextTypes.DEFAULT_TYPE = None):
+    """Monitor scarti liquidita' SX Bet ogni 6h (11/09/2026).
+
+    Legge il log degli scarti (data/execution/liquidity_skips.jsonl) e
+    allerta admin+iscritti SOLO se nelle ultime 24h ci sono scarti. Lo
+    stato viene SEMPRE loggato (telemetria continua); la notifica e' il
+    campanello, con anti-spam 1 alert/giorno (chiave LIQ_SKIP).
+
+    Perche' conta: su un exchange ogni scarto per book sottile e' un'edge
+    potenzialmente persa — se gli scarti crescono, o le soglie SX_MIN_*
+    sono troppo severe o i mercati sono troppo illiquidi per puntarci.
+    """
+    try:
+        from liquidity_monitor import summary, format_report
+        s = summary(days=1)
+        logger.info("liquidity_monitor: %d scarti in 24h (edge perso %.2f, "
+                    "stake non investito %.2f)", s["events"],
+                    s["missed_profit"], s["stake_skipped"])
+        if not s["events"]:
+            return
+        from tracker import is_notified, mark_notified
+        from datetime import timezone as _tz, timedelta as _td
+        day = (datetime.now(_tz.utc) + _td(hours=2)).strftime("%Y-%m-%d")
+        text = format_report(days=1)
+        if not text or is_notified("LIQ_SKIP", day):
+            return
+        mark_notified("LIQ_SKIP", day)
+        if context is not None:
+            await _send_report_to_recipients(context, text)
+        else:
+            logger.warning("liquidity_monitor: %s", text.replace("\n", " | "))
+    except Exception as e:
+        logger.warning("liquidity_monitor_job fallito: %s", e)
+
+
 async def end_of_day_report_job(context: ContextTypes.DEFAULT_TYPE):
     """Riepilogo quando FINISCE L'ULTIMA PARTITA della giornata.
 
@@ -1666,27 +1734,37 @@ async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error("auto_bet_job: %s", e)
         return
     if not placed:
-        # Nessuna puntata piazzata: se e' colpa del kill-switch OFF avvisa
-        # l'admin (in emergenza la visibilita' e' tutto); altrimenti silenzio.
+        # Nessuna puntata piazzata: se e' colpa del kill-switch OFF o dello
+        # stop-loss giornaliero avvisa (in emergenza la visibilita' e'
+        # tutto); altrimenti silenzio. Anti-spam: max 1 alert/giorno per
+        # causa (il giro gira ogni minuto).
         try:
-            from auto_bet import kill_switch_status
+            from auto_bet import kill_switch_status, daily_stop_status
+            from tracker import is_notified, mark_notified
+            from datetime import timezone as _tz, timedelta as _td
+            today = (datetime.now(_tz.utc) + _td(hours=2)).strftime("%Y-%m-%d")
             if kill_switch_status().get("effective") == "off":
-                from tracker import is_notified, mark_notified
-                from datetime import timezone as _tz, timedelta as _td
-                today = (datetime.now(_tz.utc) + _td(hours=2)).strftime("%Y-%m-%d")
-                # Anti-spam (09/09): con il giro OGNI MINUTO l'avviso
-                # kill-switch scattava a ogni run (fino a 1440 msg/giorno).
-                # Massimo 1 alert al giorno, come il drift watchdog.
-                if is_notified("KS_OFF", today):
-                    return
-                text = ("🛑 *AUTO-BET BLOCCATO (kill-switch OFF)*\n\n"
-                        "Il giro delle puntate automatiche e' stato saltato: "
-                        "nessuna puntata piazzata.\n"
-                        "Per riattivare: `/autobet live`")
-                await _send_report_to_recipients(context, text)
-                mark_notified("KS_OFF", today)
+                if not is_notified("KS_OFF", today):
+                    text = ("🛑 *AUTO-BET BLOCCATO (kill-switch OFF)*\n\n"
+                            "Il giro delle puntate automatiche e' stato "
+                            "saltato: nessuna puntata piazzata.\n"
+                            "Per riattivare: `/autobet live`")
+                    await _send_report_to_recipients(context, text)
+                    mark_notified("KS_OFF", today)
+                return
+            _ds = daily_stop_status()
+            if _ds.get("stopped"):
+                if not is_notified("DAILY_STOP", today):
+                    text = ("🛑 *STOP-LOSS GIORNALIERO ATTIVO*\n\n"
+                            f"Bankroll sotto del {_ds['loss_pct']:.0f}% "
+                            f"dall'inizio giornata: {_ds.get('reason') or ''}\n"
+                            f"Puntate bloccate fino a {_ds.get('until')}.\n"
+                            "Si riattiva da solo dopo le 24h; per farlo "
+                            "prima rimuovi `data/execution/daily_stop.json`.")
+                    await _send_report_to_recipients(context, text)
+                    mark_notified("DAILY_STOP", today)
         except Exception as e:
-            logger.error("auto_bet_job (kill-switch notify): %s", e)
+            logger.error("auto_bet_job (blocked notify): %s", e)
         return
     mode = placed[0]["mode"]
     mode_label = {"live": "LIVE", "sim": "SIMULAZIONE",
@@ -1999,6 +2077,12 @@ def main() -> None:
         # Zero API cost: legge solo le cache toa_*.json.
         job_queue.run_repeating(credit_watchdog_job, interval=6 * 3600,
                                 first=300)
+        # Monitor scarti liquidita' SX (11/09): ogni 6h legge il log degli
+        # scarti per book sottile (scan/order/partial) e allerta admin+
+        # iscritti SOLO se ce ne sono nelle ultime 24h (anti-spam 1/giorno).
+        # Zero costi API: legge solo il JSONL sul volume.
+        job_queue.run_repeating(liquidity_monitor_job, interval=6 * 3600,
+                                first=600)
         # Sandbox tennis (paper trading, 08/09): SOLO simulazione su SX Bet
         # (mercati Moneyline type 52, letture pubbliche gratuite). Gated da
         # TENNIS_SANDBOX_ENABLED=1: scan+settle ogni 6h (primo giro 15 min

@@ -46,6 +46,27 @@ export default defineRailway(() => {
     // < 100 USDC il cap 1% non e' sostenibile e il bot non piazza nulla
     // (fail-closed), invece di forzare 1 USDC (= 2.6% su 38 USDC).
     STAKE_CAP_HARD: preserve(),
+    // Pausa settlement (11/09): con SETTLEMENT_PAUSED=1 (o il flag su volume
+    // data/execution/settlement_paused.json) i settle non chiudono nulla e
+    // _update_results non scarica risultati (zero crediti).
+    SETTLEMENT_PAUSED: preserve(),
+    // Guardrail di rischio (11/09): stop-loss giornaliero (-5% per 24h) e
+    // filtro liquidita' SX (profondita' taker minima del match e del singolo
+    // esito). preserve() per non farli distruggere da `railway config apply`.
+    DAILY_STOP_LOSS_PCT: preserve(),
+    DAILY_STOP_HOURS: preserve(),
+    // Taratura liquidita' SX (11/09, secondo giro): profondita' totale del
+    // match, minimo per esito, minimo della LEG GIOCATA (usata sia dallo
+    // scan sia dal guardrail d'ordine) e margine richiesto sullo stake
+    // (stake x multiplo, cosi' l'ordine non esaurisce il lato del book).
+    SX_MIN_DEPTH_USDC: preserve(),
+    SX_MIN_LEG_DEPTH_USDC: preserve(),
+    SX_MIN_EXEC_DEPTH_USDC: preserve(),
+    SX_DEPTH_MULTIPLIER: preserve(),
+    // Monitor scarti liquidita' (11/09): path del JSONL (default sul volume
+    // data/execution/liquidity_skips.jsonl) e finestra di allerta delle
+    // soglie usate dal report.
+    LIQUIDITY_SKIP_LOG: preserve(),
     // BETFAIR_* rimosse il 04/09: Betfair è fuori dall'architettura
     // (refertazione = API-Football, quote/CLV = the-odds-api, auto_bet SIM).
   };

@@ -12,7 +12,7 @@ Valida lo stack di produzione corrente su 4 stagioni di calcio europeo
   5. ENSEMBLE: XGBoost (o Logistic) calibrato con PAVA (ml_ensemble +
      probability_calibration), retrain periodico walk-forward sulle sole
      partite gia' chiuse.
-  6. FILTRO VALUE: is_sane (EV 3-15%, quota 1.50-5.00, edge >= +3pp,
+  6. FILTRO VALUE: is_sane (EV 2-15%, quota 1.30-1.80, edge >= +3pp,
      strong_value >= +5pp).
   7. ANTI-OVERCONFIDENCE (04/09): shrink ASIMMETRICO verso il mercato
      (solo sopra quota SHRINK_ODDS_MIN, i favoriti restano pieni),
@@ -591,7 +591,8 @@ def _esito_ok(match: Dict, cand: Dict) -> bool:
 def run_backtest(matches: List[Dict], ensemble: bool = True,
                  flat_stake: Optional[float] = None,
                  no_ou: bool = False,
-                 no_under: bool = False) -> Dict:
+                 no_under: bool = False,
+                 production: bool = False) -> Dict:
     """Esegue il backtest walk-forward. Ritorna il report completo.
 
     flat_stake: se non None, stake FISSO per ogni bet (in euro) invece di
@@ -599,6 +600,11 @@ def run_backtest(matches: List[Dict], ensemble: bool = True,
     stagioni. La selezione delle pick non cambia.
     no_ou: esclude il mercato OU2.5 dai candidati (diagnostica).
     no_under: esclude SOLO il lato Under dell'OU (diagnostica).
+    production: simula la strategia di PRODUZIONE — solo FAVORITI NETTI
+    (gate `value_filter.is_sane(favourites_only=True)`); con --no-ou e
+    MAX_ODDS=1.80 (impostati dal CLI) e lo stake Kelly 1/4 con cap 1%
+    (`value_filter.kelly_euro`, cap MAX_STAKE_PCT) il run riproduce gli
+    stake che il bot piazzerebbe oggi.
     """
     from market_calib import clv_raw, clv_vig_free
     from value_filter import is_sane
@@ -670,13 +676,14 @@ def run_backtest(matches: List[Dict], ensemble: bool = True,
             prob = row["prob"]
             ev = row["ev"]
             # Harness di RICERCA: l'universo di selezione e' definito dai
-            # suoi flag (--max-odds, --high-prob-shrink), quindi non applica
-            # il gate di produzione solo-favoriti (11/09). La produzione
-            # usa invece i default di value_filter (quota <= 1.80 + esito
-            # favorito di mercato).
+            # suoi flag (--max-odds, --high-prob-shrink). Con --production
+            # si applica invece il gate di PRODUZIONE solo-favoriti (11/09):
+            # quota <= 1.80 (via MAX_ODDS dal CLI) + esito favorito di
+            # mercato, per simulare gli stake che il bot piazzerebbe oggi.
             sane, _ = is_sane(prob, cand["quota"], ev,
                               market_prob=cand["market_prob"],
-                              odds_max=MAX_ODDS, favourites_only=False)
+                              odds_max=MAX_ODDS,
+                              favourites_only=production)
             if not sane:
                 continue
             status = ("strong_value" if (ev > 0.08 and row["market_edge"] >= 0.05)
@@ -1060,6 +1067,10 @@ def main(argv=None) -> int:
                     help="Sotto-peso dei pareggi (default 0.80)")
     ap.add_argument("--max-odds", type=float, default=None,
                     help="Quota massima accettata (default 5.0)")
+    ap.add_argument("--production", action="store_true",
+                    help="Simula la strategia di PRODUZIONE (11/09): solo "
+                         "favoriti netti, 1X2-only (OU escluso), quota <= 1.80, "
+                         "stake Kelly 1/4 con cap 1%% del bankroll.")
     ap.add_argument("--high-prob-threshold", type=float, default=None,
                     help="Soglia prob. per lo shrink sui bucket alti "
                          "(default 0.55; 0 = disattivo)")
@@ -1096,6 +1107,11 @@ def main(argv=None) -> int:
         MAX_EDGE = args.edge_cap
     if args.draw_penalty is not None:
         DRAW_PENALTY = args.draw_penalty
+    if args.production:
+        # Strategia di produzione (11/09/2026): solo favoriti netti, 1X2-only.
+        if args.max_odds is None:
+            MAX_ODDS = 1.80
+        args.no_ou = True
     if args.max_odds is not None:
         MAX_ODDS = args.max_odds
     if args.high_prob_threshold is not None:
@@ -1129,11 +1145,16 @@ def main(argv=None) -> int:
     print("🧮 Backtest walk-forward (rating + Poisson/DC + devig + blend"
           + (" + ensemble XGB/PAVA" if not args.no_ensemble else "")
           + " + Kelly 1/4 + CLV)...")
+    if args.production:
+        print("🏭 Modalita' PRODUZIONE: solo favoriti netti (quota <= 1.80 "
+              "+ esito favorito di mercato), 1X2-only, stake Kelly 1/4 "
+              "cap 1% del bankroll.")
     res = run_backtest(matches, ensemble=not args.no_ensemble,
                        flat_stake=flat_stake, no_ou=args.no_ou,
-                       no_under=args.no_under)
+                       no_under=args.no_under, production=args.production)
     res["n_matches"] = len(matches)
     res["ensemble_on"] = not args.no_ensemble
+    res["production"] = bool(args.production)
     if args.no_ou:
         print(f"⚙️  Mercati OU2.5 ESCLUSI (diagnostica)")
     if args.no_under:

@@ -9,14 +9,16 @@ SOLO l'API PUBBLICA SX Bet (zero chiavi, zero crediti):
 1. discovery: i 3 mercati binari "X vs Not X" (type 1, sportId 5) per
    partita -> si ricostruisce il 1X2 con i migliori prezzi BACK del book
    taker (stessi snapshot letti da scan_sx_live);
-2. coerenza: inv_sum (somma inversi) 0.98-1.08 e quote sane, come il report
-   di scan_sx_live — fuori range il match NON genera candidati;
+2. coerenza e liquidita': inv_sum (somma inversi) 0.98-1.08, quote sane e
+   book con profondita' sufficiente (totale, per esito e sulla leg che
+   verrebbe giocata: vedi le soglie MIN_DEPTH/MIN_LEG_DEPTH/MIN_EXEC_DEPTH)
+   — sotto soglia il match NON genera candidati;
 3. modello: Poisson del progetto (poisson_engine.expected_goals/prob_1x2,
    rating dinamici inclusi) vs mercato fair (market_calib.market_implied,
    devig power su 1/X/2);
 4. segnale: EV da prob finale blend (value_filter.adjusted_probability) e
-   filtri sanità (is_sane: EV 3-15%, quote 1.50-5.00, edge vs mercato) —
-   identici al flusso the-odds-api;
+   filtri sanità (is_sane: EV 2-15%, quote 1.30-1.80, edge >= +3pp vs
+   mercato) — identici al flusso the-odds-api;
 5. ledger: match/s match_analysis/predictions via tracker (save_match,
    save_analysis, save_prediction): da qui in poi auto_bet.run_today_bets
    li vede come QUALSIASI altro segnale value e — in AUTO_BET_MODE=live con
@@ -32,6 +34,7 @@ restano aperte (nessuna chiusura errata: fail-closed).
 CLI:
     venv/bin/python sx_signals.py scan        # scan + salvataggio segnali
     venv/bin/python sx_signals.py settle      # recupera punteggi e salda
+    venv/bin/python sx_signals.py repair      # rimappa le leghe gia' salvate
 """
 
 from __future__ import annotations
@@ -54,8 +57,24 @@ logger = logging.getLogger("sx_signals")
 
 # --- Soglie di coerenza/liquidita' (identiche a scan_sx_live.py) -----------
 MIN_INV_SUM, MAX_INV_SUM = 0.98, 1.08
-MIN_DEPTH_USDC = 5.0        # liquidita' totale minima del match (taker)
-MIN_LEG_DEPTH_USDC = 1.0    # minimo ordine SX Bet per singolo esito
+# FILTRO LIQUIDITA' SX (tarato l'11/09/2026): su un exchange si scommette
+# contro altri utenti, quindi su mercati sottili la quota mostrata puo' non
+# essere disponibile e l'ordine va in slippage (o resta parziale). Tre
+# soglie, tutte overridabili da env senza redeploy di codice:
+#
+#   SX_MIN_DEPTH_USDC      (25) -> liquidita' TOTALE del match (3 esiti
+#     sommati): salute del mercato, un book complessivamente vuoto non e'
+#     devigabile in modo affidabile.
+#   SX_MIN_LEG_DEPTH_USDC  (5)  -> profondita' minima di OGNI esito: sotto
+#     questa soglia il singolo lato e' di fatto inesistente.
+#   SX_MIN_EXEC_DEPTH_USDC (25) -> profondita' minima della LEG GIOCATA
+#     (il favorito scelto). E' la STESSA soglia assoluta che il guardrail
+#     d'ordine applica in auto_bet (`required_depth`): il segnale viene
+#     generato solo se l'ordine puo' davvero essere eseguito, altrimenti
+#     sarebbe rumore destinato a uno scarto sicuro al momento dell'ordine.
+MIN_DEPTH_USDC = float(os.getenv("SX_MIN_DEPTH_USDC", "25.0"))
+MIN_LEG_DEPTH_USDC = float(os.getenv("SX_MIN_LEG_DEPTH_USDC", "5.0"))
+MIN_EXEC_DEPTH_USDC = float(os.getenv("SX_MIN_EXEC_DEPTH_USDC", "25.0"))
 
 # --- Finestra dei match candidati ------------------------------------------
 HOURS_AHEAD = 24.0          # come auto_bet._today_value_picks (now..now+24h)
@@ -64,6 +83,161 @@ MIN_MINUTES_TO_START = 15   # auto_bet salta comunque i match vicini: qui
 MAX_RAW_MARKETS = 300       # mercati binari da scansionare (100 partite)
 
 _LEAGUE_MAP_CACHE: Dict[str, Optional[str]] = {}
+
+# ---------------------------------------------------------------------------
+# Mapping leghe SX -> chiave SPORTS_MAP (fix 11/09/2026)
+#
+# BUG ("mapping leghe"): il vecchio fuzzy cercava il migliore con
+# SequenceMatcher >= 0.55 e RESTITUIVA COMUNQUE un nome, anche sbagliato:
+#   'Major League Soccer' -> 'League One'      (MLS salvato come League One)
+#   'German Bundesliga'   -> 'Austrian Bundesliga'
+#   'Jupiler League'      -> 'Premier League'
+#   'K1-League'           -> 'J1 League'
+# Conseguenza: il settlement interrogava la lega SBAGLIATA di the-odds-api,
+# non trovava mai il punteggio e le bet restavano aperte per sempre.
+#
+# Qui la mappa e' DETERMINISTICA per le etichette reali osservate sull'API
+# pubblica SX (sample 11/09: ~40 label). Valore None = "l'etichetta NON e'
+# una competizione coperta da SPORTS_MAP" (rifiuto esplicito: mai indovinare).
+SX_LEAGUE_ALIASES: Dict[str, Optional[str]] = {
+    # Nord America
+    "Major League Soccer": "MLS", "MLS": "MLS", "USA MLS": "MLS",
+    "USA Major League Soccer": "MLS", "United States MLS": "MLS",
+    "USL Championship": None,
+    # Varianti con prefisso paese (viste in test/storico)
+    "Italy Serie A": "Serie A", "Italy Serie B": "Serie B",
+    # Sud America
+    "Liga Profesional": "Argentina Primera",
+    "Primera Nacional": None,          # Argentina 2: non coperta
+    "Primera A": None,                 # Colombia: non coperta
+    "Primera Division": "Chile Primera",
+    "LigaPro": None,                   # Ecuador: non coperta
+    "Division Profesional": None,      # Bolivia: non coperta
+    "Campeonato Brasileiro": "Brasileirao",
+    "Brasileiro Serie B": "Brazil Serie B",
+    # Europa
+    "English Premier League": "Premier League", "The Championship": "EFL Championship",
+    "German Bundesliga": "Bundesliga", "Jupiler League": "Belgian First Div",
+    "Portugal Primeira Liga": "Primeira Liga", "Super Lig": "Turkey Super Lig",
+    "Europa League_UEFA": "Europa League", "Champions League_UEFA": "Champions League",
+    "Premiership": "Scottish Premiership", "Superettan": "Sweden Superettan",
+    "Superliga": "Superliga Danimarca",
+    # Asia / resto del mondo
+    "K1-League": "K League 1", "K2-League": None,   # K League 2 non coperta
+    "First League": None,              # Rep. Ceca: non coperta
+    "Besta Deild Karla": None,         # Islanda: non coperta
+}
+
+_SX_ALIAS_NORM: Optional[Dict[str, Optional[str]]] = None
+
+
+def _alias_map() -> Dict[str, Optional[str]]:
+    """Alias normalizzati (etichetta -> chiave SPORTS_MAP | None), cache lazy."""
+    global _SX_ALIAS_NORM
+    if _SX_ALIAS_NORM is None:
+        from execution_engine import _name_key
+        _SX_ALIAS_NORM = {_name_key(k): v for k, v in SX_LEAGUE_ALIASES.items()}
+    return _SX_ALIAS_NORM
+
+
+def _strict_fuzzy_league(target: str) -> Optional[str]:
+    """Fallback per etichette NON in tabella: corrispondenza STRETTA e non
+    ambigua, altrimenti None (mai indovinare).
+
+    Punteggi: 1.0 se il nome coincide; 0.97 se uno e' prefisso/suffisso di
+    paese dell'altro ('Italy Serie A' -> 'Serie A'); altrimenti la
+    somiglianza di sequenza, accettata solo >= 0.92 o con token contenuti.
+    Si accetta solo il migliore se distanzia il secondo di >= 0.08, cosi'
+    un'etichetta ambigua ('Serie B' da solo tra Italia e Brasile) NON sceglie
+    a caso. 'Major League Soccer' e' in alias, quindi non arriva qui.
+    """
+    from difflib import SequenceMatcher
+    from odds_api import SPORTS_MAP
+    from execution_engine import _name_key
+    tt = set(target.split())
+    scored = []
+    for lg in SPORTS_MAP:
+        k = _name_key(lg)
+        if not k:
+            continue
+        kt = set(k.split())
+        sim = SequenceMatcher(None, target, k).ratio()
+        if target == k:
+            score = 1.0
+        elif target.endswith(" " + k) or k.endswith(" " + target):
+            score = 0.97
+        elif tt <= kt or kt <= tt:
+            score = sim
+        elif sim >= 0.92:
+            score = sim
+        else:
+            continue
+        if score > 0:
+            scored.append((score, lg))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: -x[0])
+    best_score, best = scored[0]
+    second = scored[1][0] if len(scored) > 1 else 0.0
+    if best_score < 0.90 or (best_score - second) < 0.08:
+        return None
+    return best
+
+
+def _league_sx_to_sports_map(league_label: str) -> Optional[str]:
+    """leagueLabel SX -> nome lega SPORTS_MAP (per il settlement the-odds-api).
+
+    Deterministico: 1) alias esplicita (incluse le etichette coperte da
+    SPORTS_MAP), 2) chiave SPORTS_MAP esatta, 3) fuzzy STRETTO non ambiguo.
+    None = etichetta non mappabile (settlement via fonte alternativa o da
+    correggere): MAI una lega sbagliata (bug mapping leghe 11/09).
+    """
+    if league_label in _LEAGUE_MAP_CACHE:
+        return _LEAGUE_MAP_CACHE[league_label]
+    try:
+        from execution_engine import _name_key
+        from odds_api import SPORTS_MAP
+        target = _name_key(league_label)
+        result: Optional[str] = None
+        if target:
+            amap = _alias_map()
+            if target in amap:
+                result = amap[target]
+            else:
+                for lg in SPORTS_MAP:
+                    if _name_key(lg) == target:
+                        result = lg
+                        break
+                else:
+                    result = _strict_fuzzy_league(target)
+    except Exception:
+        result = None
+    _LEAGUE_MAP_CACHE[league_label] = result
+    return result
+
+
+def league_to_sport(league: Optional[str]) -> Optional[str]:
+    """Nome lega (chiave SPORTS_MAP, etichetta SX grezza o alias) -> sport key.
+
+    Usato dal settlement per NON saltare in silenzio una lega: se il nome non
+    risolve a uno sport key the-odds-api, ritorna None e il chiamante logga.
+    """
+    if not league:
+        return None
+    try:
+        from odds_api import SPORTS_MAP
+        if league in SPORTS_MAP:
+            return SPORTS_MAP[league]
+    except Exception:
+        pass
+    lg = _league_sx_to_sports_map(league)
+    if not lg:
+        return None
+    try:
+        from odds_api import SPORTS_MAP
+        return SPORTS_MAP.get(lg)
+    except Exception:
+        return None
 
 
 def _now_ms() -> int:
@@ -135,7 +309,8 @@ def _books_parallel(provider: SxBetProvider, market_ids: List[str]) -> dict:
     return out
 
 
-def _discover(provider: SxBetProvider) -> List[dict]:
+def _discover(provider: SxBetProvider,
+              max_markets: int = MAX_RAW_MARKETS) -> List[dict]:
     """Partite 1X2 calcio SX nella finestra (now-1h .. now+HOURS_AHEAD).
 
     Discovery via endpoint RAW /markets/active (type 1 = mercati binari
@@ -146,7 +321,7 @@ def _discover(provider: SxBetProvider) -> List[dict]:
     """
     raw: List[dict] = []
     pagination_key: Optional[str] = None
-    while len(raw) < MAX_RAW_MARKETS:
+    while len(raw) < max_markets:
         params: Dict = {"sportIds": "5", "type": "1", "pageSize": 100}
         if pagination_key:
             params["paginationKey"] = pagination_key
@@ -198,35 +373,32 @@ def _discover(provider: SxBetProvider) -> List[dict]:
     return out
 
 
-def _league_sx_to_sports_map(league_label: str) -> Optional[str]:
-    """leagueLabel SX -> nome lega SPORTS_MAP (per il settlement the-odds-api).
-
-    Fuzzy con cache: 'Italy Serie A'/'Serie A (IT)' -> 'Serie A'. None se
-    nessuna corrispondenza sufficiente (settlement via fonte alternativa).
-    """
-    if league_label in _LEAGUE_MAP_CACHE:
-        return _LEAGUE_MAP_CACHE[league_label]
-    try:
-        from difflib import SequenceMatcher
-        from odds_api import SPORTS_MAP
-        from execution_engine import _name_key
-        best, best_sim = None, 0.0
-        target = _name_key(league_label)
-        for lg in SPORTS_MAP:
-            sim = SequenceMatcher(None, target, _name_key(lg)).ratio()
-            if sim > best_sim:
-                best, best_sim = lg, sim
-        result = best if best_sim >= 0.55 else None
-    except Exception:
-        result = None
-    _LEAGUE_MAP_CACHE[league_label] = result
-    return result
-
-
 def _kickoff_iso(kickoff_ms: int) -> str:
     """ms epoch -> ISO UTC con Z (formato commence_time del ledger)."""
     return datetime.fromtimestamp(kickoff_ms / 1000.0,
                                   tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _record_scan_skip(ev: dict, home: str, away: str, reason: str,
+                      odds: Dict[str, float], depths: Dict[str, float],
+                      total_depth: float, inv_sum: float,
+                      threshold: float) -> None:
+    """Registra nel monitor uno scarto per liquidita' (fail-safe).
+
+    Il monitor di liquidita' e' diagnostico: un errore di I/O non deve MAI
+    propagarsi allo scan (ne' bloccare la generazione dei segnali).
+    """
+    try:
+        from liquidity_monitor import record_skip
+        record_skip(
+            "scan", reason,
+            match_id=f"sx-{ev['event_id']}", home=home, away=away,
+            quota=min(odds.values()) if odds else None,
+            depth=total_depth, threshold=threshold,
+            leg_depth=min(depths.values()) if depths else None,
+            extra={"legs": depths, "inv_sum": round(inv_sum, 4)})
+    except Exception:
+        pass
 
 
 def scan(provider: Optional[SxBetProvider] = None) -> List[dict]:
@@ -295,6 +467,14 @@ def scan(provider: Optional[SxBetProvider] = None) -> List[dict]:
                 or any(d < MIN_LEG_DEPTH_USDC for d in depths.values())):
             logger.info("sx_signals: %s vs %s liquidita' %.1f USDC insufficiente, skip",
                         home, away, total_depth)
+            # Monitor scarti: traccia l'opportunita' persa perche' il book
+            # SX e' troppo sottile nel complesso (fail-safe).
+            thin = [k for k, d in depths.items() if d < MIN_LEG_DEPTH_USDC]
+            _record_scan_skip(
+                ev, home, away,
+                "depth_totale" if total_depth < MIN_DEPTH_USDC
+                else f"depth_esito_{thin[0]}",
+                odds, depths, total_depth, inv_sum, MIN_DEPTH_USDC)
             continue
 
         match_id = f"sx-{ev['event_id']}"
@@ -327,6 +507,23 @@ def scan(provider: Optional[SxBetProvider] = None) -> List[dict]:
         shortlist = eligible_favourites(candidates)
         if shortlist:
             best_c = max(shortlist, key=lambda c: c["ev"])
+            # Coerenza col guardrail d'ordine (`auto_bet.required_depth`): la
+            # leg che verrebbe GIOCATA deve avere profondita' al floor
+            # sufficiente a eseguire l'ordine senza slippage. Sotto la soglia
+            # assoluta il match non e' negoziabile: nessun segnale, perche'
+            # sarebbe uno scarto sicuro al momento dell'ordine (rumore nel
+            # ledger e nel CLV).
+            leg_depth = float(depths.get(best_c["esito"]) or 0.0)
+            if leg_depth < MIN_EXEC_DEPTH_USDC:
+                logger.info("sx_signals: %s vs %s leg %s profonda %.1f USDC "
+                            "< %.1f, skip (ordine non eseguibile)",
+                            home, away, best_c["esito"], leg_depth,
+                            MIN_EXEC_DEPTH_USDC)
+                _record_scan_skip(ev, home, away,
+                                  f"depth_exec_{best_c['esito']}",
+                                  odds, depths, total_depth, inv_sum,
+                                  MIN_EXEC_DEPTH_USDC)
+                continue
         else:
             best_c = max(candidates,
                          key=lambda c: (c.get("market_prob") or 0.0))
@@ -407,24 +604,39 @@ def _sx_open_matches() -> Dict[str, dict]:
 
 
 def _results_from_the_odds_api(meta: Dict[str, dict]) -> int:
-    """Punteggi via the-odds-api (fetch_scores, match per NOME+LEGA).
+    """Punteggi via the-odds-api (fetch_scores, match per NOME).
 
-    Stessa logica di bot._update_results (match_scores_by_name per evitare
-    inversioni casa/trasferta). Ritorna il numero di match_results salvati.
+    La lega salvata sul match viene RISOLTA a uno sport key the-odds-api
+    (`league_to_sport`: chiave SPORTS_MAP o alias SX) e i match raggruppati
+    per sport key. Le leghe non mappabili NON vengono saltate in silenzio:
+    restano aperte e vengono loggate (fix mapping leghe 11/09: prima il
+    fuzzy mappava alla lega sbagliata e la bet non si saldava mai).
+
+    Il match dei nomi usa sia la normalizzazione stretta sia quella loose
+    (`_loose_team`, tollerante ai prefissi club): 'FC Cincinnati' aggancia
+    'Cincinnati' senza mai invertire casa/trasferta.
     """
-    from tracker import _norm_team, save_result
-    from odds_api import fetch_scores, match_scores_by_name, SPORTS_MAP
-    leagues = {info.get("league") for info in meta.values()}
-    leagues.discard(None)
-    saved = 0
-    for lg in sorted(leagues):
-        sport = SPORTS_MAP.get(lg)
+    from tracker import _norm_team, _loose_team, save_result
+    from odds_api import fetch_scores, match_scores_by_name
+    by_sport: Dict[str, list] = {}
+    unmapped = set()
+    for mid, info in meta.items():
+        lg = info.get("league")
+        sport = league_to_sport(lg)
         if not sport:
+            unmapped.add(str(lg or "?"))
             continue
+        by_sport.setdefault(sport, []).append((mid, info))
+    if unmapped:
+        logger.warning("sx_signals: settlement — leghe non mappate a "
+                       "SPORTS_MAP, bet lasciate aperte: %s",
+                       ", ".join(sorted(unmapped)))
+    saved = 0
+    for sport, items in by_sport.items():
         try:
             scores = fetch_scores(sport, days_from=2)
         except Exception as e:
-            logger.warning("sx_signals: fetch_scores %s fallita: %s", lg, e)
+            logger.warning("sx_signals: fetch_scores %s fallita: %s", sport, e)
             continue
         for m in scores:
             parsed = match_scores_by_name(m)
@@ -433,15 +645,131 @@ def _results_from_the_odds_api(meta: Dict[str, dict]) -> int:
             sh, sa = parsed
             mh = _norm_team(m.get("home_team", ""))
             ma = _norm_team(m.get("away_team", ""))
-            for mid, info in meta.items():
-                if info.get("league") != lg:
-                    continue
-                if (_norm_team(info["home"]) == mh
-                        and _norm_team(info["away"]) == ma):
-                    save_result(mid, lg, info["home"], info["away"], sh, sa, "")
+            mlh = _loose_team(m.get("home_team", ""))
+            mla = _loose_team(m.get("away_team", ""))
+            for mid, info in items:
+                ih, ia = info["home"], info["away"]
+                if ((_norm_team(ih) == mh and _norm_team(ia) == ma)
+                        or (_loose_team(ih) == mlh and _loose_team(ia) == mla)):
+                    save_result(mid, info.get("league"), ih, ia, sh, sa, "")
                     saved += 1
                     break
     return saved
+
+
+def _roster_support(league: str, home: str, away: str) -> int:
+    """Quante delle due squadre stanno nel roster di `league` (0, 1 o 2).
+
+    Riusa la risoluzione nomi (`team_names`): 'Atlanta United' aggancia il
+    roster 'Atlanta', 'Toronto FC' aggancia 'Toronto'.
+    """
+    if not league or not home or not away:
+        return 0
+    try:
+        from leagues_data import ALL_LEAGUES
+        from team_names import resolve_team
+    except Exception:
+        return 0
+    teams = ALL_LEAGUES.get(league)
+    if not teams:
+        return 0
+    return int(bool(resolve_team(home, teams))) + \
+        int(bool(resolve_team(away, teams)))
+
+
+def _infer_league_from_teams(home: str, away: str,
+                             current: Optional[str] = None) -> Optional[str]:
+    """Lega dedotta dai roster `ALL_LEAGUES` (fallback del repair).
+
+    Serve per le partite che non sono piu' sui mercati SX (etichetta non
+    piu' leggibile). Regola PRUDENTE:
+
+      * si accetta solo se ESATTAMENTE UNA lega contiene ENTRAMBE le squadre;
+      * se la lega ATTUALE ha gia' almeno una delle due squadre nel roster,
+        non si tocca nulla: un'etichetta SX parziale resta piu' affidabile
+        di un'inferenza (es. 'Champions League' con una rosa incompleta).
+
+    Mai indovinare: una lega sbagliata farebbe interrogare the-odds-api sulla
+    competizione sbagliata e la bet resterebbe aperta.
+    """
+    if not home or not away:
+        return None
+    if current and _roster_support(current, home, away) > 0:
+        return None
+    try:
+        from leagues_data import ALL_LEAGUES
+        from team_names import resolve_team
+    except Exception:
+        return None
+    hits = [lg for lg, teams in ALL_LEAGUES.items()
+            if resolve_team(home, teams) and resolve_team(away, teams)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def repair_sx_leagues(provider: Optional[SxBetProvider] = None) -> dict:
+    """Rimappa la lega delle partite sx-* con le etichette SX CORRENTI.
+
+    Recupero del bug mapping leghe: le partite salvate col fuzzy vecchio
+    (es. MLS -> 'League One') non si sarebbero mai saldate. Legge i mercati
+    attivi (API pubblica, zero crediti) e riscrive `matches.league` con la
+    lega risolta, cosi' il settlement interroga la competizione giusta.
+
+    Per le partite NON piu' attive su SX (il loro mercato e' chiuso e
+    l'etichetta non e' piu' leggibile) si usa l'inferenza dai roster: se
+    entrambe le squadre stanno in una sola lega di `ALL_LEAGUES`, quella e'
+    la lega (fix dei residui storici tipo 8 partite MLS salvate come
+    'League One' da una versione precedente del fuzzy).
+
+    Ritorna {checked, updated, inferred}.
+    """
+    from tracker import _get_conn
+    prov = provider or SxBetProvider()
+    try:
+        # Discovery ampia: il repair deve vedere quante piu' partite attive
+        # possibile (ogni partita 1X2 = 3 mercati binari).
+        events = _discover(prov, max_markets=3000)
+    except Exception as e:
+        logger.warning("repair_sx_leagues: discovery fallita: %s", e)
+        return {"checked": 0, "updated": 0}
+    fresh = {f"sx-{ev['event_id']}": ev["league_label"] for ev in events}
+    if not fresh:
+        return {"checked": 0, "updated": 0}
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, league FROM matches WHERE id LIKE 'sx-%'").fetchall()
+    conn.close()
+    updated = 0
+    inferred_count = 0
+    for mid, old_league in rows:
+        label = fresh.get(mid)
+        # Serve comunque home/away per l'inferenza dai roster.
+        conn = _get_conn()
+        row = conn.execute("SELECT home_team, away_team, commence_time "
+                           "FROM matches WHERE id=?", (mid,)).fetchone()
+        conn.close()
+        if not row:
+            continue
+        if label:
+            new_league = _league_sx_to_sports_map(label) or label
+        else:
+            # Partita non piu' attiva: si prova a dedurre la lega dal roster
+            # (solo se quella attuale NON ha supporto: mai sovrascrivere
+            # un'etichetta SX parzialmente coerente).
+            inferred = _infer_league_from_teams(row[0], row[1], old_league)
+            if not inferred:
+                continue
+            new_league = inferred
+        if new_league != old_league:
+            from tracker import save_match
+            save_match(mid, new_league, row[0], row[1], row[2])
+            logger.info("repair_sx_leagues: %s lega '%s' -> '%s'%s",
+                        mid, old_league, new_league,
+                        "" if label else " (inferita dai roster)")
+            updated += 1
+            if not label:
+                inferred_count += 1
+    return {"checked": len(fresh), "updated": updated,
+            "inferred": inferred_count}
 
 
 def _results_from_api_football(meta: Dict[str, dict]) -> int:
@@ -460,17 +788,22 @@ def _results_from_api_football(meta: Dict[str, dict]) -> int:
     have = {r[0] for r in conn.execute(
         "SELECT match_id FROM match_results").fetchall()}
     conn.close()
+    # La lega salvata puo' essere una chiave SPORTS_MAP o un'etichetta SX:
+    # la risolvo alla chiave canonica prima di cercarla in LEAGUE_IDS.
+    resolved = {mid: (_league_sx_to_sports_map(info.get("league"))
+                      or info.get("league")) for mid, info in meta.items()}
     todo = {mid: info for mid, info in meta.items()
-            if mid not in have and info.get("league") in fh.LEAGUE_IDS}
+            if mid not in have and resolved.get(mid) in fh.LEAGUE_IDS}
     if not todo:
         return 0
     # Raggruppa per (league_id, data kickoff YYYY-MM-DD): una query ciascuno.
     groups: Dict[tuple, list] = {}
     for mid, info in todo.items():
         day = str(info.get("kickoff") or "")[:10]
-        lid = fh.LEAGUE_IDS[info["league"]]
+        league = resolved[mid]
+        lid = fh.LEAGUE_IDS[league]
         if day:
-            groups.setdefault((info["league"], lid, day), []).append((mid, info))
+            groups.setdefault((league, lid, day), []).append((mid, info))
     saved = 0
     year = datetime.now(timezone.utc).year
     for (league, lid, day), items in groups.items():
@@ -546,6 +879,9 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "settle":
         res = settle_sx_bets()
         print(f"✅ settlement SX: {res}")
+    elif len(sys.argv) > 1 and sys.argv[1] == "repair":
+        res = repair_sx_leagues()
+        print(f"🔧 repair leghe SX: {res}")
     else:
         sig = scan()
         print(f"✅ {len(sig)} segnali value salvati")

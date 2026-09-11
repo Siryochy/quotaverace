@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import random
 import sys
 from typing import Dict, List, Optional
@@ -40,6 +41,11 @@ DEFAULT_MIN_EDGE = 0.03    # filtra le puntate: solo segnali value+
 
 # Kelly dinamico: cap per status (coerente con adaptive_staking)
 KELLY_CAP = {"value": 0.03, "strong_value": 0.05}
+
+# Minimo ordine exchange (SX Bet = 1 USDC). Coerente con MIN_STAKE_EUR di
+# auto_bet/adaptive_staking (11/09: era hardcoded 2.0 e con il cap severo
+# 1% su bankroll 100 lo stake (1.0) veniva scartato -> simulazione a 0 bet).
+MIN_STAKE = float(os.getenv("MIN_STAKE_EUR", "1.0"))
 
 
 # ---------------------------------------------------------------------------
@@ -162,13 +168,13 @@ def _simulate_sequence(bets: List[Dict], bankroll0: float,
 
     seq = bets if order is None else [bets[i] for i in order]
     for b in seq:
-        if bankroll < 2.0:                     # minimo Exchange Italia
+        if bankroll < MIN_STAKE:               # sotto il minimo ordine
             busted = True
             break
         res = _kelly_stake(b["prob"], b["quota"], b["status"],
                            bankroll, peak)
         stake = min(float(res.get("stake") or 0.0), bankroll)
-        if stake < 2.0:
+        if stake < MIN_STAKE:                  # minimo ordine exchange (1 USDC)
             continue
         n_bets += 1
         stakes += stake

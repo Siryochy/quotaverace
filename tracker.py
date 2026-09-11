@@ -450,6 +450,67 @@ def _esito_possible(mercato, esito, sh, sa, home=None, away=None):
     return None
 
 
+# Finestra temporale della GUARDIA CASSA (11/09/2026): un risultato viene
+# agganciato a una scommessa della cassa solo se la sua data e' entro N
+# giorni dalla data della bet. Senza la finestra, una coppia di squadre
+# ripetuta (stessa partita dell'anno prima, andata/ritorno) poteva essere
+# saldata col risultato SBAGLIATO. Env `CASSA_MATCH_WINDOW_DAYS`.
+def _cassa_window_days() -> float:
+    try:
+        return max(0.0, float(os.getenv("CASSA_MATCH_WINDOW_DAYS", "14")))
+    except (TypeError, ValueError):
+        return 14.0
+
+
+def _cassa_anchor(data, timestamp):
+    """Data di riferimento di una bet: `data` (giorno partita, preferito)
+    oppure il `timestamp` di inserimento. None se nessuno dei due e' ISO."""
+    for v in (data, timestamp):
+        dt = _parse_ts_utc(v)
+        if dt is not None:
+            return dt
+    return None
+
+
+def _pick_cassa_result(cands, anchor, window_days):
+    """Sceglie il risultato da usare per una bet della cassa.
+
+    Guardia (11/09): tra i candidati con la stessa coppia di squadre si
+    prende quello temporalmente PIU' VICINO alla data della bet, ma solo se
+    entro `window_days`. Se i candidati sono tutti piu' vecchi della
+    finestra, NON si salda (meglio lasciare in gioco che pagare il
+    risultato sbagliato). Fallback storico (il piu' recente) solo quando
+    non c'e' alcuna data utilizzabile.
+    """
+    if not cands:
+        return None
+    timed, untimed = [], []
+    for sh, sa, ts in cands:
+        dt = _parse_ts_utc(ts)
+        (timed if dt is not None else untimed).append((sh, sa, dt, ts))
+    if anchor is None:
+        if timed:
+            best = max(timed, key=lambda c: c[2])
+        else:
+            best = untimed[-1]
+        return best[0], best[1]
+    best, best_delta = None, None
+    for sh, sa, dt, _ts in timed:
+        delta = abs((dt - anchor).total_seconds())
+        if delta > window_days * 86400:
+            continue
+        if best_delta is None or delta < best_delta:
+            best, best_delta = (sh, sa), delta
+    if best is not None:
+        return best
+    # Nessun risultato datato dentro la finestra: se esistono candidati
+    # datati, la guardia blocca la chiusura. Solo se SONO TUTTI senza data
+    # si torna al fallback storico (impossibile blindare).
+    if not timed and untimed:
+        return untimed[-1][0], untimed[-1][1]
+    return None
+
+
 def settle_cassa():
     """Salda le scommesse aperte della cassa con i risultati reali (match_results).
 
@@ -459,6 +520,11 @@ def settle_cassa():
     chiamata.
 
     PAUSA SETTLEMENT (11/09): con la pausa attiva non chiude nulla (ritorna 0).
+
+    GUARDIA CASSA (11/09): il risultato viene scelto per vicinanza temporale
+    alla data della bet e solo entro `CASSA_MATCH_WINDOW_DAYS` (default 14):
+    coppie di squadre ripetute (2015 vs 2026, andata/ritorno) non pescano
+    piu' un risultato sballato.
 
     SANITY CHECK: se i gol registrati sono corrotti (punteggio negativo/
     non numerico) o l'esito calcolato è in contraddizione EVIDENTE coi gol
@@ -472,35 +538,46 @@ def settle_cassa():
     _create_results_table(conn)
     c = conn.cursor()
     try:
-        rows = c.execute("SELECT id, partita, esito, quota, importo FROM cassa "
+        rows = c.execute("SELECT id, partita, esito, quota, importo, data, "
+                         "timestamp FROM cassa "
                          "WHERE esito_finale IS NULL").fetchall()
         results = c.execute("SELECT home_team, away_team, score_home, score_away, "
                             "settled_at FROM match_results").fetchall()
     finally:
         conn.close()
-    norm_map = {}
-    for home, away, sh, sa, settled_at in results:
-        # Doppia chiave (stretta + loose): 'CA Osasuna' e 'Osasuna' devono
-        # agganciare lo stesso match. Se la stessa coppia ha più partite
-        # (es. stagioni diverse), si salda sulla PIÙ RECENTE: la cassa si
-        # riferisce al match corrente, non a una riga storica (bug 2025).
-        for key in ((_norm_team(home), _norm_team(away)),
-                    (_loose_team(home), _loose_team(away))):
-            if key not in norm_map or (settled_at or "") > (norm_map[key][2] or ""):
-                norm_map[key] = (sh, sa, settled_at or "")
+    # Candidati per coppia normalizzata: TUTTI i risultati (non solo il piu'
+    # recente) — la scelta avviene per vicinanza alla data della bet.
+    # Doppia chiave (stretta + loose): 'CA Osasuna' e 'Osasuna' devono
+    # agganciare lo stesso match.
+    cand_map = {}
 
+    def _add(key, sh, sa, ts):
+        if not key[0] or not key[1]:
+            return
+        cand_map.setdefault(key, []).append((sh, sa, ts or ""))
+
+    for home, away, sh, sa, settled_at in results:
+        _add((_norm_team(home), _norm_team(away)), sh, sa, settled_at)
+        _add((_loose_team(home), _loose_team(away)), sh, sa, settled_at)
+
+    window = _cassa_window_days()
     conn = _get_conn(); c = conn.cursor()
     now = datetime.now().isoformat()
-    settled = blocked = 0
-    for cid, partita, esito, quota, importo in rows:
+    settled = blocked = out_window = 0
+    for cid, partita, esito, quota, importo, data_row, ts_row in rows:
         # "Serie A – Roma vs Empoli" -> ultimo " vs " separa casa/trasferta
         clean = partita.split(" – ")[-1].strip() if " – " in partita else partita
         if " vs " not in clean:
             continue
         parts = clean.split(" vs ")
         home, away = _loose_team(parts[0].strip()), _loose_team(parts[1].strip())
-        match = norm_map.get((home, away))
+        cands = cand_map.get((home, away))
+        if not cands:
+            continue
+        anchor = _cassa_anchor(data_row, ts_row)
+        match = _pick_cassa_result(cands, anchor, window)
         if match is None:
+            out_window += 1
             continue
         sh, sa = match[0], match[1]
         if not _goals_sane(sh, sa):
@@ -524,6 +601,9 @@ def settle_cassa():
     conn.commit(); conn.close()
     if blocked:
         logger.warning("settle_cassa: %d righe BLOCCATE dal sanity check", blocked)
+    if out_window:
+        logger.info("settle_cassa: %d righe con risultati fuori dalla finestra "
+                    "temporale (%.0f gg) — restano in gioco", out_window, window)
     return settled
 
 

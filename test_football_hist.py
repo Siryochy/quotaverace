@@ -2,6 +2,8 @@
 Test unitari per la sincronizzazione risultati storici (API-Football).
 """
 
+import sqlite3
+
 import pytest
 
 import tracker
@@ -12,16 +14,24 @@ import football_hist as fh
 def _tmp_db(monkeypatch, tmp_path):
     monkeypatch.setattr(tracker, "DB_PATH", tmp_path / "hist.db")
     tracker.init_db()
+    # Il memo in-process delle stagioni accessibili non deve attraversare i
+    # test (ogni test parte dall'anno corrente).
+    fh.reset_sync_state()
     yield
+    fh.reset_sync_state()
 
 
-def _fixture(status="FT", home="Roma", away="Empoli", gh=2, ga=0, fxid=1001):
-    return {
+def _fixture(status="FT", home="Roma", away="Empoli", gh=2, ga=0, fxid=1001,
+             api_league=None, api_country=None):
+    fx = {
         "fixture": {"id": fxid, "date": "2026-08-30T18:00:00Z",
                     "status": {"short": status}},
         "teams": {"home": {"name": home}, "away": {"name": away}},
         "goals": {"home": gh, "away": ga},
     }
+    if api_league is not None:
+        fx["league"] = {"name": api_league, "country": api_country or ""}
+    return fx
 
 
 class _Resp:
@@ -176,3 +186,201 @@ class TestRunSync:
         monkeypatch.delenv("API_FOOTBALL_KEY", raising=False)
         text = fh.run_sync()
         assert "mancante" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Copertura leghe estesa (11/09/2026): il modello era cieco sulle leghe che
+# SX Bet scansiona ma che non erano mai state sincronizzate.
+# ---------------------------------------------------------------------------
+
+class TestCoperturaLeghe:
+    def test_leghe_sx_ora_coperte(self):
+        for lg in ("Champions League", "Europa League", "Conference League",
+                   "Primeira Liga", "Liga MX", "Serie B", "J1 League",
+                   "K League 1", "Allsvenskan", "Eliteserien",
+                   "Argentina Primera", "Copa Libertadores"):
+            assert lg in fh.LEAGUE_IDS, f"{lg} non sincronizzata"
+
+    def test_ogni_lega_sincronizzabile_ha_un_roster(self):
+        """Tripwire (11/09/2026): sincronizzare una lega SENZA roster in
+        `ALL_LEAGUES` brucia richieste API e salva 0 righe (`_match_db_name`
+        non allinea nessuna squadra). Ogni id deve avere il suo roster."""
+        from leagues_data import ALL_LEAGUES
+        senza = [lg for lg in fh.LEAGUE_IDS if not ALL_LEAGUES.get(lg)]
+        assert senza == []
+
+    def test_leghe_dei_buchi_ora_in_all_leagues(self):
+        """I roster aggiunti l'11/09 chiudono i buchi di copertura emersi dal
+        report sul container (leghe SX senza elenco squadre)."""
+        from leagues_data import ALL_LEAGUES
+        for lg in ("Austrian Bundesliga", "Russian Premier League",
+                   "Turkey Super Lig", "Belgian First Div",
+                   "Scottish Premiership", "Greek Super League",
+                   "Polish Ekstraklasa", "Sweden Superettan",
+                   "Brazil Serie B", "Copa Sudamericana", "League One",
+                   "3. Liga"):
+            assert ALL_LEAGUES.get(lg), f"{lg}: roster assente"
+            assert lg in fh.LEAGUE_IDS, f"{lg}: id API assente"
+
+    def test_ogni_id_ha_una_validazione(self):
+        for lg in fh.LEAGUE_IDS:
+            assert lg in fh.LEAGUE_API
+
+    def test_id_unici(self):
+        ids = list(fh.LEAGUE_IDS.values())
+        assert len(ids) == len(set(ids))
+
+
+class TestValidazioneId:
+    def test_nome_e_paese_corretti(self):
+        fx = [_fixture(api_league="Serie A", api_country="Italy")]
+        assert fh._league_response_ok(fx, "Serie A") is True
+
+    def test_nome_diverso_blocca(self):
+        fx = [_fixture(api_league="Eredivisie", api_country="Netherlands")]
+        assert fh._league_response_ok(fx, "Serie A") is False
+
+    def test_paese_diverso_blocca(self):
+        fx = [_fixture(api_league="Serie A", api_country="Brazil")]
+        assert fh._league_response_ok(fx, "Serie A") is False
+
+    def test_senza_metadati_non_blocca(self):
+        assert fh._league_response_ok([_fixture()], "Serie A") is True
+        assert fh._league_response_ok([], "Serie A") is True
+
+    def test_lega_non_in_tabella_non_blocca(self):
+        fx = [_fixture(api_league="Qualcosa", api_country="Ovunque")]
+        assert fh._league_response_ok(fx, "Lega Non Mappata") is True
+
+
+class TestSyncNonImportaIdSbagliato:
+    def test_id_sbagliato_nessuna_riga(self, monkeypatch):
+        """L'id risponde per un'altra competizione: la sync salta (0 righe),
+        cosi' un id sbagliato non puo' inquinare i rating."""
+        monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+        monkeypatch.setattr(fh.time, "sleep", lambda *a, **k: None)
+
+        def api(path, params=None):
+            return {"results": 1, "response": [
+                _fixture(api_league="Eredivisie", api_country="Netherlands")]}
+
+        monkeypatch.setattr(fh, "_api_get", api)
+        res = fh.sync_history(seasons=1, leagues=["Serie A"])
+        assert res["_total"] == 0
+        conn = tracker._get_conn()
+        try:
+            n = conn.cursor().execute(
+                "SELECT COUNT(*) FROM match_results").fetchone()[0]
+        except sqlite3.OperationalError:
+            n = 0            # tabella mai creata: nessun salvataggio
+        conn.close()
+        assert n == 0
+        assert fh._is_synced("Serie A", 1) is False
+
+
+class TestMarkerSincronizzazione:
+    """Il marker (lega, stagione) evita di ri-scaricare ogni giorno decine di
+    leghe: il free plan ha 100 richieste al giorno."""
+
+    def test_marker_dopo_sync(self, monkeypatch):
+        monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+        monkeypatch.setattr(fh.time, "sleep", lambda *a, **k: None)
+        monkeypatch.setattr(fh, "_api_get",
+                            lambda p, params=None:
+                            {"results": 1, "response": [_fixture()]})
+        assert fh._is_synced("Serie A", 1) is False
+        fh.sync_history(seasons=1, leagues=["Serie A"])
+        assert fh._is_synced("Serie A", 1) is True
+
+    def test_secondo_giro_non_chiama_api(self, monkeypatch):
+        monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+        monkeypatch.setattr(fh.time, "sleep", lambda *a, **k: None)
+        calls = []
+        monkeypatch.setattr(fh, "_api_get",
+                            lambda p, params=None: (calls.append(params),
+                                                    {"results": 1,
+                                                     "response": [_fixture()]})[1])
+        fh.sync_history(seasons=1, leagues=["Serie A"])
+        first = len(calls)
+        res = fh.sync_history(seasons=1, leagues=["Serie A"])
+        assert len(calls) == first          # nessuna nuova richiesta
+        assert res["_skipped"] == 1 and res["_total"] == 0
+
+    def test_force_history_sync_ignora_i_marker(self, monkeypatch):
+        monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+        monkeypatch.setattr(fh.time, "sleep", lambda *a, **k: None)
+        monkeypatch.setattr(fh, "_api_get",
+                            lambda p, params=None:
+                            {"results": 1, "response": [_fixture()]})
+        fh.sync_history(seasons=1, leagues=["Serie A"])
+        monkeypatch.setenv("FORCE_HISTORY_SYNC", "1")
+        assert fh._is_synced("Serie A", 1) is False
+        res = fh.sync_history(seasons=1, leagues=["Serie A"])
+        assert res["_total"] == 1 and res["_skipped"] == 0
+
+    def test_nessun_marker_se_la_stagione_fallisce(self, monkeypatch):
+        monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+        monkeypatch.setattr(fh.time, "sleep", lambda *a, **k: None)
+        monkeypatch.setattr(fh, "_api_get", lambda p, params=None: None)
+        monkeypatch.setattr(fh, "MAX_YEAR_RETRIES", 0)
+        fh.sync_history(seasons=1, leagues=["Serie A"])
+        assert fh._is_synced("Serie A", 1) is False
+
+
+class TestMemoStagioni:
+    """Il piano free rifiuta le stagioni recenti: la prima lega scopre il
+    limite e le successive partono da li' (2 richieste risparmiate/lega)."""
+
+    def test_le_altre_leghe_partono_dal_limite(self, monkeypatch):
+        monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+        monkeypatch.setattr(fh.time, "sleep", lambda *a, **k: None)
+        calls = []
+
+        def api(path, params=None):
+            calls.append(dict(params or {}))
+            year = (params or {}).get("season")
+            if year is not None and int(year) >= 2025:
+                return {"errors": {"plan": "Free plans do not have access"}}
+            return {"results": 1, "response": [_fixture()]}
+
+        monkeypatch.setattr(fh, "_api_get", api)
+        res = fh.sync_history(seasons=1, leagues=["Serie A", "Premier League"])
+        assert res["_total"] == 2
+        assert fh._SYNC_STATE["first_year"] == 2024
+        pl_seasons = [c.get("season") for c in calls
+                      if c.get("league") == fh.LEAGUE_IDS["Premier League"]]
+        assert pl_seasons == [2024]        # una sola richiesta, senza sprechi
+
+
+class TestVerifyLeagueIds:
+    def test_ok_e_mismatch(self, monkeypatch):
+        def api(path, params=None):
+            lid = (params or {}).get("id")
+            if lid == fh.LEAGUE_IDS["Serie A"]:
+                return {"response": [{"league": {"name": "Serie A"},
+                                      "country": {"name": "Italy"}}]}
+            return {"response": [{"league": {"name": "Championship"},
+                                  "country": {"name": "England"}}]}
+
+        monkeypatch.setattr(fh, "_api_get", api)
+        res = fh.verify_league_ids(["Serie A", "Primeira Liga"])
+        assert res["Serie A"]["ok"] is True
+        assert res["Primeira Liga"]["ok"] is False
+        assert res["Primeira Liga"]["api_name"] == "Championship"
+
+    def test_errore_api_segnalato(self, monkeypatch):
+        monkeypatch.setattr(fh, "_api_get",
+                            lambda p, params=None:
+                            {"errors": {"access": "suspended"}})
+        res = fh.verify_league_ids(["Serie A"])
+        assert res["Serie A"]["ok"] is False
+        assert "suspended" in str(res["Serie A"]["error"])
+
+
+class TestRunSyncConSkip:
+    def test_messaggio_con_leghe_gia_sincronizzate(self, monkeypatch):
+        monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+        monkeypatch.setattr(fh, "_is_synced", lambda lg, s: True)
+        text = fh.run_sync(1, ["Serie A"])
+        assert "gia' sincronizzate" in text
+        assert "nessuna lega da sincronizzare" in text

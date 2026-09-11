@@ -33,7 +33,7 @@ export default function Value() {
         <Link href="/dashboard" className="text-sm text-blue-400 hover:underline">← Dashboard</Link>
       </div>
       <p className="text-gray-400 text-sm mb-6">
-        Filtri Pro: EV 3-15% · Odds 1.50-5.00 · Kelly 1/4 · Cap 3% · confronto col mercato (devig power)
+        Filtri Pro: EV 2-15% · Odds 1.30-1.80 · Edge ≥ +3pp · Kelly 1/4 · Cap 1-2% · confronto col mercato (devig power)
       </p>
       {usingDemo && <p className="text-amber-400 text-sm mb-6">⚠️ Backend non raggiungibile — dati dimostrativi.</p>}
 

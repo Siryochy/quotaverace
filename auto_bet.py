@@ -72,6 +72,18 @@ REAL_MODE_VALUES = ("live", "real", "1", "true", "on")
 KILL_SWITCH_FILE = DATA_DIR / "execution" / "auto_bet_mode.json"
 KILL_SWITCH_VALUES = ("off", "sim", "live")
 
+# --- Stop-loss giornaliero (11/09/2026) ---
+# Taglia le perdite durante i "giorni neri": se il bankroll scende di
+# DAILY_STOP_LOSS_PCT (default 5%) rispetto al valore registrato a INIZIO
+# giornata, le puntate vengono BLOCCATE per DAILY_STOP_HOURS (default 24h).
+# Lo stato vive sul volume (data/execution/daily_stop.json) e sopravvive ai
+# redeploy; si ri-arma al primo giro del giorno successivo.
+# In LIVE il bankroll e' il saldo REALE del wallet (il rischio e' denaro
+# vero), in SIM la cassa. Env: DAILY_STOP_LOSS_PCT, DAILY_STOP_HOURS.
+DAILY_STOP_LOSS_PCT = float(os.getenv("DAILY_STOP_LOSS_PCT", "0.05"))
+DAILY_STOP_HOURS = float(os.getenv("DAILY_STOP_HOURS", "24"))
+DAILY_STOP_FILE = DATA_DIR / "execution" / "daily_stop.json"
+
 # --- Correlation risk cap ---
 # Kelly assume indipendenza tra le puntate: due o piu' esiti correlati nello
 # stesso blocco temporale (stessa partita, stessa lega con kickoff ravvicinati)
@@ -104,6 +116,39 @@ MIN_STAKE_EUR = float(os.getenv("MIN_STAKE_EUR", "1.0"))
 # STAKE_CAP_HARD=0.
 STAKE_CAP_HARD = os.getenv("STAKE_CAP_HARD", "1").strip().lower() \
     in ("1", "true", "yes", "on")
+
+# --- FILTRO LIQUIDITA' SX (tarato 11/09/2026) ------------------------------
+# SX Bet e' un EXCHANGE: la quota mostrata esiste solo se c'e' chi compra
+# dall'altra parte. Un book sottile produce slippage o un riempimento
+# parziale, quindi prima di ogni ordine REALE si pretende che la profondita'
+# BACK disponibile AL FLOOR (quota-segnale o meglio) copra lo stake con
+# margine:
+#
+#     richiesto = max(stake * SX_DEPTH_MULTIPLIER, SX_MIN_EXEC_DEPTH_USDC)
+#
+#   SX_DEPTH_MULTIPLIER (default 2.0) -> lo stake non deve esaurire il book:
+#     se lo stake consuma meta' del lato, il resto della size muove il prezzo
+#     e la quota "richiesta" non e' piu' garantita.
+#   SX_MIN_EXEC_DEPTH_USDC (default 25.0) -> soglia ASSOLUTA di libro al
+#     floor per qualunque stake: un mercato quasi vuoto non e' negoziabile
+#     (e' la stessa soglia che `sx_signals` pretende sulla leg giocata, cosi'
+#     non si generano segnali che l'ordine scarterebbe sempre).
+# Con STAKE_CAP_HARD attivo l'ordine viene SALTATO (fail-closed) e lo scarto
+# finisce nel monitor (liquidity_monitor, kind="order").
+SX_DEPTH_MULTIPLIER = float(os.getenv("SX_DEPTH_MULTIPLIER", "2.0"))
+MIN_EXEC_DEPTH_USDC = float(os.getenv("SX_MIN_EXEC_DEPTH_USDC", "25.0"))
+
+
+def required_depth(stake: float) -> float:
+    """Profondita' BACK minima al floor per eseguire `stake` senza slippage.
+
+    E' il vincolo che il guardrail d'ordine applica: il massimo tra il
+    multiplo dello stake (margine sul book) e la soglia assoluta di libro.
+    """
+    try:
+        return max(float(stake) * SX_DEPTH_MULTIPLIER, MIN_EXEC_DEPTH_USDC)
+    except (TypeError, ValueError):
+        return MIN_EXEC_DEPTH_USDC
 
 # --- Flat-stake override (09/09) ---
 # In alternativa al Kelly dinamico si puo' piazzare un importo FISSO per
@@ -481,7 +526,7 @@ def _today_value_picks() -> list[dict]:
     non aggiornati — non possono mai trasformarsi in un ordine.
     """
     from tracker import _get_conn
-    from value_filter import (ODDS_MAX, MIN_FAVOURITE_MARKET_PROB,
+    from value_filter import (ODDS_MIN, ODDS_MAX, MIN_FAVOURITE_MARKET_PROB,
                               FAVOURITES_ONLY)
     conn = _get_conn()
     c = conn.cursor()
@@ -507,6 +552,11 @@ def _today_value_picks() -> list[dict]:
                 logger.info("auto_bet: skip %s %s @ %s (quota > %.2f: "
                             "strategia solo favoriti)", mid, esito, quota,
                             ODDS_MAX)
+                continue
+            if float(quota) < ODDS_MIN:
+                logger.info("auto_bet: skip %s %s @ %s (quota < %.2f: "
+                            "fascia favoriti %.2f-%.2f)", mid, esito, quota,
+                            ODDS_MIN, ODDS_MIN, ODDS_MAX)
                 continue
             if m_prob is not None and float(m_prob) < MIN_FAVOURITE_MARKET_PROB:
                 logger.info("auto_bet: skip %s %s (prob. mercato %.2f < %.2f)",
@@ -614,6 +664,109 @@ def _requested_mode() -> str:
     return os.getenv("AUTO_BET_MODE", "sim").strip().lower()
 
 
+def _parse_iso_utc(s) -> "datetime | None":
+    """ISO-8601 -> datetime UTC aware (None se non parsabile)."""
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _load_daily_stop() -> dict:
+    try:
+        data = json.loads(DAILY_STOP_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_daily_stop(data: dict) -> None:
+    DAILY_STOP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = DAILY_STOP_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, DAILY_STOP_FILE)
+
+
+def clear_daily_stop() -> None:
+    """Azzera lo stop-loss giornaliero (riattiva le puntate)."""
+    try:
+        DAILY_STOP_FILE.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def daily_stop_status() -> dict:
+    """Stato dello stop-loss per /autobet: bloccato finche' `now < until`."""
+    now = datetime.now(timezone.utc)
+    data = _load_daily_stop()
+    until = _parse_iso_utc(data.get("stopped_until"))
+    return {
+        "stopped": bool(until and now < until),
+        "until": until.isoformat() if until else None,
+        "day": data.get("day"),
+        "start_bankroll": data.get("start_bankroll"),
+        "stopped_at": data.get("stopped_at"),
+        "reason": data.get("reason"),
+        "loss_pct": DAILY_STOP_LOSS_PCT * 100,
+        "hours": DAILY_STOP_HOURS,
+        "file": str(DAILY_STOP_FILE),
+    }
+
+
+def check_daily_stop(bankroll: float | None) -> dict:
+    """Registra il bankroll di inizio giornata e blocca se perde >= pct.
+
+    Ritorna {stopped, start_bankroll, loss_pct, until, just_triggered}.
+    Fail-open: un errore di lettura/scrittura NON blocca le puntate (meglio
+    puntare che fermarsi per un file corrotto), ma il blocco attivo resta
+    rispettato.
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        data = _load_daily_stop()
+        until = _parse_iso_utc(data.get("stopped_until"))
+        if until is not None and now < until:
+            return {"stopped": True, "until": until.isoformat(),
+                    "start_bankroll": data.get("start_bankroll"),
+                    "loss_pct": None, "just_triggered": False}
+        if DAILY_STOP_LOSS_PCT <= 0 or not bankroll or bankroll <= 0:
+            return {"stopped": False, "loss_pct": None,
+                    "just_triggered": False}
+        today = now.date().isoformat()
+        if data.get("day") != today or not data.get("start_bankroll"):
+            _save_daily_stop({"day": today, "start_bankroll": float(bankroll),
+                              "stopped_until": None})
+            return {"stopped": False, "start_bankroll": float(bankroll),
+                    "loss_pct": 0.0, "just_triggered": False}
+        start = float(data["start_bankroll"])
+        loss = (start - float(bankroll)) / start if start > 0 else 0.0
+        if loss >= DAILY_STOP_LOSS_PCT:
+            until = now + timedelta(hours=DAILY_STOP_HOURS)
+            data.update({"stopped_until": until.isoformat(),
+                         "stopped_at": now.isoformat(),
+                         "start_bankroll": start,
+                         "reason": f"cassa -{loss * 100:.1f}% dall'inizio "
+                                   f"giornata (bankroll {bankroll:.2f})"})
+            _save_daily_stop(data)
+            logger.error("auto_bet: STOP-LOSS GIORNALIERO — perdita %.1f%% "
+                         "(>= %.0f%%): puntate bloccate fino a %s",
+                         loss * 100, DAILY_STOP_LOSS_PCT * 100,
+                         until.isoformat())
+            return {"stopped": True, "until": until.isoformat(),
+                    "start_bankroll": start, "loss_pct": loss * 100,
+                    "just_triggered": True}
+        return {"stopped": False, "start_bankroll": start,
+                "loss_pct": loss * 100, "just_triggered": False}
+    except Exception as e:
+        logger.warning("auto_bet: check_daily_stop fallito (%s), fail-open", e)
+        return {"stopped": False, "loss_pct": None, "just_triggered": False}
+
+
 def _provider_ready() -> bool:
     """True se execution_engine puo' piazzare ordini REALI (provider
     selezionato da EXECUTION_PROVIDER + credenziali, nessun DryRun)."""
@@ -675,6 +828,45 @@ def _execution_mode(allow_sim: bool = True) -> str:
             mode, "SIM (fallback)" if allow_sim else "nessuna puntata")
         return "sim" if allow_sim else "off"
     return "sim"
+
+
+def _live_available_size(prov, market_id: str, selection_id: int,
+                         min_price: float) -> float | None:
+    """Profondita' BACK disponibile a prezzo >= `min_price` (USDC/stake).
+
+    None se il book non e' leggibile o in un formato non noto (il chiamante
+    NON blocca in quel caso: la guardia liquidita' scatta solo con un dato
+    reale). Su un exchange un mercato sottile produce slippage o riempimenti
+    parziali: se la size al floor e' inferiore allo stake, si salta.
+    """
+    get_book = getattr(prov, "get_market_book", None)
+    if get_book is None:
+        return None
+    try:
+        book = get_book(market_id)
+    except Exception:
+        return None
+    for r in (book or {}).get("runners", []) or []:
+        sid = r.get("selectionId", r.get("selection_id"))
+        try:
+            if int(sid) != int(selection_id):
+                continue
+        except (TypeError, ValueError):
+            continue
+        levels = r.get("availableToBack") or r.get("available_to_back")
+        if not isinstance(levels, list):
+            return None  # book in formato non noto: non bloccare
+        total = 0.0
+        for lv in levels:
+            try:
+                p = float(lv.get("price") or 0)
+                size = float(lv.get("size") or 0)
+            except (TypeError, ValueError):
+                continue
+            if p + 1e-9 >= min_price:
+                total += size
+        return total
+    return None
 
 
 def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
@@ -741,6 +933,42 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
                     best, float(floor))
         return None
 
+    # Guardia liquidita' (tarata 11/09): il prezzo migliore puo' avere size
+    # inferiore allo stake -> slippage o riempimento parziale. Si pretende la
+    # copertura dello stake CON MARGINE (stake x SX_DEPTH_MULTIPLIER) e una
+    # profondita' assoluta minima (SX_MIN_EXEC_DEPTH_USDC). Si salta solo se
+    # il book E' leggibile: se il formato e' ignoto NON si blocca (fail-open
+    # sulla lettura, fail-closed sulla size reale effettivamente misurata).
+    need = required_depth(float(stake))
+    depth = _live_available_size(prov, market_id, sel, float(floor))
+    if depth is not None and depth + 1e-9 < need:
+        logger.info("auto_bet: %s vs %s (%s): liquidita' %.2f < richiesta "
+                    "%.2f (stake %.2f x %.2f, minimo %.2f) al floor %.2f, "
+                    "salto (rischio slippage)",
+                    pick["home"], pick["away"], pick["esito_key"],
+                    depth, need, float(stake), SX_DEPTH_MULTIPLIER,
+                    MIN_EXEC_DEPTH_USDC, float(floor))
+        # Monitor scarti (11/09): l'ordine e' saltato per book sottile.
+        # Traccia anche l'edge NON realizzato (EV x stake target): e' la
+        # metrica che quantifica il costo dello slippage evitato.
+        try:
+            from liquidity_monitor import record_skip
+            record_skip("order", "depth_vs_stake",
+                        match_id=pick.get("match_id"),
+                        home=pick.get("home"), away=pick.get("away"),
+                        esito=pick.get("esito_key"), quota=float(floor),
+                        depth=depth, threshold=need,
+                        stake=float(stake), ev=pick.get("best_ev"),
+                        extra={"market_id": market_id,
+                               "selection_id": sel,
+                               "provider": getattr(prov, "name", "?"),
+                               "richiesto": round(need, 2),
+                               "multiplier": SX_DEPTH_MULTIPLIER,
+                               "min_exec_depth": MIN_EXEC_DEPTH_USDC})
+        except Exception:
+            pass
+        return None
+
     try:
         order = prov.place_limit_order(market_id, sel, "BACK",
                                        float(floor), float(stake))
@@ -762,6 +990,22 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
     logger.info("auto_bet: ORDINE REALE riempito %s (%s vs %s, %s) @ %.2f "
                 "per €%.2f [%s]", market_id, pick["home"], pick["away"],
                 pick["esito_key"], matched_price, matched_stake, order.status)
+    # Monitor scarti (11/09): riempimento PARZIALE = parte dello stake non
+    # eseguita (liquido insufficiente oltre il primo livello).
+    if matched_stake + 1e-9 < float(stake):
+        try:
+            from liquidity_monitor import record_skip
+            record_skip("partial", "riempimento_parziale",
+                        match_id=pick.get("match_id"),
+                        home=pick.get("home"), away=pick.get("away"),
+                        esito=pick.get("esito_key"), quota=matched_price,
+                        stake=round(float(stake) - matched_stake, 4),
+                        ev=pick.get("best_ev"),
+                        extra={"stake_richiesto": float(stake),
+                               "stake_riempito": matched_stake,
+                               "market_id": market_id})
+        except Exception:
+            pass
     return {"ok": True, "market_id": market_id, "selection_id": sel,
             "bet_id": order.bet_id, "status": order.status or "SUCCESS",
             "price": matched_price, "stake": matched_stake}
@@ -835,6 +1079,15 @@ def run_today_bets(stake_eur: float | None = None,
             _peak = _wallet_balance  # drawdown vs saldo attuale (nessuno storico)
             logger.info("auto_bet: bankroll LIVE = saldo wallet %.2f USDC",
                         _wallet_balance)
+
+    # --- STOP-LOSS GIORNALIERO (11/09): nessuna puntata dopo un -5% dal
+    # valore di inizio giornata, per DAILY_STOP_HOURS (default 24h).
+    stop = check_daily_stop(_bankroll)
+    if stop.get("stopped"):
+        logger.error("auto_bet: STOP-LOSS GIORNALIERO attivo fino a %s "
+                     "(%s) — nessuna puntata", stop.get("until"),
+                     stop.get("reason") or "perdita giornaliera")
+        return []
 
     # Carica CLV storico per la confidenza
     try:

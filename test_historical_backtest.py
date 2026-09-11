@@ -338,6 +338,31 @@ class TestNoOuNoUnder:
                any(b["mercato"] == "MATCH_ODDS" for b in res["_bets"])
 
 
+class TestProductionMode:
+    def test_production_applica_gate_favoriti(self, monkeypatch):
+        """--production attiva il gate solo-favoriti di value_filter.is_sane
+        (stessa selezione del bot), usato per simulare gli stake reali."""
+        import value_filter
+        seen = []
+        real = value_filter.is_sane
+
+        def spy(prob, odds, ev, market_prob=None, odds_max=None,
+                favourites_only=False, **kw):
+            seen.append(favourites_only)
+            return real(prob, odds, ev, market_prob=market_prob,
+                        odds_max=odds_max, favourites_only=favourites_only)
+
+        monkeypatch.setattr(value_filter, "is_sane", spy)
+        res = run_backtest(_synthetic_matches(10), ensemble=False,
+                           flat_stake=20.0, no_ou=True, production=True)
+        # il dataset sintetico non ha favoriti <= 1.80: il gate li esclude
+        # tutti (status 'no_bets' e' il risultato corretto, non un errore).
+        assert res["status"] in ("ok", "no_bets")
+        assert seen and all(seen)
+        assert all(b["quota"] <= 1.80 for b in res.get("_bets", []))
+        assert all(b["mercato"] == "MATCH_ODDS" for b in res.get("_bets", []))
+
+
 class TestReport:
     def test_report_completo(self):
         res = run_backtest(_synthetic_matches(), ensemble=False, flat_stake=20.0)

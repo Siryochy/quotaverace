@@ -34,8 +34,11 @@ from typing import Dict, List, Optional
 
 # --- Soglie di mercato (ricerca: servono almeno 3-5 punti percentuali
 # --- di edge vs la closing line perche' il valore non sia rumore)
-MARKET_EDGE_MIN = 0.02          # +2pp vs mercato per "value" (09/09: abbassato per piu' segnali)
-MARKET_EDGE_MODERATE = 0.02     # +2pp per segnali "moderate"
+# Edge minimo vs mercato (11/09): il modello deve stimare una prob. di
+# vittoria SUPERIORE a quella devigata dei bookmaker di almeno +3pp;
+# +5pp per "strong_value". Non si scommette mai il favorito "alla cieca".
+MARKET_EDGE_MIN = 0.03          # +3pp vs mercato per "value" (era 0.02)
+MARKET_EDGE_MODERATE = 0.03     # +3pp per segnali "moderate"
 MARKET_EDGE_STRONG = 0.05       # +5pp vs mercato per "strong_value"
 
 # Peso del modello nel blending modello+mercato (0.5 = pari peso).
@@ -80,6 +83,17 @@ LEAGUE_EFFICIENCY = {
     "Argentina Liga Profesional": 0.45,
     "Liga Portugal": 0.55,
     "Scottish Premiership": 0.50,
+    # Leghe aggiunte l'11/09/2026 (roster + sync): mercati medi, poca
+    # liquidita' sharp -> il modello ha piu' spazio del top 5.
+    "Austrian Bundesliga": 0.45,
+    "Russian Premier League": 0.45,
+    "Turkey Super Lig": 0.50,
+    "Belgian First Div": 0.50,
+    "Greek Super League": 0.45,
+    "Polish Ekstraklasa": 0.45,
+    "Sweden Superettan": 0.35,
+    "Brazil Serie B": 0.40,
+    "3. Liga": 0.45,
     "Liga MX": 0.50,
     "J1 League": 0.40,
     "K League 1": 0.40,

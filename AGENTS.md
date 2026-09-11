@@ -29,6 +29,8 @@ bookmaker_advantage.py → soft book lag detection vs Pinnacle
 adaptive_staking.py → Kelly frazionato dinamico + drawdown protection
 secure_logging.py   → filtro log: maschera segreti/token, httpx silenzioso
 rating_engine.py    → rating squadre time-decay (shrink usa COUNT reale `n`, NON `wsum`!)
+team_names.py       → risoluzione nomi squadra bookmaker→DB (11/09: 'Tottenham
+                      Hotspur'→'Tottenham', 'Wrexham'→'Wrexham AFC', ...)
 poisson_engine.py   → modello Poisson/Dixon-Coles
 value_filter.py     → gate EV + mercato, is_sane()
 backtest.py         → calibrazione EV vs ROI, split "batte il mercato"
@@ -1125,3 +1127,465 @@ avvisa se il saldo attuale non lo sostiene. Env dichiarata in
 `preserve()` in `.railway/railway.ts`. Tripwire:
 `test_favourites_only.TestStakeCapSevero` (incl. wallet 38 USDC → zero
 ordini) e `test_auto_bet_live` (hard ON = salta, OFF = floor 1 USDC).
+
+### Fix strutturali critici 11/09/2026 (mapping leghe + guardia cassa)
+
+**1) FIX MAPPING LEGHE (`sx_signals.py`) — il bug che bloccava il
+settlement e lasciava le bet aperte.** Il fuzzy `SequenceMatcher >= 0.55`
+restituiva SEMPRE il nome più simile, anche quando era sbagliato. Sample
+reale delle etichette SX (API pubblica, ~40 label) con i mapping vecchi:
+`Major League Soccer -> League One`, `German Bundesliga -> Austrian
+Bundesliga`, `Jupiler League -> Premier League`, `K1-League -> J1 League`,
+`LigaPro -> 3. Liga`, `Primera Nacional -> Primeira Liga`, `Primera A ->
+Primeira Liga`, `Primera Division -> Primeira Liga`, `First League ->
+A-League`, `K2-League -> K League 1`. Conseguenza: il settlement
+interrogava the-odds-api sulla competizione SBAGLIATA, non trovava mai il
+punteggio e le bet `sx-*` restavano aperte per sempre.
+- Nuova tabella `SX_LEAGUE_ALIASES` DETERMINISTICA (etichetta SX → chiave
+  `SPORTS_MAP`, con `None` = "competizione non coperta": mai indovinare).
+  Copre le 39 label reali osservate (`MLS`, `Liga Profesional -> Argentina
+  Primera`, `Jupiler League -> Belgian First Div`, `K1-League -> K League
+  1`, `The Championship -> EFL Championship`, `Superliga -> Superliga
+  Danimarca`, `Europa League_UEFA -> Europa League`, ecc.).
+- Risoluzione a 3 stadi in `_league_sx_to_sports_map`: alias → chiave
+  `SPORTS_MAP` esatta → fuzzy STRETTO (`_strict_fuzzy_league`: match exact
+  1.0, prefisso/suffisso di paese 0.97, altrimenti similarità ≥ 0.92 o
+  token contenuti, con guardia di ambiguità ≥ 0.08 sul secondo). Esiti
+  ambigui (`Serie B` Italia vs Brasile, `Super League`) → `None`.
+- Nuovo resolver `league_to_sport(league)`: chiave `SPORTS_MAP`, etichetta
+  SX grezza o alias → sport key. Usato dal settlement (`sx_signals` e
+  `bot._update_results`), che ora LOGGA le leghe non mappate invece di
+  saltarle in silenzio.
+- `_results_from_the_odds_api` raggruppa i match per sport key RISOLTO e
+  matcha i nomi sia stretti sia loose (`_loose_team`): 'FC Cincinnati'
+  aggancia 'Cincinnati' senza invertire casa/trasferta.
+- `repair_sx_leagues()` + CLI `venv/bin/python sx_signals.py repair`:
+  rilegge i mercati attivi da SX (API pubblica, zero crediti) e riscrive
+  `matches.league` delle partite `sx-*`, recuperando le righe salvate col
+  fuzzy vecchio (il `scan()` ogni 15' fa già self-heal delle partite in
+  finestra, perché `save_match` è INSERT OR REPLACE).
+- Tripwire: `test_league_mapping.py` (alias reali, rifiuti espliciti,
+  fuzzy stretto, resolver, settlement con lega alias e con lega non
+  mappata → 0 chiamate API + bet aperta, repair).
+
+**2) GUARDIA CASSA con finestra temporale (`tracker.settle_cassa`).**
+La cassa aggancia le bet ai risultati per NOME (non per id): la stessa
+coppia di squadre può comparire più volte (stagione precedente,
+andata/ritorno) e il vecchio codice prendeva la riga "più recente" senza
+limite. Ora:
+- ogni candidato per coppia normalizzata è raccolto (non solo il più
+  recente) e la scelta avviene per **vicinanza temporale** alla data della
+  bet (`data`, in fallback `timestamp`);
+- il risultato viene usato solo entro `CASSA_MATCH_WINDOW_DAYS` (default
+  **14**, env) dalla bet; fuori finestra la riga **resta in gioco** e
+  viene loggata (`out_window`);
+- fallback storico (il più recente) SOLO se non esiste alcuna data
+  utilizzabile.
+- Tripwire: `test_cassa_window.py` (risultato vecchio bloccato, scelta del
+  più vicino, env override, fallback senza date, idempotenza).
+
+**3) BUG INCIDENTALE TROVATO E FIXATO — `STALE_INPLAY_HOURS` non
+definita (`odds_api.py`).** `_cache_is_stale_for_settlement` usava la
+costante ma non era mai stata definita → `NameError` inghiottito
+dall'`except` → la cache punteggi "in corso da ore ma completed=False"
+veniva considerata valida e il settlement restava bloccato (un'altra
+causa di bet aperte). Aggiunta `STALE_INPLAY_HOURS = 3` (un match di
+calcio finisce entro ~2h). `test_scores_cache_stale` torna verde.
+
+**4) `backtest_mc` minimo stake allineato alla produzione.**
+`_simulate_sequence` scartava gli stake `< 2.0` (minimo Exchange Italia);
+con il cap severo 1% su bankroll 100 lo stake è 1.0 (floor SX) → TUTTE le
+bet venivano scartate e la simulazione dava 0. Nuova `MIN_STAKE` (env
+`MIN_STAKE_EUR`, default 1.0). `test_backtest_mc` torna verde.
+
+**5) SIMULAZIONE STAKE NEL BACKTEST (`historical_backtest.py`).** Nuovo
+flag `--production`: applica la strategia di produzione (gate
+`is_sane(favourites_only=True)`, `--max-odds` default 1.80, `--no-ou`
+implicito) e usa lo stake Kelly 1/4 con cap 1% di `value_filter.kelly_euro`.
+Risultati sul dataset cached (16.273 partite, `--no-ensemble`):
+- **modalità PRODUZIONE: 0 bet** — nel mercato storico (quote di
+  chiusura/Pinnacle) il gate favoriti + EV ≥ 2% non trova alcun valore: il
+  blend pesa il mercato e sui favoriti il modello NON batte la closing
+  line. Conferma il motivo dei pochi segnali live.
+- baseline di ricerca (universo `MAX_ODDS` 5.0): 7.861 bet, ROI −8.27%,
+  MaxDD 99.8% (bankroll 100 → 3.08); `by_market` OU −6.85%, 1X2 −14.73%.
+- 1X2-only (`--no-ou`) flat: 2.619 bet, ROI −9.95%, hit 27.8%, avg quota
+  3.41 (universo di ricerca, NON il gate favoriti).
+
+Stato test: tutti i file verdi (inclusi i 4 nuovi/aggiornati); la suite
+completa resta lunga (>10 min) → girare a file/capitoli.
+
+### Guardrail di rischio 11/09/2026 (quota minima, edge, stop-loss, liquidità)
+
+Direttiva del proprietario: rendere il sistema più prudente sui favoriti.
+Quattro protezioni aggiunte, tutte con env override (nessun redeploy di
+codice) e tripwire dedicati in `test_risk_guards.py`.
+
+**1) QUOTA MINIMA `ODDS_MIN` 1.50 → 1.30 (`value_filter.py`).**
+Insieme a `ODDS_MAX` (1.80) definisce la fascia dei favoriti netti
+**1.30–1.80**: sotto 1.30 il ritorno per unità di stake non compensa il
+rischio (probabilità implicita > 77%). Sotto soglia `is_sane` rifiuta con
+"quota troppo bassa". Il messaggio di `favourites_gate_reason()` e il
+display webapp (`webapp/app/value/page.tsx`) sono allineati.
+
+**2) EDGE MINIMO +3pp (`market_calib.py`).** `MARKET_EDGE_MIN` e
+`MARKET_EDGE_MODERATE` riportati da 0.02 a **0.03** (+3pp di probabilità
+stimata vs mercato devigato): il bot NON punta il favorito "alla cieca",
+deve battere il mercato. `MARKET_EDGE_STRONG` resta +5pp per i
+`strong_value`. ⚠️ Contro la direttiva del 10/09 (che li aveva abbassati a
++2pp per aumentare la frequenza): ora la priorità è la prudenza, non il
+volume. `EV_MIN` resta 2%.
+
+**3) STOP-LOSS GIORNALIERO (`auto_bet.py`).** Se il bankroll scende del
+**5%** (`DAILY_STOP_LOSS_PCT`) rispetto al valore registrato a inizio
+giornata, le puntate vengono **bloccate per 24h** (`DAILY_STOP_HOURS`).
+- Stato persistente sul volume (`data/execution/daily_stop.json`, scrittura
+  atomica): sopravvive ai redeploy, si ri-arma al primo giro del giorno
+  successivo.
+- In LIVE il bankroll è il saldo REALE del wallet SX (rischio = denaro
+  vero); in SIM la cassa. Fail-open: un file corrotto NON blocca le
+  puntate, ma un blocco attivo resta rispettato.
+- Hook in `run_today_bets` (check subito dopo la determinazione del
+  bankroll) + `daily_stop_status()` per `/autobet` + alert Telegram
+  una-volta-al-giorno nel job (chiave `DAILY_STOP`, anti-spam col giro ogni
+  60s) + `clear_daily_stop()` per la rimozione manuale.
+
+**4) FILTRO LIQUIDITÀ SX (`sx_signals.py` + `auto_bet.py`).** Su un
+exchange la quota mostrata può non essere disponibile: due guardie.
+- **Generazione segnali** (`sx_signals.scan`): `SX_MIN_DEPTH_USDC`
+  (default 15) sulla profondità totale del match e
+  `SX_MIN_LEG_DEPTH_USDC` (default 5) sulla profondità minima del singolo
+  esito → i mercati sottili non generano segnali.
+- **Prima dell'ordine** (`auto_bet._live_available_size`): la size BACK
+  disponibile al floor deve coprire lo stake, altrimenti l'ordine viene
+  saltato (rischio slippage/riempimento parziale). Se il book non è
+  leggibile o è in formato ignoto NON blocca (fail-open sulla lettura,
+  fail-closed sulla size reale).
+
+Stato test: `test_risk_guards.py` (nuovo) + `test_value_filter`,
+`test_favourites_only`, `test_auto_bet*`, `test_sx_signals`,
+`test_market_calib` tutti verdi.
+
+### Verifica forzata dei guardrail + monitor scarti liquidita' (11/09/2026)
+
+**1) VERIFICA FORZATA (`verify_guardrails.py`).** Script di diagnostica che
+dimostra — con i log REALI e senza toccare la produzione (DATA_DIR e DB
+temporanei, mai un provider reale) — che i guardrail bloccano davvero le
+puntate. Esito ultimo giro: **tutti i guardrail BLOCCANO** (A-E).
+- **A. Kill-switch OFF** → `modalita' 'off' (kill-switch o fail-closed):
+  nessuna puntata`, 0 ordini.
+- **B. Stop-loss -5%** → `STOP-LOSS GIORNALIERO — perdita 6.0% (>= 5%):
+  puntate bloccate fino a ...`, 0 ordini anche se il bankroll risale.
+- **C. Cap severo 1%** → con wallet 38 USDC lo stake Kelly×cap = 0.38 <
+  minimo ordine 1.0: `CAP SEVERO: stake cappato 0.38 USDC < minimo ordine
+  1.00 USDC ... ordine saltato (fail-closed)`, 0 ordini inviati al
+  provider. Controprova con `STAKE_CAP_HARD=0`: il floor viene accettato
+  e l'ordine parte (1 USDC).
+- **D. Quote 1.30-1.80** → quota 1.90 scartata (`quota > 1.80`), quota
+  1.20 scartata (`quota < 1.30: fascia favoriti 1.30-1.80`, gate aggiunto
+  come difesa in profondita' in `auto_bet._today_value_picks`), esito non
+  favorito scartato (`prob. mercato < 0.50`).
+- **E. Liquidita' SX** → con stake 5 USDC i richiesti sono
+  `max(5 × 2.0, 25.0) = 25.0` USDC al floor: book da 4 USDC →
+  `liquidita' 4.00 < richiesta 25.00 ... salto (rischio slippage)`, 0 ordini
+  inviati e scarto `order/depth_vs_stake` nel monitor; controprova con book
+  da 26 USDC → l'ordine parte (1 chiamata al provider).
+Uso: `venv/bin/python verify_guardrails.py` (exit 0 = tutto bloccato).
+
+**2) MONITOR SCARTI LIQUIDITA' (`liquidity_monitor.py`, nuovo).**
+Su SX Bet (exchange) uno scarto per book sottile e' un'edge potenzialmente
+persa: il monitor la rende misurabile invece che silenziosa.
+- **Log JSONL sul volume** (`data/execution/liquidity_skips.jsonl`, path
+  overridabile con `LIQUIDITY_SKIP_LOG`). Tre tipi di evento:
+  `scan` (segnale non generato: `sx_signals.scan`), `order` (ordine reale
+  saltato: `auto_bet._live_fill`) e `partial` (riempimento parziale
+  materializzato). Per gli scarti d'ordine registra anche l'**edge NON
+  realizzato** (`EV × stake`), la metrica che quantifica il costo.
+- **Bot**: job `liquidity_monitor_job` ogni 6h che logga SEMPRE lo stato e
+  allerta admin+iscritti (anti-spam 1/giorno, chiave `LIQ_SKIP`) solo se ci
+  sono scarti nelle 24h; sezione `💧 Scarti liquidita' SX` nel report
+  giornaliero. Zero costi API (legge solo il JSONL).
+- **CLI**: `venv/bin/python liquidity_monitor.py [--days N] [--json]`.
+- Fail-safe totale: `record_skip`/`iter_events` non propagano mai eccezioni
+  (un log corrotto o non scrivibile non blocca mai il giro puntate).
+- Test: `test_liquidity_monitor.py` (12+ test: riepilogo/finestra/righe
+  corrotte/fail-safe/scan/order/partial/report/tripwire job/difesa
+  quota-min a valle).
+
+Stato test: focus verdi — `test_liquidity_monitor`, `test_risk_guards`,
+`test_bot`, `test_sx_signals`, `test_auto_bet_live`, `test_reports`,
+`test_web_api`, `test_tier`, `test_performance_report`.
+
+### Taratura soglie di liquidita' SX (11/09/2026, secondo giro)
+
+Obiettivo del proprietario: il bot deve **rifiutare da solo** gli ordini su
+mercati SX Bet senza liquidita' sufficiente a eseguire la quota richiesta
+senza slippage. La pagina visiva degli scarti arrivera' dopo: qui si sono
+tarate le soglie (tutte da env, zero redeploy di codice).
+
+**1) GUARDRAIL D'ORDINE (`auto_bet.py`) — la parte vincolante.**
+Prima bastava `profondita' al floor >= stake` (copertura secca: lo stake
+poteva esaurire il lato del book). Ora il vincolo e' **copertura con
+margine**:
+
+```
+richiesto = max(stake × SX_DEPTH_MULTIPLIER (2.0), SX_MIN_EXEC_DEPTH_USDC (25.0))
+```
+
+- `SX_DEPTH_MULTIPLIER` (default **2.0**): lo stake non deve consumare piu'
+  della meta' del lato visibile al floor — altrimenti il resto della size
+  muove il prezzo e la quota "richiesta" non e' piu' garantita.
+- `SX_MIN_EXEC_DEPTH_USDC` (default **25.0**): soglia ASSOLUTA di libro al
+  floor per qualunque stake (un mercato quasi vuoto non e' negoziabile
+  nemmeno con 1 USDC).
+- Nuova helper `auto_bet.required_depth(stake)` (unica fonte della formula,
+  testata); il salto e' fail-closed e finisce nel monitor con
+  `threshold = richiesto`, `extra.richiesto/multiplier/min_exec_depth`.
+- Fail-open SOLO sulla lettura del book (formato ignoto/provider senza
+  book): resta fail-closed sulla size reale misurata.
+- Esempi: stake 1-5 USDC → servono 25 USDC al floor; stake 20 USDC → 40
+  (il multiplo prevale: max(40, 25)).
+
+**2) GUARDRAIL DI SCAN (`sx_signals.py`) — coerenza con l'ordine.**
+- `SX_MIN_DEPTH_USDC` 15 → **25** (liquidita' TOTALE delle 3 leg: salute
+  del mercato).
+- `SX_MIN_LEG_DEPTH_USDC` resta **5** (ogni singolo esito esiste).
+- NUOVO `SX_MIN_EXEC_DEPTH_USDC` (**25**, stessa env e stesso default di
+  `auto_bet`): la **leg che verrebbe giocata** (il favorito scelto) deve
+  avere almeno 25 USDC al floor. Sotto soglia il match non produce NESSUN
+  segnale (`continue` prima di `save_match`): un segnale non eseguibile
+  sarebbe rumore nel ledger e nel CLV. Scarto registrato come
+  `scan/depth_exec_<esito>`.
+- Effetto: le soglie di mercato restano morbide sulle leg NON giocate
+  (l'underdog sottile non elimina piu' un match giocabile sul favorito),
+  mentre la leg giocata e' allineata 1:1 al guardrail d'ordine.
+
+**3) MONITOR (`liquidity_monitor.py`).** Default riallineati (25/5/25/×2.0),
+nuovo blocco `thresholds` in `summary()` e riga "Soglie attive" nel report
+Telegram; il messaggio di allerta finale elenca anche le nuove env.
+
+**4) ENV in `preserve()`** (`.railway/railway.ts`): `SX_MIN_EXEC_DEPTH_USDC`
+e `SX_DEPTH_MULTIPLIER` aggiunte accanto alle altre soglie liquidita', cosi'
+`railway config apply` non le distrugge.
+
+**Test**: `test_risk_guards.py` (soglie gemelle scan/ordine +
+`required_depth` = max(multiplo, minimo), fallback su stake non numerico),
+`test_liquidity_monitor.py` (book 6 USDC con stake 5 → salto per margine e
+evento con `threshold`/`extra.richiesto`; scan con leg giocata a 6 USDC e
+totale 86 → `depth_exec_1`), `verify_guardrails.py` (scenario E).
+Tutti verdi nel focus: risk_guards + liquidity_monitor + sx_signals (39),
+auto_bet* + favourites_only + value_filter + market_calib + tier + reports
+(132), test_bot (20).
+
+### Misura dell'impatto delle soglie (11/09/2026, `liquidity_impact.py`)
+
+Prima di riattivare il bot: **quante puntate bloccano davvero le nuove
+soglie?** Nuova diagnostica `liquidity_impact.py` (solo LETTURA: API
+pubblica SX, zero crediti, zero ordini, nessuna scrittura sul ledger —
+tripwire in `test_liquidity_impact.py`). Misura DUE grandezze che non vanno
+confuse:
+- **profondita' di mercato** di un esito = somma di TUTTI i livelli
+  (quella usata dal filtro di `sx_signals.scan`);
+- **size al floor** = somma delle size al prezzo migliore (quella usata dal
+  guardrail d'ordine `auto_bet._live_available_size`).
+
+CLI: `venv/bin/python liquidity_impact.py [--hours 72] [--max-events 200]
+[--with-model] [--json] [--save file.json] [--from-cache file.json]`
+(campione congelato in `data/execution/liquidity_impact_sample.json`).
+
+**ISOLAMENTO DELLE VARIABILI (direttiva 11/09)**: il default misura
+**SOLO la liquidita'**. Con `with_model=False` il modello non viene nemmeno
+interrogato (`_row_for_event` esce prima di `expected_goals`): la selezione
+del favorito dipende solo dal mercato (devig + fascia quota), quindi nessun
+numero del conteggio scarti puo' essere inquinato da ratings/EV. Il gate
+modello esiste come sezione **opt-in** (`--with-model`, variabile separata da
+misurare quando i ratings saranno allineati). Tripwire:
+`test_liquidity_impact` (default senza chiavi modello, modello mai chiamato,
+verdetto solo-liquidita').
+
+**Campione reale 11/09/2026 (197 partite, finestra 72h, tutte le leghe SX):**
+- 177 partite coerenti (inv_sum 0.98-1.08).
+- Filtro di MERCATO: **VECCHIE soglie 177/177 (100%), NUOVE 177/177 (100%),
+  bloccate 0 (0.0%)**.
+- 42 candidati favoriti (fascia 1.30-1.80 + prob. mercato): **42/42 (100%)
+  eseguibili** col guardrail d'ordine.
+- Sensibilita' allo stake (richiesto = max(stake×2, SX_MIN_EXEC_DEPTH_USDC)):
+  stake 1-10 USDC **42/42**, stake 20 USDC 41/42 (97.6%).
+- Se irrigidissimo la soglia della leg giocata: 25 USDC → 42/42, 50 → 41/42,
+  100 → 38/42 (90.5%). La liquidita' dei 1X2 calcio su SX e' ABBONDANTE
+  (size al floor: p10 102, p50 263, p90 986 USDC).
+- **Verdetto: la liquidita' NON e' il collo di bottiglia**; le soglie sono
+  prudenti ma non restrittive (si potrebbe alzare la soglia senza uccidere
+  il flusso). Riga esplicita nel report: **SCOMMESSE PERSE PER LIQUIDITA'
+  = 0/42 (0.0%)**.
+- **TARATURA FINALE (decisione 11/09 sera)**: `SX_MIN_EXEC_DEPTH_USDC`
+  portata da **10 → 25 USDC** su indicazione del proprietario, proprio
+  perche' la misura mostrava che alzare la soglia NON taglia opportunita'
+  (nella sensibilita' del misuratore 25 USDC → 42/42 eseguibili, 100%).
+  Vale insieme in `sx_signals` (scan) e `auto_bet` (ordine): piu'
+  protezione da slippage a impatto nullo sul flusso. `SX_DEPTH_MULTIPLIER`
+  resta 2.0; totale match 25 ed esito singolo 5 invariati.
+
+**⚠️ CAVEAT IMPORTANTE — GATE MODELLO non misurabile in locale.** Il DB
+locale ha **0 righe in `team_ratings`** (i rating vivono sul volume Railway):
+`expected_goals` usa quindi il profilo neutro di lega e il modello non
+rappresenta la produzione. Nel campione il gate modello da' 0 segnali value,
+ma QUEL numero va misurato sul container. Lo script ora rileva la cosa da
+solo: campo `model_gate.measurable` + avviso esplicito nel report quando la
+copertura ratings e' 0%.
+
+### Copertura rating sul container + gate modello (11/09/2026, SOLA LETTURA)
+
+Verifica eseguita con `railway ssh --service api -- python3 -c ...`:
+sqlite aperto in **`mode=ro`** (URI read-only), nessun ordine, nessuna
+scrittura sul ledger, zero crediti the-odds-api (discovery SX pubblica).
+
+**1) ENV su Railway**: `SX_MIN_DEPTH_USDC`, `SX_MIN_LEG_DEPTH_USDC`,
+`SX_MIN_EXEC_DEPTH_USDC`, `SX_DEPTH_MULTIPLIER` **non sono impostate**
+(`os.getenv` → None) → valgono i default di CODICE. Quindi la soglia 25 e'
+attiva appena il codice viene deployato (nessuna env da aggiornare);
+`preserve()` in `.railway/railway.ts` serve solo a non farle distruggere se
+un giorno verranno impostate.
+
+**2) COPERTURA RATING (il collo di bottiglia vero del gate modello).**
+`team_ratings` = **200 squadre / 14 leghe** (ultimo aggiornamento
+11/09 01:49), `match_results` = 2725. Profonde solo 9 leghe: MLS 39, Serie A
+24, La Liga 23, Eredivisie 19, Premier League 18, EFL Championship 18,
+Brasileirao 18, Ligue 1 17, Bundesliga 16; le altre 5 leghe hanno 1-3
+squadre (Primeira Liga 1, Champions League 0, Liga MX 0, Russian Premier
+League 0, Brazil Serie B 0). Il ledger SX ha 69 partite: **5 con entrambe le
+squadre rated (4 con n>=5)**, 19 con una sola, **45 con nessuna**.
+Ripartizione SX (n / con entrambe rated): Primeira Liga 10/0, Premier League
+7/1, Champions League 6/0, Brazil Serie B 5/0, League One 5/2, Russian
+Premier League 5/0, Sweden Superettan 4/0, Liga MX 4/0, Austrian Bundesliga
+4/0, Allsvenskan 3/0, Serie B 3/0.
+
+**3) GATE MODELLO LIVE (stesso giro, mercati freschi)**: 39 mercati SX,
+36 coerenti (inv_sum 0.98-1.08), **3 candidati favoriti** (fascia 1.30-1.80).
+Solo **3/36 coerenti (8.3%)** hanno entrambe le squadre con rating;
+**nessuno dei 3 favoriti** ha rating. Edge modello sul favorito di mercato:
+mediana **-24.1pp** (p10 -26.5, p90 -13.5), **0/3 con edge >= 0** → **0
+segnali value** a qualunque soglia (2pp/3pp/5pp). Interpretazione: su squadre
+senza rating `expected_goals` usa il profilo NEUTRO di lega, che su un
+favorito netto (quota 1.30-1.80) da' una probabilita' molto inferiore a
+quella del mercato: l'edge negativo e' **cecita' del modello**, non un
+segnale di valore. Il gate modello NON e' misurabile in modo utile finche'
+la copertura resta questa.
+
+**4) SECONDO GAP: NORMALIZZAZIONE DEI NOMI** (anche nelle leghe coperte).
+Confronto SX ↔ `team_ratings` sulle partite SX delle leghe coperte — i nomi
+spesso NON combaciano (ratio difflib): `Wrexham` vs `Wrexham AFC` (0.78),
+`AFC Bournemouth` vs `Bournemouth` (0.85), `Ipswich Town` vs `Ipswich`
+(0.74), `Willem II Tilburg` vs `Willem II` (0.69), `Tottenham Hotspur` vs
+`Tottenham` (0.69), `AS Monaco FC` vs `Monaco` (0.67),
+`Olympique Marseille` vs `Marseille` (0.64); `Nottingham Forest` assente.
+Nota collaterale: nel ledger `matches` compaiono righe con league
+`Premier League` per club belgi (KV Mechelen, RSC Anderlecht) — residuo di
+un mapping pre-fix (il ledger viene riscritto solo quando lo scan rivede il
+match: il `repair_sx_leagues()` lo sana).
+
+**5) Conseguenza operativa**: prima di fidarsi del gate modello servono
+(a) ratings estesi alle leghe che SX scansiona davvero (CL, Primeira, Liga
+MX, Austria, Svezia, Russia, Brazil B, ...) e (b) una mappa alias nomi
+squadra SX↔API-Football (stesso pattern deterministico di
+`SX_LEAGUE_ALIASES`, mai fuzzy). **→ FATTO l'11/09 sera** (vedi "Fix cecita'
+modello: 3 passi"): (b) e' `team_names.py` (coverage 5/69 -> 15/69) e (a)
+e' la coppia rosters (`ALL_LEAGUES` 35 -> 47) + `LEAGUE_IDS` (8 -> 41);
+resta da eseguire la sync quando l'account API-Football sara' riattivato.
+Solo dopo ha senso rilanciare `liquidity_impact.py --with-model` sul
+container per numeri rappresentativi.
+
+### Fix cecita' modello: 3 passi (11/09/2026)
+
+Direttiva del proprietario: fermare tutto e chiudere i tre gap emersi dal
+report, verificando IN LOCALE prima di pensare al deploy.
+
+**PASSO 1 — repair del ledger (`sx_signals.repair_sx_leagues`).**
+Il repair leggeva l'etichetta SX solo per le partite ANCORA sui mercati: i
+residui storici (es. 5 partite MLS salvate come `League One` dal fuzzy
+vecchio) restavano sbagliati per sempre. Ora c'e' un fallback che deduce la
+lega dai ROSTER (`ALL_LEAGUES`) via `_infer_league_from_teams(home, away,
+current)`, e la risoluzione nomi (`team_names`) fa agganciare anche i nomi SX
+reali (`Atlanta United` -> roster `Atlanta`, `Toronto FC` -> `Toronto`).
+Regola PRUDENTE: si sovrascrive SOLO se la lega attuale NON ha nessuna delle
+due squadre nel roster (`_roster_support(current) == 0`) e se ESATTAMENTE
+una lega contiene entrambe — altrimenti non si tocca nulla. Prova del
+perche': con una regola piu' aggressiva il repair aveva trasformato
+`Champions League` in `Europa League` per Fenerbahçe–AS Roma (roster CL
+incompleto ma etichetta SX corretta). Verificato in locale: `League One` ->
+`MLS` su 5/5 residui, `Champions League` intatto, secondo giro `updated 0`
+(idempotente). CLI: `venv/bin/python sx_signals.py repair`.
+
+**PASSO 2 — risoluzione nomi squadra (`team_names.py`, nuovo).**
+Quattro stadi deterministici, mai un indovinello: (1) match esatto,
+(2) `TEAM_ALIASES` espliciti (Nottingham Forest -> Nottm Forest, Spurs ->
+Tottenham, PSG -> Paris Saint-Germain, ...), (3) chiave normalizzata
+(minuscole, senza accenti/punteggiatura, senza token societari FC/AFC/AC/AS/
+KV/RSC/..., senza numeri di fondazione, token ordinati), (4) contenimento di
+token con GUARDIA DI AMBIGUITA' (due candidati troppo vicini -> None).
+Innescato in `rating_engine.get_rating` (`resolve_team_name`): da li' lo
+usano `poisson_engine.expected_goals`, `sx_signals.scan`, `auto_bet` e
+`liquidity_impact`. Fail-safe totale: qualunque errore o dubbio ricade sul
+nome originale (profilo neutro), mai su un rating sbagliato.
+Misura sui DATI REALI del container (69 partite SX, 200 nomi rating):
+partite con ENTRAMBE le squadre rated **5/69 (7.2%) -> 15/69 (21.7%)**, 3x.
+Le non risolte sono squadre ASSENTI da `team_ratings` (Brazil Serie B,
+Superettan, CL: Fenerbahçe, Shakhtar, Slavia Praha...): e' il gap di
+copertura del passo 3, non un problema di nomi.
+
+**PASSO 3 — copertura leghe (`football_hist.py` + `leagues_data.py`).**
+`LEAGUE_IDS` passa da 8 a **41 leghe**: coppe europee (CL 2, EL 3,
+Conference 848, Libertadores 13, Sudamericana 11), cadetterie e campionati
+che SX scansiona (Championship 40, League One 41, Serie B 136, Primeira Liga
+94, Liga MX 262, J1 98, K League 1 292, Saudi 307, Swiss 207, Superliga DK
+119, Allsvenskan 113, Eliteserien 103, A-League 188, Veikkausliiga 244,
+Argentina 128, Chile 265, Colombia 239, Egitto 233) piu' le 10 chiuse
+l'11/09 sera (Austria 218, Russia 235, Turchia 203, Belgio 144, Scozia 179,
+Grecia 197, Polonia 106, 3. Liga 80, Superettan 114, Brazil Serie B 72).
+**Roster aggiunti in `ALL_LEAGUES` (35 -> 47 leghe):** Austria, Russia,
+Turchia, Belgio, Scozia, Grecia, Polonia, 3. Liga, Superettan, Brazil Serie
+B, League One, Copa Sudamericana (~150 squadre con profili prior, costruiti
+con l'helper `_profiles`). Senza roster `_match_db_name` non allinea nessuna
+squadra: la sync brucerebbe richieste salvando 0 righe. Tripwire:
+`test_football_hist.test_ogni_lega_sincronizzabile_ha_un_roster` (ogni id in
+`LEAGUE_IDS` DEVE avere un roster non vuoto) + `test_leghe_dei_buchi_ora_in_
+all_leagues`. In piu' `LEAGUE_EFFICIENCY` (market_calib) ha ora gli score
+delle nuove leghe per il blend dinamico. Aggiunte tre difese:
+- **validazione id→lega** (`LEAGUE_API` + `_league_response_ok`): la sync
+  confronta nome/paese restituiti dall'API con l'atteso e SALTA la lega se
+  non combaciano — un id sbagliato non puo' importare un'altra competizione
+  sotto il nome sbagliato;
+- **marker di sincronizzazione** (tabella `sync_state`, per lega+stagione,
+  scritti SOLO dopo il salvataggio): niente piu' 30 leghe riscaricate ogni
+  giorno (free plan 100 req/giorno). `FORCE_HISTORY_SYNC=1` li ignora;
+- **memo stagioni** in-process: la prima lega scopre dove comincia la
+  copertura del piano, le successive partono da li' (2 richieste/lega in
+  meno). Nuova CLI `--verify-ids` (una chiamata per lega, nessuna scrittura)
+e `--reset-markers`.
+
+**⚠️ BLOCCO ESTERNO SUL PASSO 3 — account API-Football SOSPESO.**
+Verificato sia in locale sia SUL CONTAINER con una chiamata reale a
+`/leagues`: `{'access': 'Your account is suspended, check on
+https://dashboard.api-football.com.'}` (chiave presente, 32 char, ma
+rifiutata; `--verify-ids` -> 0/30). Quindi il job giornaliero
+`history_sync_job` (08:30 ITA) e' fermo da tempo: ecco perche' le leghe
+extra sono vuote. La sync NON ha mai importato dati sbagliati (salta la
+lega e logga), ma finche' l'account non viene riattivato il passo 3 resta
+*implementato e non eseguito*: dopo la riattivazione basta
+`venv/bin/python football_hist.py --verify-ids` e poi `/sync` (o
+`football_hist.py --seasons 2`).
+
+**STATO CONTAINER (11/09 sera)**: prima del deploy il container girava codice
+SENZA `SX_LEAGUE_ALIASES`, `repair_sx_leagues`, `team_names` (verificato via
+`railway ssh`: attributi assenti). Dopo il push (deploy automatico Railway)
+il repair si esegue SUL container, cosi' sana anche i residui del volume:
+`railway ssh --service api -- python3 sx_signals.py repair`. Il repair ora
+usa l'inferenza dai roster: i residui belgi salvati come `Premier League`
+(KV Mechelen, RSC Anderlecht) diventano `Belgian First Div` — verificato in
+locale (`_infer_league_from_teams('KV Mechelen','RSC Anderlecht',
+'Premier League') -> 'Belgian First Div'`).
+
+**Verifica finale in locale (prima del deploy)**: 130 test verdi sul set
+toccato (league_mapping, team_names, football_hist, odds_api, rating_engine,
+poisson_engine, sx_signals, market_calib); tutti gli id hanno roster; nessun
+roster vuoto in `ALL_LEAGUES`.

@@ -126,8 +126,10 @@ class TestStrategiaSoloFavoriti:
     def test_tripwire_soglie(self):
         """Le soglie non devono tornare indietro senza una decisione esplicita."""
         import value_filter as vf
+        from market_calib import MARKET_EDGE_MIN
         assert vf.ODDS_MAX <= 1.80
-        assert vf.ODDS_MIN >= 1.50
+        assert vf.ODDS_MIN >= 1.30          # fascia favoriti 1.30-1.80
+        assert MARKET_EDGE_MIN >= 0.03      # edge minimo +3pp vs mercato
         assert vf.FAVOURITES_ONLY is True
         assert vf.MIN_FAVOURITE_MARKET_PROB == 0.50
 

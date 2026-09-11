@@ -98,10 +98,36 @@ def compute_ratings():
                   (team, league, atk_h, def_h, atk_a, def_a,
                    n_h, n_a, datetime.now().isoformat()))
     conn.commit(); conn.close()
+    # L'indice dei nomi (team_names) e' cambiato: la cache va invalidata,
+    # altrimenti si continuerebbe a risolvere i nomi sul vecchio elenco.
+    try:
+        from team_names import invalidate as _invalidate_names
+        _invalidate_names()
+    except Exception:
+        pass
     return len(acc)
 
 
+def resolve_team_name(team):
+    """Nome canonico nel DB per `team` (fix cecita' modello 11/09/2026).
+
+    I bookmaker usano nomi diversi dai nostri ('Tottenham Hotspur' vs
+    'Tottenham', 'Wrexham' vs 'Wrexham AFC', 'KV Mechelen' vs 'Mechelen'):
+    senza risoluzione la riga non si trova e il modello ricade sul profilo
+    neutro. La risoluzione vive in `team_names` (deterministica, fail-safe:
+    in caso di dubbio ritorna il nome originale, mai una squadra sbagliata).
+    """
+    if not team:
+        return team
+    try:
+        from team_names import resolve_team
+        return resolve_team(team) or team
+    except Exception:
+        return team
+
+
 def get_rating(team):
+    team = resolve_team_name(team)
     conn = sqlite3.connect(str(DB_PATH))
     c = conn.cursor()
     c.execute("SELECT attack_home, defense_home, attack_away, defense_away, n_home, n_away FROM team_ratings WHERE team=?", (team,))

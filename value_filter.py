@@ -6,7 +6,7 @@ from market_calib import (
     blend_probability,
     favourite_longshot_adjust,
     market_edge as _market_edge,
-    MARKET_EDGE_MIN,  # ri-esportata: soglia +2pp sul mercato (09/09)
+    MARKET_EDGE_MIN,  # ri-esportata: soglia +3pp sul mercato (11/09)
     MARKET_EDGE_MODERATE,
     MARKET_EDGE_STRONG,
 )
@@ -15,7 +15,10 @@ from market_calib import (
 # === FILTRI DI SANITÀ ===
 EV_MIN = 0.02            # +2% minimo (09/09: abbassato per più segnali)
 EV_MAX = 0.15            # +15% massimo (oltre = anomalia)
-ODDS_MIN = 1.50          # quota minima
+# Quota minima (11/09): sotto 1.30 il ritorno per unità di stake non
+# compensa il rischio (probabilità implicita > 77%). Insieme a ODDS_MAX
+# (1.80) definisce la fascia dei FAVORITI NETTI: 1.30-1.80.
+ODDS_MIN = 1.30          # quota minima (era 1.50)
 
 # === STRATEGIA SOLO FAVORITI (11/09/2026) ===
 # Direttiva del proprietario dopo il passaggio a live: vietato tassativamente

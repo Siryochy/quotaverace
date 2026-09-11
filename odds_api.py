@@ -10,6 +10,13 @@ logger = logging.getLogger(__name__)
 CACHE_DIR = DATA_DIR
 ODDS_TTL = 86400          # cache 24h = 1 chiamata/giorno per lega
 MIN_REMAINING = 20        # stop sotto 20 crediti
+# Cache punteggi non attendibile per il settlement oltre queste ore dal
+# kickoff se la partita e' ancora completed=False (artefatto di una cache
+# scritta mentre la partita era in corso: un match di calcio finisce entro
+# ~2h). BUG 11/09: la costante era USATA in _cache_is_stale_for_settlement
+# ma MAI DEFINITA -> NameError inghiottito dall'except -> la cache stantia
+# veniva considerata valida e il settlement restava bloccato (bet aperte).
+STALE_INPLAY_HOURS = 3
 
 # Soglie proattive per rotazione intelligente
 CREDIT_LOW = 50           # sotto 50: disattiva leghe non-core (intervallo >7gg)

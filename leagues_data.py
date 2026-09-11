@@ -668,6 +668,243 @@ SWISS_SUPER_LEAGUE = {
     "Yverdon Sport": {"attack_home": 0.85, "attack_away": 0.75, "defense_home": 1.10, "defense_away": 1.15},
 }
 
+# === LEGHE AGGIUNTE L'11/09/2026 (chiusura dei buchi di copertura) ===
+#
+# Perche': SX Bet scansiona ~30 competizioni, ma `ALL_LEAGUES` ne copriva 35
+# e NON queste. Senza roster `football_hist._match_db_name` non allinea le
+# squadre (0 righe salvate) e `sx_signals._infer_league_from_teams` non puo'
+# dedurre la lega dei residui: il modello restava cieco (profilo neutro) su
+# un terzo delle partite scansionate. I profili sono prior curati a mano
+# (come per le altre leghe): spariscono appena i rating reali arrivano dalla
+# sync storica.
+
+
+def _profiles(rows):
+    """Costruisce il roster da tuple (nome, atk_casa, atk_trasf, def_casa,
+    def_trasf) — stessa forma dei dizionari scritti a mano qui sopra."""
+    return {n: {"attack_home": ah, "attack_away": aa,
+                "defense_home": dh, "defense_away": da}
+            for n, ah, aa, dh, da in rows}
+
+
+AUSTRIAN_BUNDESLIGA = _profiles([
+    ("Salzburg", 1.45, 1.30, 0.70, 0.75),
+    ("Sturm Graz", 1.30, 1.15, 0.80, 0.85),
+    ("Rapid Wien", 1.30, 1.15, 0.85, 0.90),
+    ("Austria Wien", 1.20, 1.05, 0.85, 0.90),
+    ("LASK", 1.15, 1.00, 0.90, 0.95),
+    ("Wolfsberger AC", 1.05, 0.90, 1.00, 1.05),
+    ("Hartberg", 1.05, 0.90, 1.00, 1.05),
+    ("Austria Klagenfurt", 1.00, 0.85, 1.05, 1.10),
+    ("Rheindorf Altach", 0.95, 0.85, 1.05, 1.10),
+    ("Blau-Weiss Linz", 0.95, 0.85, 1.10, 1.15),
+    ("WSG Tirol", 0.90, 0.80, 1.10, 1.15),
+    ("Grazer AK", 0.90, 0.80, 1.15, 1.20),
+])
+
+RUSSIAN_PREMIER_LEAGUE = _profiles([
+    ("Zenit", 1.45, 1.30, 0.70, 0.75),
+    ("Krasnodar", 1.40, 1.25, 0.75, 0.80),
+    ("Spartak Moscow", 1.35, 1.20, 0.75, 0.80),
+    ("Lokomotiv Moscow", 1.30, 1.15, 0.80, 0.85),
+    ("CSKA Moscow", 1.25, 1.10, 0.80, 0.85),
+    ("Dynamo Moscow", 1.25, 1.10, 0.85, 0.90),
+    ("Rostov", 1.10, 0.95, 0.95, 1.00),
+    ("Rubin Kazan", 1.05, 0.90, 1.00, 1.05),
+    ("Krylia Sovetov", 1.05, 0.90, 1.00, 1.05),
+    ("Akhmat Grozny", 1.00, 0.85, 1.05, 1.10),
+    ("Fakel", 0.95, 0.85, 1.05, 1.10),
+    ("Nizhny Novgorod", 0.95, 0.80, 1.10, 1.15),
+    ("Baltika", 0.95, 0.85, 1.10, 1.15),
+    ("Sochi", 0.95, 0.85, 1.10, 1.15),
+    ("Ural", 0.90, 0.80, 1.10, 1.15),
+    ("Orenburg", 0.90, 0.80, 1.15, 1.20),
+])
+
+TURKEY_SUPER_LIG = _profiles([
+    ("Galatasaray", 1.50, 1.35, 0.65, 0.70),
+    ("Fenerbahçe", 1.50, 1.35, 0.65, 0.70),
+    ("Fenerbahce", 1.50, 1.35, 0.65, 0.70),
+    ("Besiktas", 1.35, 1.20, 0.75, 0.80),
+    ("Trabzonspor", 1.35, 1.20, 0.80, 0.85),
+    ("Basaksehir", 1.20, 1.05, 0.85, 0.90),
+    ("Samsunspor", 1.15, 1.00, 0.90, 0.95),
+    ("Konyaspor", 1.10, 0.95, 0.95, 1.00),
+    ("Alanyaspor", 1.10, 0.95, 0.95, 1.00),
+    ("Kayserispor", 1.05, 0.90, 1.00, 1.05),
+    ("Antalyaspor", 1.05, 0.90, 1.00, 1.05),
+    ("Sivasspor", 1.00, 0.90, 1.00, 1.05),
+    ("Kasimpasa", 1.00, 0.90, 1.05, 1.10),
+    ("Rizespor", 1.00, 0.85, 1.05, 1.10),
+    ("Gaziantep", 0.95, 0.85, 1.05, 1.10),
+    ("Adana Demirspor", 0.95, 0.85, 1.10, 1.15),
+    ("Bodrum", 0.95, 0.85, 1.10, 1.15),
+    ("Eyupspor", 0.95, 0.85, 1.10, 1.15),
+    ("Hatayspor", 0.90, 0.80, 1.10, 1.15),
+])
+
+BELGIAN_FIRST_DIV = _profiles([
+    ("Club Brugge", 1.40, 1.25, 0.70, 0.75),
+    ("Union SG", 1.35, 1.20, 0.75, 0.80),
+    ("Genk", 1.30, 1.15, 0.80, 0.85),
+    ("Anderlecht", 1.25, 1.10, 0.80, 0.85),
+    ("Gent", 1.20, 1.05, 0.85, 0.90),
+    ("Antwerp", 1.15, 1.00, 0.90, 0.95),
+    ("Cercle Brugge", 1.10, 0.95, 0.95, 1.00),
+    ("Mechelen", 1.10, 0.95, 0.95, 1.00),
+    ("Standard Liege", 1.05, 0.90, 1.00, 1.05),
+    ("Charleroi", 1.05, 0.90, 1.00, 1.05),
+    ("Westerlo", 1.00, 0.90, 1.00, 1.05),
+    ("OH Leuven", 1.00, 0.85, 1.05, 1.10),
+    ("Sint-Truiden", 0.95, 0.85, 1.05, 1.10),
+    ("Dender", 0.95, 0.80, 1.10, 1.15),
+    ("Beerschot", 0.90, 0.80, 1.10, 1.15),
+    ("Kortrijk", 0.90, 0.80, 1.10, 1.15),
+])
+
+SCOTTISH_PREMIERSHIP = _profiles([
+    ("Celtic", 1.55, 1.40, 0.60, 0.65),
+    ("Rangers", 1.40, 1.25, 0.70, 0.75),
+    ("Aberdeen", 1.15, 1.00, 0.90, 0.95),
+    ("Hearts", 1.15, 1.00, 0.90, 0.95),
+    ("Hibernian", 1.10, 0.95, 0.95, 1.00),
+    ("Dundee United", 1.05, 0.90, 1.00, 1.05),
+    ("Motherwell", 1.05, 0.90, 1.00, 1.05),
+    ("St Mirren", 1.00, 0.85, 1.05, 1.10),
+    ("Kilmarnock", 1.00, 0.85, 1.05, 1.10),
+    ("Dundee", 0.95, 0.85, 1.10, 1.15),
+    ("Ross County", 0.95, 0.80, 1.10, 1.15),
+    ("St Johnstone", 0.90, 0.80, 1.15, 1.20),
+])
+
+GREEK_SUPER_LEAGUE = _profiles([
+    ("Olympiacos", 1.45, 1.30, 0.65, 0.70),
+    ("PAOK", 1.35, 1.20, 0.75, 0.80),
+    ("AEK Athens", 1.35, 1.20, 0.75, 0.80),
+    ("Panathinaikos", 1.30, 1.15, 0.80, 0.85),
+    ("Aris", 1.15, 1.00, 0.90, 0.95),
+    ("OFI", 1.05, 0.90, 1.00, 1.05),
+    ("Volos", 1.00, 0.85, 1.05, 1.10),
+    ("Asteras Tripolis", 1.00, 0.85, 1.05, 1.10),
+    ("Atromitos", 1.00, 0.90, 1.05, 1.10),
+    ("Panserraikos", 0.95, 0.85, 1.10, 1.15),
+    ("Levadiakos", 0.95, 0.80, 1.10, 1.15),
+    ("Lamia", 0.90, 0.80, 1.15, 1.20),
+    ("Kallithea", 0.90, 0.80, 1.15, 1.20),
+    ("Panetolikos", 0.90, 0.80, 1.15, 1.20),
+])
+
+POLISH_EKSTRAKLASA = _profiles([
+    ("Lech Poznan", 1.35, 1.20, 0.75, 0.80),
+    ("Legia Warsaw", 1.30, 1.15, 0.80, 0.85),
+    ("Rakow Czestochowa", 1.25, 1.10, 0.80, 0.85),
+    ("Jagiellonia", 1.20, 1.05, 0.85, 0.90),
+    ("Pogon Szczecin", 1.15, 1.00, 0.90, 0.95),
+    ("Gornik Zabrze", 1.10, 0.95, 0.95, 1.00),
+    ("Cracovia", 1.10, 0.95, 0.95, 1.00),
+    ("Slask Wroclaw", 1.05, 0.90, 1.00, 1.05),
+    ("Wisla Plock", 1.00, 0.85, 1.05, 1.10),
+    ("Widzew Lodz", 1.00, 0.90, 1.05, 1.10),
+    ("Motor Lublin", 1.00, 0.85, 1.05, 1.10),
+    ("Piast Gliwice", 1.00, 0.85, 1.05, 1.10),
+    ("Zaglebie Lubin", 0.95, 0.85, 1.05, 1.10),
+    ("Korona Kielce", 0.95, 0.85, 1.10, 1.15),
+    ("Radomiak", 0.95, 0.85, 1.10, 1.15),
+    ("Lechia Gdansk", 0.95, 0.80, 1.10, 1.15),
+    ("GKS Katowice", 0.90, 0.80, 1.10, 1.15),
+    ("Stal Mielec", 0.90, 0.80, 1.15, 1.20),
+])
+
+GERMAN_3_LIGA = _profiles([
+    ("1860 Munich", 1.15, 1.00, 0.90, 0.95),
+    ("Dynamo Dresden", 1.15, 1.00, 0.90, 0.95),
+    ("Arminia Bielefeld", 1.10, 0.95, 0.95, 1.00),
+    ("Rot-Weiss Essen", 1.10, 0.95, 0.95, 1.00),
+    ("Saarbrucken", 1.10, 0.95, 0.95, 1.00),
+    ("Hansa Rostock", 1.05, 0.90, 1.00, 1.05),
+    ("Ingolstadt", 1.05, 0.90, 1.00, 1.05),
+    ("Wehen Wiesbaden", 1.05, 0.90, 1.00, 1.05),
+    ("Aue", 1.00, 0.85, 1.05, 1.10),
+    ("Verl", 1.00, 0.85, 1.05, 1.10),
+    ("Mannheim", 1.00, 0.85, 1.05, 1.10),
+    ("Cottbus", 1.00, 0.85, 1.05, 1.10),
+    ("Osnabruck", 0.95, 0.85, 1.05, 1.10),
+    ("Duisburg", 0.95, 0.85, 1.10, 1.15),
+    ("Unterhaching", 0.95, 0.80, 1.10, 1.15),
+    ("Sandhausen", 0.95, 0.80, 1.10, 1.15),
+    ("Viktoria Koln", 0.90, 0.80, 1.10, 1.15),
+    ("Aachen", 0.90, 0.80, 1.15, 1.20),
+])
+
+EFL_LEAGUE_ONE_ROSTER = _profiles([
+    ("Birmingham", 1.25, 1.10, 0.85, 0.90),
+    ("Huddersfield", 1.20, 1.05, 0.90, 0.95),
+    ("Wrexham AFC", 1.20, 1.05, 0.90, 0.95),
+    ("Stockport", 1.15, 1.00, 0.90, 0.95),
+    ("Bolton", 1.15, 1.00, 0.90, 0.95),
+    ("Charlton", 1.15, 1.00, 0.95, 1.00),
+    ("Barnsley", 1.10, 0.95, 0.95, 1.00),
+    ("Reading", 1.10, 0.95, 0.95, 1.00),
+    ("Rotherham", 1.10, 0.95, 0.95, 1.00),
+    ("Peterborough", 1.10, 0.95, 0.95, 1.00),
+    ("Leyton Orient", 1.05, 0.90, 1.00, 1.05),
+    ("Wigan", 1.05, 0.90, 1.00, 1.05),
+    ("Blackpool", 1.05, 0.90, 1.00, 1.05),
+    ("Wycombe", 1.05, 0.90, 1.00, 1.05),
+    ("Stevenage", 1.00, 0.85, 1.05, 1.10),
+    ("Mansfield", 1.00, 0.85, 1.05, 1.10),
+    ("Lincoln", 1.00, 0.85, 1.05, 1.10),
+    ("Exeter", 1.00, 0.85, 1.05, 1.10),
+    ("Bristol Rovers", 0.95, 0.85, 1.05, 1.10),
+    ("Shrewsbury", 0.95, 0.80, 1.10, 1.15),
+    ("Burton", 0.95, 0.80, 1.10, 1.15),
+    ("Northampton", 0.95, 0.80, 1.10, 1.15),
+    ("Cambridge", 0.90, 0.80, 1.15, 1.20),
+    ("Crawley", 0.90, 0.80, 1.15, 1.20),
+])
+
+SWEDEN_SUPERETTAN = _profiles([
+    ("IFK Norrkoping", 1.25, 1.10, 0.85, 0.90),
+    ("Helsingborg", 1.20, 1.05, 0.85, 0.90),
+    ("Landskrona BoIS", 1.15, 1.00, 0.90, 0.95),
+    ("Östers IF", 1.15, 1.00, 0.90, 0.95),
+    ("Osters IF", 1.15, 1.00, 0.90, 0.95),
+    ("Ostersunds FK", 1.00, 0.85, 1.05, 1.10),
+    ("Trelleborgs FF", 1.05, 0.90, 1.00, 1.05),
+    ("Varbergs BoIS", 1.05, 0.90, 1.00, 1.05),
+    ("Falkenbergs FF", 1.00, 0.85, 1.05, 1.10),
+    ("GIF Sundsvall", 1.00, 0.85, 1.05, 1.10),
+    ("IK Brage", 1.00, 0.85, 1.05, 1.10),
+    ("Orebro SK", 1.00, 0.85, 1.05, 1.10),
+    ("Utsiktens BK", 0.95, 0.85, 1.10, 1.15),
+    ("IK Oddevold", 0.95, 0.80, 1.10, 1.15),
+    ("Sandvikens IF", 0.95, 0.80, 1.10, 1.15),
+    ("Orgryte", 0.95, 0.80, 1.10, 1.15),
+])
+
+BRAZIL_SERIE_B = _profiles([
+    ("Coritiba", 1.25, 1.10, 0.85, 0.90),
+    ("Athletico Paranaense", 1.25, 1.10, 0.85, 0.90),
+    ("Goias", 1.20, 1.05, 0.90, 0.95),
+    ("Novorizontino", 1.20, 1.05, 0.90, 0.95),
+    ("Ceara", 1.15, 1.00, 0.90, 0.95),
+    ("Ceara-ce", 1.15, 1.00, 0.90, 0.95),
+    ("America MG", 1.15, 1.00, 0.90, 0.95),
+    ("Atletico Goianiense", 1.15, 1.00, 0.95, 1.00),
+    ("Chapecoense", 1.10, 0.95, 0.95, 1.00),
+    ("Avai", 1.10, 0.95, 0.95, 1.00),
+    ("CRB", 1.05, 0.90, 1.00, 1.05),
+    ("Operario PR", 1.05, 0.90, 1.00, 1.05),
+    ("Vila Nova", 1.05, 0.90, 1.00, 1.05),
+    ("Remo", 1.05, 0.90, 1.00, 1.05),
+    ("Paysandu", 1.00, 0.90, 1.05, 1.10),
+    ("Botafogo SP", 1.00, 0.85, 1.05, 1.10),
+    ("Nautico Capibaribe", 1.00, 0.85, 1.05, 1.10),
+    ("Amazonas", 0.95, 0.85, 1.10, 1.15),
+    ("Volta Redonda", 0.95, 0.80, 1.10, 1.15),
+    ("Ferroviaria", 0.95, 0.80, 1.10, 1.15),
+])
+
 # === COPPE INTERNAZIONALI (roster = merge dei campionati da cui attingono) ===
 # Le squadre di League One/Two o dei campionati sudamericani non coperti
 # non hanno rating: le partite che le coinvolgono vengono saltate da
@@ -676,6 +913,9 @@ FA_CUP = {**PREMIER_LEAGUE_2025_26, **EFL_CHAMPIONSHIP}
 EFL_CUP = {**PREMIER_LEAGUE_2025_26, **EFL_CHAMPIONSHIP}
 COPA_LIBERTADORES = {**BRASILEIRAO, **ARGENTINA_PRIMERA,
                      **COLOMBIA_PRIMERA, **CHILE_PRIMERA}
+# Sudamericana (11/09/2026): stesso bacino, piu' le squadre di Serie B
+# brasiliana (i club di seconda divisione la giocano spesso).
+COPA_SUDAMERICANA = {**COPA_LIBERTADORES, **BRAZIL_SERIE_B}
 
 # ============================================
 # DICTIONARY FINALE — TUTTE LE COMPETIZIONI
@@ -716,4 +956,17 @@ ALL_LEAGUES = {
     "Colombia Primera": COLOMBIA_PRIMERA,
     "Chile Primera": CHILE_PRIMERA,
     "Egyptian Premier League": EGYPTIAN_PREMIER_LEAGUE,
+    # --- Aggiunte 11/09/2026 (roster per le leghe che SX scansiona) ---
+    "Austrian Bundesliga": AUSTRIAN_BUNDESLIGA,
+    "Russian Premier League": RUSSIAN_PREMIER_LEAGUE,
+    "Turkey Super Lig": TURKEY_SUPER_LIG,
+    "Belgian First Div": BELGIAN_FIRST_DIV,
+    "Scottish Premiership": SCOTTISH_PREMIERSHIP,
+    "Greek Super League": GREEK_SUPER_LEAGUE,
+    "Polish Ekstraklasa": POLISH_EKSTRAKLASA,
+    "3. Liga": GERMAN_3_LIGA,
+    "League One": EFL_LEAGUE_ONE_ROSTER,
+    "Sweden Superettan": SWEDEN_SUPERETTAN,
+    "Brazil Serie B": BRAZIL_SERIE_B,
+    "Copa Sudamericana": COPA_SUDAMERICANA,
 }
