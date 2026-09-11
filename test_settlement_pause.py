@@ -100,6 +100,20 @@ class TestSettleBloccato:
         assert tracker.get_bets(closed=True)[0]["esito_finale"] == "won"
 
 
+class TestSxSettleGate:
+    def test_sx_settle_non_scarica_punteggi_in_pausa(self, temp_db, monkeypatch):
+        """settle_sx_bets esce prima delle fonti punteggi: zero crediti."""
+        import sx_signals
+
+        def _boom(*a, **k):
+            raise AssertionError("nessun download punteggi in pausa")
+
+        monkeypatch.setattr(sx_signals, "_sx_open_matches", _boom)
+        tracker.set_settlement_paused(True)
+        res = sx_signals.settle_sx_bets()
+        assert res.get("paused") is True and res["settled"] == 0
+
+
 class TestUpdateResultsGate:
     def test_nessun_download_risultati_in_pausa(self, temp_db, monkeypatch):
         """_update_results esce PRIMA di fetch_scores: zero crediti bruciati."""

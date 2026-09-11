@@ -507,8 +507,16 @@ def settle_sx_bets() -> dict:
 
     Le bet senza risultato disponibile restano aperte (fail-closed: mai
     chiudere un verdetto senza punteggio reale).
+
+    PAUSA SETTLEMENT (11/09): con la pausa attiva si esce PRIMA di
+    interrogare le fonti punteggi — nessuna chiusura e nessun credito
+    the-odds-api/API-Football consumato.
     """
-    from tracker import settle_bets
+    from tracker import settle_bets, settlement_paused
+    if settlement_paused():
+        logger.info("sx_signals: settlement in PAUSA — nessun download punteggi")
+        return {"open": 0, "results": 0, "settled": 0, "source": None,
+                "paused": True}
     meta = _sx_open_matches()
     if not meta:
         return {"open": 0, "results": 0, "settled": 0, "source": None}
