@@ -1109,6 +1109,19 @@ strong_value** (default di codice; env Railway `STAKE_CAP_PCT=0.01` e
 `.railway/railway.ts`). Il vecchio cap fisso 4% dei moderate è rimosso:
 i segnali deboli non possono valere più dei value. `value_filter.MAX_STAKE_PCT`
 allineato a 1% (era 3%) così i tool (schedina/`/value`) mostrano lo stesso
-cap che il bot applica. ⚠️ Il floor ordine exchange (1 USDC) prevale
-sempre: sotto ~50-100 USDC di wallet lo stake effettivo resta 1 USDC.
-Tripwire: `test_favourites_only.TestStakeCapSevero`.
+cap che il bot applica.
+
+**5) CAP SEVERO VINCOLANTE — `STAKE_CAP_HARD` (11/09, `auto_bet.py`)**:
+prima il floor dell'exchange vinceva sul cap (`pick_stake = max(stake,
+1.0)`) → con 38 USDC nel wallet ogni bet era 1 USDC = **2.6%**, non 1%.
+Ora, con `STAKE_CAP_HARD` attivo (**default**), una bet il cui stake
+cappato è sotto il minimo ordine viene **SALTATA (fail-closed)**, sia in
+FASE 1 (Kelly/cap) sia dopo i risk cap (correlazione 30% / esposizione
+totale 40%). Conseguenza operativa da conoscere: con bankroll < 100 USDC
+il cap 1% è sotto 1 USDC → **nessun ordine parte** finché il wallet non
+cresce (≥ 100 USDC per il 1%, ≥ 50 USDC per il 2%) oppure finché non si
+accetta il floor con `STAKE_CAP_HARD=0`. `/autobet` mostra il cap severo e
+avvisa se il saldo attuale non lo sostiene. Env dichiarata in
+`preserve()` in `.railway/railway.ts`. Tripwire:
+`test_favourites_only.TestStakeCapSevero` (incl. wallet 38 USDC → zero
+ordini) e `test_auto_bet_live` (hard ON = salta, OFF = floor 1 USDC).

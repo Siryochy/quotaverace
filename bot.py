@@ -1055,6 +1055,27 @@ async def cmd_autobet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ov_label = {"off": "🛑 STOP TOTALE",
                         "sim": "⏸️ PAUSA ordini reali"}.get(
                             st["override"], "nessuno (env)")
+            # Cap severo (11/09): con il cap vincolante una bet il cui stake
+            # cappato e' sotto il minimo ordine exchange viene saltata. Se il
+            # wallet e' troppo piccolo per rispettare il cap, l'admin deve
+            # saperlo SUBITO (altrimenti sembra che il bot non funzioni).
+            from auto_bet import (MIN_STAKE_EUR, cap_hard_active,
+                                   _live_wallet_balance)
+            cap_line = ("✅ attivo (il floor exchange non alza lo stake)"
+                        if cap_hard_active() else
+                        "❌ disattivato (vale il floor exchange)")
+            wallet_warn = ""
+            try:
+                bal = _live_wallet_balance()
+                if bal and cap_hard_active() and bal * 0.01 < MIN_STAKE_EUR:
+                    wallet_warn = (
+                        "\n⚠️ *Cap severo non sostenibile col saldo attuale:* "
+                        f"{bal:.2f} USDC → il cap 1% ({bal * 0.01:.2f}) è sotto "
+                        f"il minimo ordine ({MIN_STAKE_EUR:.2f} USDC): "
+                        "*nessun ordine verrà piazzato* finché il wallet non "
+                        "arriva a ~100 USDC (o 50 USDC per il cap 2%).\n")
+            except Exception:
+                pass
             text = (
                 "🎛 *AUTO-BET — stato*\n\n"
                 f"• Esecuzione effettiva: "
@@ -1062,7 +1083,10 @@ async def cmd_autobet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 f"• Override kill-switch: {ov_label}\n"
                 f"• AUTO_BET_MODE env: `{st['env_mode'] or 'sim'}`\n"
                 f"• Provider reale pronto: "
-                f"{'✅ sì' if st['provider_ready'] else '❌ no'}\n\n"
+                f"{'✅ sì' if st['provider_ready'] else '❌ no'}\n"
+                f"• Cap per bet: 1% value/moderate · 2% strong_value\n"
+                f"• Cap severo: {cap_line}\n"
+                f"{wallet_warn}\n"
                 "Comandi:\n"
                 "`/autobet off` – stop totale\n"
                 "`/autobet sim` – pausa ordini reali\n"

@@ -40,6 +40,12 @@ export default defineRailway(() => {
     STAKE_CAP_PCT: preserve(),
     STAKE_CAP_PCT_STRONG: preserve(),
     MIN_STAKE_EUR: preserve(),
+    // Cap severo (11/09): il floor exchange non puo' alzare lo stake oltre
+    // il cap per singola bet. Con STAKE_CAP_HARD=1 (default) una bet il cui
+    // stake cappato e' sotto il minimo ordine viene SALTATA: con wallet
+    // < 100 USDC il cap 1% non e' sostenibile e il bot non piazza nulla
+    // (fail-closed), invece di forzare 1 USDC (= 2.6% su 38 USDC).
+    STAKE_CAP_HARD: preserve(),
     // BETFAIR_* rimosse il 04/09: Betfair è fuori dall'architettura
     // (refertazione = API-Football, quote/CLV = the-odds-api, auto_bet SIM).
   };

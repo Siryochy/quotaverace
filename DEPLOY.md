@@ -253,10 +253,18 @@ Architettura attuale:
 > strong_value** (`STAKE_CAP_PCT=0.01`, `STAKE_CAP_PCT_STRONG=0.02` —
 > le env su Railway vincono sui default di `adaptive_staking.py`), su
 > bankroll corrente (in LIVE
-> = saldo reale del wallet SX via `get_balance`). `STAKE_MIN_EUR` (1.0 =
-> minimo ordine SX), `STAKE_STEP_EUR` (0.01). ⚠️ Il floor exchange 1 USDC
-> prevale sul cap 2%: con bankroll < 50 USDC lo stake effettivo è 1 USDC
-> (>2%); il cap 2% diventa vincolante da 50 USDC in su. Giro immediato:
+> = saldo reale del wallet SX via `get_balance`). `MIN_STAKE_EUR` (1.0 =
+> minimo ordine SX), `STAKE_STEP_EUR` (0.01).
+>
+> 🚧 **Cap severo vincolante** (11/09): con `STAKE_CAP_HARD` attivo
+> (**default 1**) il floor exchange NON può alzare lo stake oltre il cap
+> per singola bet: se lo stake cappato è sotto 1 USDC la bet viene
+> **saltata (fail-closed)**. Quindi con wallet < 100 USDC il cap 1% non è
+> sostenibile e il bot **non piazza nulla** (invece di forzare 1 USDC =
+> 2.6% su 38 USDC); il cap 1% diventa operativo da ~100 USDC, il 2% da
+> ~50 USDC. `STAKE_CAP_HARD=0` ripristina il comportamento "floor
+> prevale" (accetta 1 USDC minimo). `/autobet` mostra lo stato e avvisa
+> se il saldo non sostiene il cap. Giro immediato:
 > `/autobet now` (Telegram, admin).
 
 > 🧾 **Flat-stake live Calcio 1X2** (09/09): con `AUTO_BET_STAKE_MODE=flat`

@@ -173,8 +173,8 @@ class TestLiveBankroll:
         assert placed == []
         assert tracker.get_bets() == []
 
-    def test_stake_clamp_al_minimo_exchange(self, monkeypatch, temp_db):
-        """Stake micro sotto 1 USDC: alzato al floor dell'exchange (1.0)."""
+    def _micro_stake(self, monkeypatch):
+        """Adaptive che cappa lo stake a 0.6 USDC (sotto il minimo ordine)."""
         import adaptive_staking
         _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
@@ -182,7 +182,26 @@ class TestLiveBankroll:
         monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 12.28)
         monkeypatch.setattr(
             adaptive_staking, "adaptive_stake",
-            lambda **kw: {"stake": 0.6, "reason": "micro"})
+            lambda **kw: {"stake": 0.6, "reason": "micro", "capped": True})
+
+    def test_cap_severo_salta_sotto_il_minimo(self, monkeypatch, temp_db):
+        """CAP SEVERO (11/09, default): stake cappato 0.6 < minimo ordine
+        1 USDC -> ordine SALTATO, mai alzato al floor (sforerebbe il cap)."""
+        assert auto_bet.cap_hard_active() is True
+        self._micro_stake(monkeypatch)
+        sent = []
+        monkeypatch.setattr(auto_bet, "_live_fill",
+                            lambda pick, stake, floor: sent.append(stake))
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert placed == [] and sent == []
+        assert tracker.get_bets() == []
+
+    def test_cap_disattivato_alza_al_floor(self, monkeypatch, temp_db):
+        """Con STAKE_CAP_HARD=0 si accetta il floor dell'exchange (1 USDC):
+        il cap non e' piu' vincolante, la bet viene piazzata."""
+        monkeypatch.setattr(auto_bet, "STAKE_CAP_HARD", False)
+        assert auto_bet.cap_hard_active() is False
+        self._micro_stake(monkeypatch)
         sent = {}
 
         def _fake_fill(pick, stake, floor):

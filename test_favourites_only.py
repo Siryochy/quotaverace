@@ -148,6 +148,40 @@ class TestStakeCapSevero:
         assert st.MAX_STAKE_PCT <= 0.01
         assert st.MAX_STAKE_PCT_STRONG <= 0.02
 
+    def test_cap_severo_attivo_di_default(self):
+        import auto_bet
+        assert auto_bet.cap_hard_active() is True
+        assert auto_bet.MIN_STAKE_EUR > 0
+        assert "CAP SEVERO" in auto_bet.hard_cap_skip_message(0.38, 38.0)
+
+    def test_cap_severo_blocca_gli_ordini_con_wallet_piccolo(self, temp_db,
+                                                              monkeypatch):
+        """Wallet 38 USDC: cap 1% = 0.38 USDC, sotto il minimo ordine (1
+        USDC). Col cap severo nessun ordine parte (fail-closed) invece di
+        piazzare 1 USDC = 2.6% del bankroll."""
+        import auto_bet
+        import adaptive_staking
+        start = (datetime.now(timezone.utc) + timedelta(hours=3)) \
+            .isoformat().replace("+00:00", "Z")
+        tracker.save_match("cap1", "Serie A", "Osasuna", "Getafe", start)
+        tracker.save_prediction("cap1", "1X2", "Osasuna", 1.65, 0.62, 0.02,
+                                market_prob=0.60, market_edge=0.05,
+                                status="value")
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 38.0)
+        monkeypatch.setattr(
+            adaptive_staking, "adaptive_stake",
+            lambda **kw: {"stake": round(kw["bankroll"] * 0.01, 2),
+                          "reason": "cap 1%", "capped": True})
+
+        def _boom(*a, **k):
+            raise AssertionError("nessun ordine col cap severo")
+
+        monkeypatch.setattr(auto_bet, "_live_fill", _boom)
+        assert auto_bet.run_today_bets(stake_eur=5.0) == []
+        assert tracker.get_bets() == []
+
     def test_stake_cappato_per_tier(self):
         import adaptive_staking as st
         bankroll = 1000.0

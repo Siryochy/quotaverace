@@ -93,6 +93,18 @@ TOTAL_EXPOSURE_CAP_PCT = 0.40  # max 40% di bankroll per il portafoglio del gior
 STAKE_STEP_EUR = float(os.getenv("STAKE_STEP_EUR", "0.01"))
 MIN_STAKE_EUR = float(os.getenv("MIN_STAKE_EUR", "1.0"))
 
+# CAP SEVERO OBBLIGATORIO (11/09/2026): il cap per singola bet (1% value/
+# moderate, 2% strong_value) NON puo' MAI essere superato dal floor
+# dell'exchange. Con STAKE_CAP_HARD attivo (default) una bet il cui stake
+# cappato e' sotto il minimo ordine (1 USDC) viene SALTATA (fail-closed)
+# invece di essere alzata al floor: cosi' il cap e' vero, non cosmetico.
+# Conseguenza operativa: con bankroll < 100 USDC il cap 1% e' sotto 1 USDC,
+# quindi nessun ordine parte finche' il wallet non cresce (>= 100 USDC per
+# il cap 1%, >= 50 per il 2%) oppure finche' non si accetta il floor con
+# STAKE_CAP_HARD=0.
+STAKE_CAP_HARD = os.getenv("STAKE_CAP_HARD", "1").strip().lower() \
+    in ("1", "true", "yes", "on")
+
 # --- Flat-stake override (09/09) ---
 # In alternativa al Kelly dinamico si puo' piazzare un importo FISSO per
 # ogni segnale value/strong_value (Calcio 1X2): env
@@ -104,6 +116,19 @@ MIN_STAKE_EUR = float(os.getenv("MIN_STAKE_EUR", "1.0"))
 # + esposizione totale 40%), mai frazioni non piazzabili.
 STAKE_MODE = os.getenv("AUTO_BET_STAKE_MODE", "adaptive").strip().lower()
 FLAT_STAKE_EUR = float(os.getenv("AUTO_BET_FLAT_STAKE_EUR", "1.0"))
+
+
+def cap_hard_active() -> bool:
+    """True se il cap per bet e' vincolante (mai superato dal floor)."""
+    return STAKE_CAP_HARD
+
+
+def hard_cap_skip_message(stake: float, bankroll: float) -> str:
+    """Motivo standard dello skip quando il cap severo blocca l'ordine."""
+    return ("CAP SEVERO: stake cappato %.2f USDC < minimo ordine %.2f USDC "
+            "(bankroll %.2f) — ordine saltato (fail-closed). Alza il wallet "
+            "o imposta STAKE_CAP_HARD=0 per accettare il floor."
+            % (stake, MIN_STAKE_EUR, bankroll))
 
 
 def normalize_stake(stake: float) -> float:
@@ -882,11 +907,19 @@ def run_today_bets(stake_eur: float | None = None,
                         pick_stake, pick["match_id"])
             continue
 
-        # LIVE: clamp al floor dell'exchange (minimo ordine 1 USDC) e mai
-        # oltre il saldo disponibile del wallet (i fondi sono li').
+        # LIVE: mai oltre il saldo disponibile del wallet (i fondi sono li').
+        # CAP SEVERO: se lo stake cappato e' sotto il minimo ordine
+        # dell'exchange, il floor NON lo alza (sforerebbe il cap): l'ordine
+        # viene saltato, a meno che il cap severo sia disattivato.
         if mode == "live":
-            pick_stake = max(pick_stake, MIN_STAKE_EUR)
             pick_stake = min(pick_stake, _bankroll)
+            if pick_stake < MIN_STAKE_EUR:
+                if STAKE_CAP_HARD:
+                    logger.warning("auto_bet: %s (%s)",
+                                   hard_cap_skip_message(pick_stake, _bankroll),
+                                   pick["match_id"])
+                    continue
+                pick_stake = MIN_STAKE_EUR
             pick_stake = round(pick_stake, 2)
 
         candidates.append({
@@ -911,9 +944,22 @@ def run_today_bets(stake_eur: float | None = None,
             already_placed=_today_placed_stake())
     candidates = [c for c in candidates if c.get("stake", 0) > 0]
     if mode == "live":
+        kept = []
         for c in candidates:
-            c["stake"] = max(float(c["stake"]), MIN_STAKE_EUR)
-            c["stake"] = min(float(c["stake"]), _bankroll)
+            stake = min(float(c["stake"]), _bankroll)
+            if stake < MIN_STAKE_EUR:
+                if STAKE_CAP_HARD:
+                    # I risk cap (correlazione/esposizione) hanno ridotto lo
+                    # stake sotto il minimo ordine: si salta, mai alzarlo al
+                    # floor (sforerebbe il cap per singola bet).
+                    logger.warning("auto_bet: %s (%s)",
+                                   hard_cap_skip_message(stake, _bankroll),
+                                   c.get("match_id"))
+                    continue
+                stake = MIN_STAKE_EUR
+            c["stake"] = stake
+            kept.append(c)
+        candidates = kept
 
     # --- FASE 3: esegui e registra (LIVE via execution_engine oppure SIM) ---
     from tracker import save_bet
