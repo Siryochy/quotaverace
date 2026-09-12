@@ -330,6 +330,8 @@ def test_get_remaining_usa_la_lettura_piu_recente(monkeypatch, tmp_path):
         {"ts": now - 86400, "payload": [], "remaining": 452,
          "remaining_ts": now}))
     assert odds_api.get_remaining() == 452
+    # anche get_quota (usato da /api/health) deve riportare la lettura fresca
+    assert odds_api.get_quota() == (452, 2)
 
 
 def test_get_remaining_senza_remaining_ts_usa_ts(monkeypatch, tmp_path):

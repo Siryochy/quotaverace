@@ -28,8 +28,8 @@ CORE_LEAGUES_HIGH = {"soccer_italy_serie_a", "soccer_england_pl", "soccer_spain_
                       "soccer_efl_champ"}
 CORE_LEAGUES_EMERGENCY = {"soccer_italy_serie_a", "soccer_england_pl", "soccer_spain_la_liga"}
 
-def get_remaining() -> int:
-    """Crediti residui secondo la lettura PIU' RECENTE tra le cache toa_*.json.
+def _latest_credits():
+    """(crediti_residui, n_cache) secondo la lettura PIU' RECENTE.
 
     Ogni risposta dell'API riporta lo stesso contatore autoritativo
     (`x-requests-remaining`), quindi vale l'ULTIMA lettura per data — non il
@@ -45,6 +45,7 @@ def get_remaining() -> int:
     """
     best = None            # (timestamp lettura credito, remaining)
     fallback = []
+    n = 0
     if CACHE_DIR.exists():
         for f in CACHE_DIR.glob("toa_*.json"):
             try:
@@ -52,6 +53,7 @@ def get_remaining() -> int:
                 if d.get("remaining") is None:
                     continue
                 rem = int(d["remaining"])
+                n += 1
                 ts = d.get("remaining_ts", d.get("ts"))
                 if isinstance(ts, (int, float)):
                     if best is None or ts > best[0]:
@@ -61,8 +63,16 @@ def get_remaining() -> int:
             except Exception:
                 continue
     if best is not None:
-        return best[1]
-    return min(fallback) if fallback else None
+        return best[1], n
+    if fallback:
+        return min(fallback), n
+    return None, 0
+
+
+def get_remaining() -> int:
+    """Crediti residui dall'ultima lettura (None se non c'e' telemetria)."""
+    rem, _ = _latest_credits()
+    return rem
 
 def should_query_sport(sport_key: str) -> bool:
     """Decide se una sport key deve essere interrogata in base ai crediti.
@@ -535,16 +545,11 @@ def get_live_odds():
     return rows
 
 def get_quota():
-    """Crediti residui dall'ultimo scan (dalle cache, costo zero)."""
-    remaining = []
-    if CACHE_DIR.exists():
-        for f in CACHE_DIR.glob("toa_*.json"):
-            try:
-                d = json.loads(f.read_text())
-                if d.get("remaining") is not None:
-                    remaining.append(int(d["remaining"]))
-            except Exception:
-                continue
-    if not remaining:
+    """(crediti residui, n cache) dall'ultimo scan (costo zero).
+
+    Stessa fonte di `get_remaining`: la lettura piu' recente, non il minimo.
+    """
+    rem, n = _latest_credits()
+    if rem is None:
         return None
-    return min(remaining), len(remaining)
+    return rem, n
