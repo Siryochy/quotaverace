@@ -82,6 +82,25 @@ KILL_SWITCH_VALUES = ("off", "sim", "live")
 # vero), in SIM la cassa. Env: DAILY_STOP_LOSS_PCT, DAILY_STOP_HOURS.
 DAILY_STOP_LOSS_PCT = float(os.getenv("DAILY_STOP_LOSS_PCT", "0.05"))
 DAILY_STOP_HOURS = float(os.getenv("DAILY_STOP_HOURS", "24"))
+
+def dynamic_kelly_stake(bankroll: float, ev: float, frac: float,
+                          price: float) -> float:
+    """Calcola lo stake con Dynamic Kelly.
+
+    stake = bankroll * frac * ev_factor, dove ev_factor scala
+    con l'edge (EV alto = stake piu' alto).
+    Se lo stake e' sotto il minimo ordine, usa MIN_STAKE_EUR
+    (floor accettato con STAKE_CAP_HARD=0).
+    """
+    if bankroll <= 0 or ev <= 0 or frac <= 0 or price <= 1.0:
+        return 0.0
+    # Ev_factor: scala da 0.1x a 1.0x in base all'edge
+    ev_factor = min(ev / 0.20, 1.0) if ev < 0.20 else 1.0
+    stake = bankroll * frac * ev_factor
+    # Usa il floor dell'exchange se lo stake e' sotto il minimo
+    if stake < MIN_STAKE_EUR:
+        return MIN_STAKE_EUR
+    return normalize_stake(stake)
 DAILY_STOP_FILE = DATA_DIR / "execution" / "daily_stop.json"
 
 # --- Correlation risk cap ---
@@ -1103,6 +1122,14 @@ def run_today_bets(stake_eur: float | None = None,
         _avg_clv = 0.0
 
     from tracker import bet_exists_open
+    from value_filter import (dynamic_kelly, detect_odds_movement,
+                                get_optimal_timing, calculate_exposure,
+                                MOVEMENT_BONUS_MULTIPLIER, EV_MAX)
+
+    # --- FREQUENCY BOOST: con EV_MIN=0.02 + ODDS_MAX=2.00,
+    # il bot trova piu' segnali = piu' profitto potenziale ---
+    logger.info("auto_bet: strategia FREQUENZA alta (EV_MIN=2%%, "
+                "ODDS_MAX=2.00, dynamic Kelly)")
 
     # --- FASE 1: costruisci i candidati (guardie + stake, senza salvare) ---
     candidates: list[dict] = []
@@ -1123,6 +1150,14 @@ def run_today_bets(stake_eur: float | None = None,
                         pick["match_id"])
             continue
 
+        # Timing filter: piazza solo nel momento ottimale (0.5-24h prima)
+        timing = get_optimal_timing(pick.get("commence"))
+        if not timing["optimal"]:
+            logger.info("auto_bet: %s (%s) timing non ottimale: %s, salto",
+                        pick["match_id"], pick["esito_key"],
+                        timing["reason"])
+            continue
+
         # Flat-stake (09/09, Calcio 1X2): importo FISSO per ogni segnale
         # value/strong_value invece del Kelly dinamico. Il rispetto dei cap
         # (correlazione 30% + esposizione totale 40% del giorno) e del
@@ -1136,23 +1171,28 @@ def run_today_bets(stake_eur: float | None = None,
                 continue
             logger.info("auto_bet: stake flat €%.2f per %s (%s)",
                         pick_stake, pick["match_id"], pick["esito_key"])
-        # Adaptive staking: stake dinamico (identico per SIM e live)
+        # Dynamic Kelly: stake proporzionale all'edge (EV alto = stake alto)
         elif _adaptive:
-            as_result = adaptive_stake(
-                bankroll=_bankroll, prob=pick.get("best_ev", 0.0) + 1.0 / price if price > 0 else 0.5,
-                odds=price, market_edge=pick.get("market_edge"),
-                status=pick.get("status", "value"),
-                peak_bankroll=_peak,
-                # CLV storico: conferma dell'edge -> stake piu' alto se
-                # stiamo battendo la closing line (wiring del segnale CLV).
-                has_clv_positive=(_avg_clv > 0.0))
-            pick_stake = as_result["stake"]
+            ev = float(pick.get("best_ev", 0.0))
+            # Dynamic Kelly basato sull'edge
+            frac = dynamic_kelly(ev, EV_MAX, base_fraction=0.05)
+            # Odds movement bonus: se la quota scende > 5%, +20% stake
+            odds_move = pick.get("odds_movement", 0.0)
+            if odds_move <= -0.05:
+                frac *= MOVEMENT_BONUS_MULTIPLIER
+                logger.info("auto_bet: %s odds MOVEMENT %.1f%% (sharp money) "
+                            "+20%% stake", pick["match_id"], odds_move * 100)
+            pick_stake = dynamic_kelly_stake(
+                bankroll=_bankroll, ev=ev, frac=frac,
+                price=price)
             if pick_stake <= 0:
-                logger.info("auto_bet: stake adaptive = 0 per %s (EV negativo), salto",
+                logger.info("auto_bet: dynamic Kelly = 0 per %s, salto",
                             pick["match_id"])
                 continue
-            logger.info("auto_bet: stake adaptive €%.2f per %s (%s)",
-                        pick_stake, pick["match_id"], as_result["reason"])
+            logger.info("auto_bet: stake dynamic Kelly €%.2f (frac=%.2f, "
+                        "EV=%.3f, timing=%0.1fh) per %s",
+                        pick_stake, frac, ev, timing["hours_before"],
+                        pick["match_id"])
         else:
             pick_stake = normalize_stake(stake_eur_default)
         if pick_stake <= 0:
@@ -1175,11 +1215,24 @@ def run_today_bets(stake_eur: float | None = None,
                 pick_stake = MIN_STAKE_EUR
             pick_stake = round(pick_stake, 2)
 
+        # Odds movement detection (bonus signal for stake sizing)
+        odds_movement_val = pick.get("odds_movement", 0.0)
+
         candidates.append({
             **pick, "price": price, "stake": pick_stake,
+            "odds_movement": odds_movement_val,
         })
 
     # --- FASE 2: risk capping (correlazione + esposizione totale) ---
+    # Calcola esposizione corrente
+    _exposure = calculate_exposure(candidates, _bankroll)
+    if _exposure.get("correlation_risk"):
+        logger.warning("auto_bet: CORRELATION RISK! Max league exposure "
+                       "%.1f%% > 30%% — riduci stake",
+                       _exposure["max_league_pct"] * 100)
+    if not _exposure.get("total_pct_ok"):
+        logger.warning("auto_bet: Total exposure %.1f%% > 40%% — "
+                       "cap ridotto", _exposure["total_pct"] * 100)
     # Il cap TOTALE e' giornaliero: sottrae l'esposizione gia' piazzata nei
     # giri precedenti (puntate aperte nelle ultime 24h), poi scarta i
     # candidati azzerati dal cap e (in LIVE) riapplica il floor exchange.

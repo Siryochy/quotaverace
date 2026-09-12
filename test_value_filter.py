@@ -127,11 +127,16 @@ class TestStrategiaSoloFavoriti:
         """Le soglie non devono tornare indietro senza una decisione esplicita."""
         import value_filter as vf
         from market_calib import MARKET_EDGE_MIN
-        assert vf.ODDS_MAX <= 2.20
-        assert vf.ODDS_MIN >= 1.50         # fascia 1.50-2.20 (esclude pantano 1.30-1.45)
+        assert vf.ODDS_MAX <= 2.00         # solo favoriti + value moderati
+        assert vf.ODDS_MIN >= 1.30         # fascia 1.30-2.00 (esclude pantano)
         assert MARKET_EDGE_MIN >= 0.02     # edge minimo +2pp per leghe vincenti
         assert vf.FAVOURITES_ONLY is True
         assert vf.MIN_FAVOURITE_MARKET_PROB == 0.50
+        # Test funzioni nuove
+        assert hasattr(vf, "dynamic_kelly")
+        assert hasattr(vf, "detect_odds_movement")
+        assert hasattr(vf, "get_optimal_timing")
+        assert hasattr(vf, "calculate_exposure")
 
     def test_quota_alta_bocciata(self):
         from value_filter import is_sane
@@ -242,11 +247,12 @@ class TestStrategiaPerLega:
         assert strat["min_edge"] == 0.020
 
     def test_unknown_league_strategy_severo(self):
+        """Le leghe non in lista usano fallback severo (min_edge piu' basso)."""
         from value_filter import get_league_strategy
         strat = get_league_strategy("Serie A")
         assert strat["max_stake"] == 0.005  # fallback severo
         assert strat["kelly_mult"] == 0.5
-        assert strat["min_edge"] == 0.05
+        assert strat["min_edge"] == 0.02     # abbassato per frequenza
 
     def test_is_sane_league_filter(self):
         """Un segnale in Serie A viene rifiutato (ROI negativo)."""

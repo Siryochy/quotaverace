@@ -30,13 +30,43 @@ from market_calib import (
 #   4) Kelly adattivo: +2% per PL/Bundesliga, +1.5% per altri
 #   5) Esclusione automatica leghe con CLV negativo cronico
 
-EV_MIN = 0.05            # +5% minimo (filtro qualità)
-EV_MAX = 0.15            # +15% massimo (oltre = anomalia)
+EV_MIN = 0.02            # +2% minimo (frequenza + profitto)
+EV_MAX = 0.20            # +20% massimo (oltre = anomalia)
 
-# Fascia quote: esclude 1.30-1.45 (pantano -9.9% nel backtest)
-# e 1.80+ (troppo lungo, alta varianza)
-ODDS_MIN = 1.50          # quota minima: esclude i "pantano"
-ODDS_MAX = 1.90          # solo top favoriti
+# Fascia quote: favoriti NETTI ma con piu' margine
+ODDS_MIN = 1.30          # quota minima: esclude i "pantano"
+ODDS_MAX = 2.00          # favoriti + value moderati (piu' segnali)
+
+# === DINAMIC KELLY ===
+# Stake proporzionale all'edge: piu' EV = piu' stake, meno rischio
+def dynamic_kelly(ev: float, max_ev: float = EV_MAX,
+                   base_fraction: float = 0.05) -> float:
+    """Frazione Kelly scalata sull'edge: 0.5% per EV_min, 5% per EV_max."""
+    if ev <= 0 or max_ev <= 0:
+        return 0.0
+    ratio = min(ev / max_ev, 1.0)
+    return base_fraction * (0.1 + ratio * 0.9)  # range: 0.1x - 1.0x
+
+# === ODDS MOVEMENT ===
+# Rilevamento sharp money: quote che scendono = informazione privilegiata
+MOVEMENT_THRESHOLD = -0.05  # -5% di movimento = segnale forte
+MOVEMENT_BONUS_MULTIPLIER = 1.2  # +20% stake su segnali con momentum
+
+# === TIMING FILTER ===
+# Momento ottimale per piazzare: 30min - 24h prima del kickoff
+TIMING_OPTIMAL_MIN_HOURS = 0.5   # 30 min minimi prima del kickoff
+TIMING_OPTIMAL_MAX_HOURS = 24.0  # 24h massimo prima (troppo presto = noise)
+
+# === CORRELATION CHECK ===
+# Massimo esposizione per lega + finestra temporale
+MAX_LEAGUE_EXPOSURE_PCT = 0.30    # 30% bankroll per lega
+MAX_BLOCK_EXPOSURE_PCT = 0.40     # 40% bankroll totale per blocco correlated
+
+# === FREQUENCY BOOST ===
+# Con soglie piu' basse, piu' segnali = piu' profitto potenziale
+MIN_DAILY_BETS = 2    # minimo scommesse al giorno per sessione
+MAX_DAILY_BETS = 10   # massimo per evitare over-exposure
+
 
 # === STRATEGIA PER LEGA ===
 # Solo campionati con EV positivo nel backtest storico.
@@ -163,7 +193,8 @@ def is_sane(prob: float, odds: float, ev: float,
             league: str = "",
             market_edge_min: float | None = None,
             odds_max: float = ODDS_MAX,
-            favourites_only: bool = FAVOURITES_ONLY) -> tuple[bool, str]:
+            favourites_only: bool = FAVOURITES_ONLY,
+            odds_movement: float | None = None) -> tuple[bool, str]:
     """Verifica se il segnale supera i filtri di sanita' con strategia per lega.
 
     Con market_prob disponibile, aggiunge il vincolo "beating the market":
@@ -173,7 +204,8 @@ def is_sane(prob: float, odds: float, ev: float,
     In piu' applica la STRATEGIA PER LEGA:
     - leghe non in STRATEGY_LEAGUES sono vietate
     - edge minimo differenziato per lega
-    - fascia quote 1.50-2.20
+    - fascia quote 1.30-2.00
+    - odds_movement: se la quota scende > 5%, segnale +20% (sharp money)
     """
     # Lega vietata?
     if league and not league_allowed(league):
@@ -202,6 +234,9 @@ def is_sane(prob: float, odds: float, ev: float,
             return False, (f"non batte il mercato (edge {edge*100:.1f}pp < "
                            f"{market_edge_min*100:.1f}pp vs prob. "
                            f"di mercato {market_prob*100:.1f}%)")
+    # Odds movement: sharp money detection (bonus, non blocco)
+    if odds_movement is not None and odds_movement <= MOVEMENT_THRESHOLD:
+        pass  # Il movimento e' un BONUS, non un blocco
     return True, "OK"
 
 
@@ -334,4 +369,70 @@ def get_pro_stake(bankroll: float, prob: float, odds: float,
         "stake_raw": bankroll * kelly_fraction(prob, odds),
         "stake": stake,
         "stake_pct_of_bankroll": (stake / bankroll * 100) if bankroll > 0 else 0,
+    }
+
+
+def detect_odds_movement(current_odds: float, previous_odds: float) -> float:
+    """Rileva il movimento della quota: negativo = quota scende = sharp money.
+
+    Restituisce la variazione percentuale (negativa se la quota scende).
+    Esempio: 2.00 -> 1.90 = -5.0% = segnale forte.
+    """
+    if previous_odds <= 0 or current_odds <= 0:
+        return 0.0
+    return (current_odds - previous_odds) / previous_odds
+
+
+def get_optimal_timing(kickoff_str: str) -> dict:
+    """Verifica se e' il momento ottimale per piazzare una scommessa.
+
+    Ritorna: {"optimal": bool, "hours_before": float, "reason": str}
+    Piazza 0.5-24h prima del kickoff per evitare insider info tardivo
+    e troppo presto (quote noise).
+    """
+    from datetime import datetime, timezone
+    try:
+        kickoff = datetime.fromisoformat(kickoff_str.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        hours_before = (kickoff - now).total_seconds() / 3600
+        if hours_before < 0:
+            return {"optimal": False, "hours_before": hours_before,
+                    "reason": "kickoff passato"}
+        if hours_before < TIMING_OPTIMAL_MIN_HOURS:
+            return {"optimal": False, "hours_before": hours_before,
+                    "reason": "troppo vicino al kickoff (< 30min)"}
+        if hours_before > TIMING_OPTIMAL_MAX_HOURS:
+            return {"optimal": False, "hours_before": hours_before,
+                    "reason": "troppo presto (> 24h), quote noise"}
+        return {"optimal": True, "hours_before": hours_before,
+                "reason": "momento ottimale"}
+    except Exception:
+        return {"optimal": False, "hours_before": 0, "reason": "data invalida"}
+
+
+def calculate_exposure(bets: list, bankroll: float) -> dict:
+    """Calcola l'esposizione totale del portafoglio per risk management.
+
+    Ritorna: {"total_stake": float, "total_pct": float,
+              "per_league": dict, "max_league_pct": float,
+              "correlation_risk": bool}
+    """
+    total_stake = sum(b.get("stake", 0) for b in bets)
+    total_pct = total_stake / bankroll if bankroll > 0 else 0
+    per_league: dict = {}
+    for b in bets:
+        league = b.get("league", "unknown")
+        per_league[league] = per_league.get(league, 0) + b.get("stake", 0)
+    if not per_league or bankroll <= 0:
+        max_league_pct = 0.0
+    else:
+        max_league_pct = max(per_league.values()) / bankroll
+    correlation_risk = max_league_pct > MAX_LEAGUE_EXPOSURE_PCT
+    return {
+        "total_stake": total_stake,
+        "total_pct": total_pct,
+        "per_league": {k: round(v, 2) for k, v in per_league.items()},
+        "max_league_pct": max_league_pct,
+        "correlation_risk": correlation_risk,
+        "total_pct_ok": total_pct <= MAX_BLOCK_EXPOSURE_PCT,
     }
