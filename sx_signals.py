@@ -25,11 +25,14 @@ SOLO l'API PUBBLICA SX Bet (zero chiavi, zero crediti):
    provider SX configurato — piazza l'ordine reale sullo STESSO exchange
    che ha generato il prezzo (resolve_match_market matches per nomi+kickoff).
 
-Settlement (senza ODDS_API_KEY): leggendo solo SX mancano i punteggi
-finali; si recuperano da the-odds-api SE configurata (match per NOME+LEGA),
-altrimenti da API-Football (football_hist) — lo strumento punteggi per le
-bet SX e' _settle_sx_bets(). Finche' nessuna fonte e' disponibile le bet
-restano aperte (nessuna chiusura errata: fail-closed).
+Settlement: PRIMA la fonte NATIVA SX (`_results_from_sx`, 12/09): i
+market_hash salvati sulle bet permettono di leggere l'esito saldato
+(`markets/find` -> outcome + punteggi) SENZA matching per nome, SENZA
+crediti e coprendo anche le leghe FUORI SPORTS_MAP (Primera A, Primera
+Nacional, K2-League) che the-odds-api non copre. Poi, per i match con
+riga nel ledger, i punteggi esterni: the-odds-api SE configurata (match
+per NOME+LEGA), altrimenti API-Football (football_hist). Finche' nessuna
+fonte e' disponibile le bet restano aperte (fail-closed).
 
 CLI:
     venv/bin/python sx_signals.py scan        # scan + salvataggio segnali
@@ -81,6 +84,16 @@ HOURS_AHEAD = 24.0          # come auto_bet._today_value_picks (now..now+24h)
 MIN_MINUTES_TO_START = 15   # auto_bet salta comunque i match vicini: qui
                             # non generiamo segnali gia' degni di salto
 MAX_RAW_MARKETS = 300       # mercati binari da scansionare (100 partite)
+
+# --- Settlement nativo SX ---------------------------------------------------
+# `markets/find` accetta al massimo 30 market hash per chiamata (docs SX).
+SX_FIND_BATCH = 30
+# I punteggi live su /markets/active sono affidabili come FINALE solo quando
+# la partita e' veramente finita: sotto i 120' dal kickoff (stoppage, ripresa
+# lunga) il punteggio puo' ancora cambiare e si chiuderebbe un verdetto
+# prematuro. Il percorso serve alle leghe non coperte da the-odds-api, dove
+# due ore di ritardo sono accettabili; le coperte arrivano prima.
+SX_LIVE_MIN_AGE_MS = 120 * 60 * 1000
 
 _LEAGUE_MAP_CACHE: Dict[str, Optional[str]] = {}
 
@@ -880,7 +893,130 @@ def _results_from_api_football(meta: Dict[str, dict]) -> int:
     return saved
 
 
-def settle_sx_bets() -> dict:
+def _results_from_sx(provider: Optional[SxBetProvider] = None) -> int:
+    """Punteggi via SX Bet (FONTE NATIVA, 12/09): l'esito e' quello
+    dell'exchange dove il denaro si regola davvero.
+
+    Due percorsi, entrambi GRATUITI (letture pubbliche, zero crediti
+    the-odds-api) e senza matching per nome:
+
+    1. BET con market_id salvato sul ledger: `markets/find` sui mercati
+       aperti (batch da SX_FIND_BATCH). Ogni mercato binario porta SEMPRE
+       i punteggi dell'evento (teamOneScore/teamTwoScore) e, se saldato,
+       anche `outcome` (1 = vince outcomeOne, 2 = vince outcomeTwo,
+       0 = void) — la semantica e' relativa alla GAMBA del mercato:
+       per il mercato dell'esito scommesso ("T1 vs Not T1") outcome 1
+       significa che l'esito scommesso ha vinto. Le colonne home/away
+       vengono dalla risposta SX stessa (niente riga `matches` richiesta):
+       cosi' si saldano anche le bet ORFANE senza riga nel ledger.
+
+    2. MATCH aperti (bet o sole previsioni) con riga nel ledger:
+       `/markets/active` (type 1, sportId 5, paginato come `_discover`)
+       espone ancora gli eventi IN CORSO (fino a ~+1h dal kickoff) con
+       i punteggi live: copre le partite di oggi prima che il risultato
+       arrivi da the-odds-api, incluse le leghe non mappate.
+
+    `markets/find` ritorna i punteggi anche per mercati NON ancora
+    saldati (stesso evento): si salva il punteggio ma il verdetto lo
+    emette comunque settle_bets/settle_predictions (fail-closed).
+    """
+    if os.getenv("SX_NATIVE_SETTLEMENT", "1").strip().lower() in (
+            "0", "false", "off"):
+        return 0   # disattivabile da env (test offline / fallback esterno)
+    from tracker import save_result, _get_conn
+    prov = provider or SxBetProvider()
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT match_id, market_id, selection_id, esito FROM bets "
+            "WHERE mode='live' AND esito_finale IS NULL "
+            "AND match_id LIKE 'sx-%' AND market_id IS NOT NULL "
+            "AND market_id != ''").fetchall()
+    finally:
+        conn.close()
+    saved = 0
+    by_hash = {}
+    for mid, mkt_id, sel, esito in rows:
+        if mkt_id not in by_hash:
+            by_hash[mkt_id] = (mid, sel, esito)
+
+    def _save(mid, league_label, home, away, sh, sa):
+        nonlocal saved
+        save_result(mid, league_label, home, away, sh, sa,
+                    datetime.now(timezone.utc).isoformat())
+        saved += 1
+
+    # --- 1. mercati delle bet aperte (find, a batch) ---
+    hashes = list(by_hash.keys())
+    for i in range(0, len(hashes), SX_FIND_BATCH):
+        batch = hashes[i:i + SX_FIND_BATCH]
+        try:
+            data = prov._get("markets/find", params={
+                "marketHashes": ",".join(batch)})
+        except Exception as e:
+            logger.warning("sx_signals: settlement SX find fallita: %s", e)
+            continue
+        arr = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(arr, list):
+            continue
+        for m in arr:
+            if not isinstance(m, dict):
+                continue
+            mh = m.get("marketHash")
+            hit = by_hash.get(mh)
+            if not hit:
+                continue
+            mid, _sel, _esito = hit
+            sh, sa = m.get("teamOneScore"), m.get("teamTwoScore")
+            home = m.get("teamOneName") or ""
+            away = m.get("teamTwoName") or ""
+            if home and away and isinstance(sh, int) and isinstance(sa, int):
+                _save(mid, m.get("leagueLabel") or "", home, away, sh, sa)
+
+    # --- 2. partite aperte con riga nel ledger (active, punteggi live) ---
+    meta = _sx_open_matches()
+    if meta:
+        now_ms = _now_ms()
+        raw: List[dict] = []
+        pagination_key: Optional[str] = None
+        while len(raw) < MAX_RAW_MARKETS:
+            params: Dict = {"sportIds": "5", "type": "1", "pageSize": 100}
+            if pagination_key:
+                params["paginationKey"] = pagination_key
+            try:
+                data = prov._get("markets/active", params=params)
+            except Exception as e:
+                logger.warning("sx_signals: settlement SX active fallita: %s", e)
+                break
+            d = data.get("data") if isinstance(data, dict) else {}
+            mkts = (d or {}).get("markets") or []
+            raw.extend(m for m in mkts if isinstance(m, dict))
+            pagination_key = (d or {}).get("nextKey")
+            if not pagination_key or not mkts:
+                break
+        for m in raw:
+            ev_id = m.get("sportXeventId")
+            if not ev_id:
+                continue
+            mid = f"sx-{ev_id}"
+            if mid not in meta:
+                continue
+            ko = _kickoff_utc_ms(m.get("gameTime"))
+            if ko is None or ko > now_ms - SX_LIVE_MIN_AGE_MS:
+                continue  # futura o ancora in gioco: punteggio non affidabile
+            sh, sa = m.get("teamOneScore"), m.get("teamTwoScore")
+            if isinstance(sh, int) and isinstance(sa, int):
+                _save(mid, m.get("leagueLabel") or "",
+                      m.get("teamOneName") or meta[mid].get("home") or "",
+                      m.get("teamTwoName") or meta[mid].get("away") or "",
+                      sh, sa)
+    if saved:
+        logger.info("sx_signals: settlement SX nativo — %d punteggi salvati",
+                    saved)
+    return saved
+
+
+def settle_sx_bets(provider: Optional[SxBetProvider] = None) -> dict:
     """Salda le bet SX aperte: risultati (fonti esterne) + settle_bets.
 
     Le bet senza risultato disponibile restano aperte (fail-closed: mai
@@ -889,29 +1025,65 @@ def settle_sx_bets() -> dict:
     PAUSA SETTLEMENT (11/09): con la pausa attiva si esce PRIMA di
     interrogare le fonti punteggi — nessuna chiusura e nessun credito
     the-odds-api/API-Football consumato.
+
+    FONTE NATIVA SX (12/09): `_results_from_sx` legge gli esiti saldati
+    DALL'EXCHANGE (markets/find sui market_hash delle bet + punteggi live
+    su markets/active) — gratis, senza matching per nome e incluse le
+    leghe fuori SPORTS_MAP. Solo per i match ancora scoperti si passa a
+    the-odds-api e poi ad API-Football.
     """
     from tracker import settle_bets, settle_predictions, settlement_paused
     if settlement_paused():
         logger.info("sx_signals: settlement in PAUSA — nessun download punteggi")
         return {"open": 0, "results": 0, "settled": 0, "source": None,
                 "paused": True}
-    meta = _sx_open_matches()
-    if not meta:
-        return {"open": 0, "results": 0, "settled": 0, "source": None}
     results = 0
     source = None
-    if os.getenv("ODDS_API_KEY"):
+    # La fonte nativa SX segue la stessa logica delle altre: attiva solo se
+    # il sistema e' configurato per refertare (almeno una fonte punteggi).
+    # Con entrambe le chiavi ASSENTI si resta fail-closed offline (i test
+    # del settlement non devono toccare la rete).
+    if (os.getenv("ODDS_API_KEY") or os.getenv("API_FOOTBALL_KEY")) \
+            and os.getenv("SX_NATIVE_SETTLEMENT", "1").strip().lower() not in (
+                "0", "false", "off"):
         try:
-            results = _results_from_the_odds_api(meta)
-            source = "the-odds-api" if results else source
+            n = _results_from_sx(provider)
+            if n:
+                results, source = n, "sx"
         except Exception as e:
-            logger.warning("sx_signals: settlement the-odds-api fallito: %s", e)
-    if not results and os.getenv("API_FOOTBALL_KEY"):
+            logger.warning("sx_signals: settlement SX nativo fallito: %s", e)
+    meta = _sx_open_matches()
+    if meta:
+        # Solo i match ANCORA senza risultato sx-* passano alle fonti
+        # esterne (crediti): copre i match con sole previsioni, che il
+        # percorso (1) non vede perche' non ha market_hash nel ledger.
+        from tracker import _get_conn as _conn, _create_results_table
+        conn = _conn()
         try:
-            results = _results_from_api_football(meta)
-            source = "api-football" if results else source
-        except Exception as e:
-            logger.warning("sx_signals: settlement api-football fallito: %s", e)
+            _create_results_table(conn)
+            have = {r[0] for r in conn.execute(
+                "SELECT match_id FROM match_results WHERE match_id LIKE 'sx-%'")}
+        finally:
+            conn.close()
+        missing = {mid for mid in meta if mid not in have}
+        if missing and os.getenv("ODDS_API_KEY"):
+            try:
+                n = _results_from_the_odds_api(
+                    {mid: meta[mid] for mid in missing})
+                if n:
+                    results += n
+                    source = source or "the-odds-api"
+            except Exception as e:
+                logger.warning(
+                    "sx_signals: settlement the-odds-api fallito: %s", e)
+        if not results and os.getenv("API_FOOTBALL_KEY"):
+            try:
+                n = _results_from_api_football(meta)
+                if n:
+                    results, source = n, "api-football"
+            except Exception as e:
+                logger.warning(
+                    "sx_signals: settlement api-football fallito: %s", e)
     settled, pushes = settle_bets()
     # Anche le PREVISIONI: il risultato appena salvato ha la chiave sx-<id>,
     # quindi `settle_predictions` le chiude per match_id. Senza questo passo

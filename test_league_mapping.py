@@ -28,6 +28,26 @@ def temp_db(monkeypatch):
         yield db_path
 
 
+@pytest.fixture(autouse=True)
+def _offline_sx_provider(monkeypatch):
+    """Nessuna rete nei test di settlement: dalla fonte nativa SX (12/09)
+    il settlement interroga anche markets/find e markets/active — qui il
+    provider SX e' sostituito da un dummy con risposte vuote canned."""
+    class _DummyProv:
+        name = "sxbet"
+
+        def _get(self, path, params=None):
+            if path == "markets/find":
+                return {"status": "success", "data": []}
+            if path == "markets/active":
+                return {"status": "success",
+                        "data": {"markets": [], "nextKey": None}}
+            return {"status": "success", "data": []}
+
+    monkeypatch.setattr(sx_signals, "SxBetProvider",
+                        lambda *a, **k: _DummyProv())
+
+
 class TestLeagueMapping:
     """Etichette reali osservate sull'API pubblica SX Bet (sample 11/09)."""
 
