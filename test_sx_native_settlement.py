@@ -251,6 +251,101 @@ class TestActivePath:
         assert _bet_outcome("sx-LEV5") == ("won", 1.0 * (3.0 - 1))
 
 
+class TestScadenzaRigheStale:
+    """Scadenza (12/09): le righe sx-* con kickoff > SX_STALE_DAYS giorni e
+    senza NESSUN risultato si chiudono come push (P/L 0) e smettono di
+    generare fetch_scores infiniti (crediti sprecati)."""
+
+    def test_riga_stale_chiusa_push(self, temp_db, monkeypatch):
+        monkeypatch.setenv("SX_STALE_DAYS", "2")
+        # kickoff 4 giorni fa: scaduta
+        tracker.save_match("sx-OLD1", "Primera A", "Alpha", "Beta",
+                           "2026-09-08T15:00:00Z")
+        tracker.save_prediction("sx-OLD1", "1X2", "1", 1.7, 0.60, 0.04)
+        tracker.save_bet("sx-OLD1", "1X2", "1", "0xh1", 1, 1.7, 1.0,
+                         mode="live")
+        prov = FakeSxSettle()   # nessun risultato dalle fonti
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["expired"] == {"bets": 1, "predictions": 1}
+        conn = tracker._get_conn()
+        b = conn.execute("SELECT esito_finale, profit FROM bets WHERE "
+                         "match_id='sx-OLD1'").fetchone()
+        p = conn.execute("SELECT esito_finale, profit FROM predictions WHERE "
+                         "match_id='sx-OLD1'").fetchone()
+        conn.close()
+        assert b == ("push", 0.0) and p == ("push", 0.0)
+
+    def test_riga_con_risultato_non_scade(self, temp_db, monkeypatch):
+        """Se le fonti hanno salvato il risultato, la riga e' gia' chiusa col
+        verdetto vero: la scadenza non la tocca (e il settle normale la
+        chiusa prima della scadenza)."""
+        monkeypatch.setenv("SX_STALE_DAYS", "2")
+        tracker.save_match("sx-OLD2", "Primera A", "Alpha", "Beta",
+                           "2026-09-08T15:00:00Z")
+        tracker.save_prediction("sx-OLD2", "1X2", "1", 1.7, 0.60, 0.04)
+        tracker.save_result("sx-OLD2", "Primera A", "Alpha", "Beta", 2, 0,
+                            datetime.now(timezone.utc).isoformat())
+        prov = FakeSxSettle()
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["expired"] == {"bets": 0, "predictions": 0}
+        assert _pred_outcome("sx-OLD2") == ("won", 0.7)
+
+    def test_match_recente_non_scade(self, temp_db, monkeypatch):
+        monkeypatch.setenv("SX_STALE_DAYS", "5")
+        tracker.save_match("sx-NEW1", "Primera A", "Alpha", "Beta",
+                           "2026-09-11T15:00:00Z")
+        tracker.save_prediction("sx-NEW1", "1X2", "1", 1.7, 0.60, 0.04)
+        prov = FakeSxSettle()
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["expired"] == {"bets": 0, "predictions": 0}
+        assert _pred_outcome("sx-NEW1") == (None, None)
+
+    def test_bet_orfana_senza_matches_scade(self, temp_db, monkeypatch):
+        """Ramo orfani: la bet del batch 09/09 senza riga in `matches` non ha
+        kickoff -> la scadenza usa `created_at`. Senza questo ramo resterebbe
+        aperta per sempre e finirebbe in `missing` a ogni giro (fetch_scores
+        a credito sprecato)."""
+        monkeypatch.setenv("SX_STALE_DAYS", "2")
+        tracker.save_bet("sx-ORF1", "1X2", "1", "0xorf1", 1, 3.25, 1.0,
+                         mode="live")
+        tracker.save_prediction("sx-ORF1", "1X2", "1", 3.25, 0.31, 0.02)
+        conn = tracker._get_conn()
+        conn.execute("UPDATE bets SET created_at=datetime('now', '-5 days') "
+                     "WHERE match_id='sx-ORF1'")
+        conn.execute("UPDATE predictions SET created_at=datetime('now', "
+                     "'-5 days') WHERE match_id='sx-ORF1'")
+        conn.commit()
+        conn.close()
+        prov = FakeSxSettle()   # mercato non piu' attivo: find tornerebbe vuoto
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["expired"] == {"bets": 1, "predictions": 1}
+        assert _bet_outcome("sx-ORF1") == ("push", 0.0)
+        assert _pred_outcome("sx-ORF1") == ("push", 0.0)
+
+    def test_orfana_recente_non_scade(self, temp_db, monkeypatch):
+        monkeypatch.setenv("SX_STALE_DAYS", "2")
+        tracker.save_bet("sx-ORF2", "1X2", "1", "0xorf2", 1, 1.75, 1.0,
+                         mode="live")
+        prov = FakeSxSettle()
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["expired"] == {"bets": 0, "predictions": 0}
+        assert _bet_outcome("sx-ORF2") == (None, None)
+
+    def test_pausa_blocca_la_scadenza(self, temp_db, monkeypatch):
+        monkeypatch.setenv("SX_STALE_DAYS", "2")
+        tracker.save_match("sx-OLD3", "Primera A", "Alpha", "Beta",
+                           "2026-09-08T15:00:00Z")
+        tracker.save_prediction("sx-OLD3", "1X2", "1", 1.7, 0.60, 0.04)
+        tracker.set_settlement_paused(True)
+        try:
+            prov = FakeSxSettle()
+            res = sx_signals.settle_sx_bets(provider=prov)
+            assert res.get("paused") is True
+            assert _pred_outcome("sx-OLD3") == (None, None)
+        finally:
+            tracker.set_settlement_paused(False)
+
+
 class TestSettlementPausa:
     def test_pausa_blocca_anche_il_percorso_sx(self, temp_db, monkeypatch):
         """Pausa settlement: nessuna lettura SX, nessuna chiusura."""

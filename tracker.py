@@ -768,6 +768,96 @@ def _prediction_outcome(mercato, esito, quota, sh, sa, home, away):
     return ("won" if won else "lost"), round((quota - 1) if won else -1.0, 4)
 
 
+# SCADENZA RIGHE SX SENZA RISULTATO (12/09/2026): le righe sx-* aperte e
+# fuori dalla finestra di refertazione esterna (the-odds-api copre al massimo
+# 3 giorni) facevano ripartire fetch_scores a ogni giro per SEMPRE senza
+# mai trovarle (match orfani del batch 09/09: 6 match -> ~2 crediti/giro
+# sprecati). L'esito lo conosce SX, che e' dove il denaro si regula: chiudo
+# come PUSH (P/L 0) solo le righe SCADUTE, cioe' senza alcun risultato sx-*
+# salvato dalle fonti dopo SX_STALE_DAYS giorni dal kickoff (letta a
+# runtime: un override env vale anche senza riavviare il processo). La pausa
+# settlement blocca anche la scadenza (nessuna chiusura while in pausa).
+SX_STALE_DAYS_DEFAULT = 5.0
+
+
+def _stale_days() -> float:
+    try:
+        return float(os.getenv("SX_STALE_DAYS", "") or SX_STALE_DAYS_DEFAULT)
+    except (TypeError, ValueError):
+        return SX_STALE_DAYS_DEFAULT
+
+
+def expire_stale_sx_rows() -> dict:
+    """Chiude come push le righe sx-* scadute (kickoff passato, senza risultato).
+
+    Una riga e' SCADUTA se: match_id LIKE 'sx-%', esito_finale IS NULL,
+    esiste una partita in `matches` con commence_time piu' vecchio di
+    SX_STALE_DAYS giorni, e NON esiste nessuna riga in match_results per
+    quel match_id (se c'e' il risultato le fonti hanno gia' parlato: il
+    settle normale la chiudera' col verdetto vero).
+
+    RAMO ORFANI (12/09): le righe sx-* SENZA riga in `matches` (batch 09/09:
+    niente nomi squadra, nessuna fonte puo' mai abbinarle) usano `created_at`
+    come riferimento temporale — senza questo ramo resterebbero aperte per
+    sempre E continuerebbero a finire in `missing` nel settlement (fetch_scores
+    a credito sprecato).
+
+    Ritorna {bets: n, predictions: m} (righe appena chiuse, 0 se in pausa).
+    """
+    if settlement_paused():
+        return {"bets": 0, "predictions": 0}
+    conn = _get_conn()
+    _create_results_table(conn)
+    c = conn.cursor()
+    try:
+        stale_days = _stale_days()
+        cutoff = f"-{stale_days} days"
+        stale = {r[0] for r in c.execute(
+            "SELECT m.id FROM matches m "
+            "WHERE m.id LIKE 'sx-%' AND m.commence_time < datetime('now', ?) "
+            "AND NOT EXISTS (SELECT 1 FROM match_results r WHERE r.match_id = m.id)",
+            (cutoff,)).fetchall()}
+        # Ramo orfani: nessuna riga in `matches` -> il kickoff non esiste,
+        # usa la data di creazione della riga (bets + predictions, UNION).
+        stale |= {r[0] for r in c.execute(
+            "SELECT DISTINCT match_id FROM bets WHERE match_id LIKE 'sx-%' "
+            "AND esito_finale IS NULL AND created_at < datetime('now', ?) "
+            "AND match_id NOT IN (SELECT id FROM matches) "
+            "AND NOT EXISTS (SELECT 1 FROM match_results r WHERE r.match_id = bets.match_id)",
+            (cutoff,)).fetchall()}
+        stale |= {r[0] for r in c.execute(
+            "SELECT DISTINCT match_id FROM predictions WHERE match_id LIKE 'sx-%' "
+            "AND esito_finale IS NULL AND created_at < datetime('now', ?) "
+            "AND match_id NOT IN (SELECT id FROM matches) "
+            "AND NOT EXISTS (SELECT 1 FROM match_results r WHERE r.match_id = predictions.match_id)",
+            (cutoff,)).fetchall()}
+        now = datetime.now().isoformat()
+        nb = np_ = 0
+        if stale:
+            qmarks = ",".join("?" for _ in stale)
+            ids = tuple(stale)
+            cur = c.execute(
+                f"UPDATE bets SET esito_finale='push', profit=0.0, "
+                f"settled_at=? WHERE esito_finale IS NULL AND match_id IN ({qmarks})",
+                (now, *ids))
+            nb = cur.rowcount
+            cur = c.execute(
+                f"UPDATE predictions SET esito_finale='push', profit=0.0, "
+                f"settled_at=? WHERE esito_finale IS NULL AND match_id IN ({qmarks})",
+                (now, *ids))
+            np_ = cur.rowcount
+            if nb or np_:
+                conn.commit()
+                logger.warning(
+                    "expire_stale_sx_rows: %d bet e %d previsioni sx-* "
+                    "scadute (kickoff > %.0fgg senza risultato) chiuse come "
+                    "push — smettono di generare fetch_scores",
+                    nb, np_, stale_days)
+        return {"bets": nb, "predictions": np_}
+    finally:
+        conn.close()
+
+
 def settle_predictions():
     """Salda le previsioni aperte coi risultati reali (idempotente).
 

@@ -1090,9 +1090,22 @@ def settle_sx_bets(provider: Optional[SxBetProvider] = None) -> dict:
     # restavano aperte fino al watchdog successivo (o per sempre, se il
     # match non aveva bet).
     pred_n, pred_pushes = settle_predictions()
+    # SCADENZA (12/09): ULTIMA operazione — le righe sx-* rimaste aperte
+    # oltre SX_STALE_DAYS giorni dal kickoff SENZA alcun risultato si chiudono
+    # come push (P/L 0): senza questo passo entravano in `missing` a ogni giro
+    # e provocavano fetch_scores (crediti) che non le avrebbe MAI trovate
+    # (la finestra the-odds-api e' di 3 giorni). Dopo le fonti: se una fonte
+    # ha appena salvato il risultato, la riga e' gia' chiusa col verdetto vero.
+    try:
+        from tracker import expire_stale_sx_rows
+        expired = expire_stale_sx_rows()
+    except Exception as e:
+        logger.warning("sx_signals: scadenza righe sx-* fallita: %s", e)
+        expired = {"bets": 0, "predictions": 0}
     return {"open": len(meta), "results": results, "settled": settled,
             "pushes": pushes, "predictions": pred_n,
-            "prediction_pushes": pred_pushes, "source": source}
+            "prediction_pushes": pred_pushes, "source": source,
+            "expired": expired}
 
 
 if __name__ == "__main__":
