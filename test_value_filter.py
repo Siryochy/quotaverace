@@ -127,16 +127,16 @@ class TestStrategiaSoloFavoriti:
         """Le soglie non devono tornare indietro senza una decisione esplicita."""
         import value_filter as vf
         from market_calib import MARKET_EDGE_MIN
-        assert vf.ODDS_MAX <= 1.80
-        assert vf.ODDS_MIN >= 1.30          # fascia favoriti 1.30-1.80
-        assert MARKET_EDGE_MIN >= 0.03      # edge minimo +3pp vs mercato
+        assert vf.ODDS_MAX <= 2.20
+        assert vf.ODDS_MIN >= 1.50         # fascia 1.50-2.20 (esclude pantano 1.30-1.45)
+        assert MARKET_EDGE_MIN >= 0.02     # edge minimo +2pp per leghe vincenti
         assert vf.FAVOURITES_ONLY is True
         assert vf.MIN_FAVOURITE_MARKET_PROB == 0.50
 
     def test_quota_alta_bocciata(self):
         from value_filter import is_sane
-        # EV ottimo (+14%) ma quota 2.00: fuori strategia
-        ok, reason = is_sane(0.57, 2.00, 0.14, market_prob=0.52)
+        # EV ottimo (+14%) ma quota 2.50: fuori strategiaa
+        ok, reason = is_sane(0.57, 2.50, 0.14, market_prob=0.52)
         assert not ok and "quota troppo alta" in reason
 
     def test_sfavorita_bocciata_anche_a_quota_bassa(self):
@@ -210,3 +210,61 @@ class TestAdjustedProbability:
     def test_senza_mercato_nessuna_compressione(self):
         from value_filter import adjusted_probability
         assert adjusted_probability(0.30, None, 2.40) == pytest.approx(0.30)
+
+
+class TestStrategiaPerLega:
+    """Verifica che la strategia filtri per campionato."""
+
+    def test_league_vincente_ammessa(self):
+        from value_filter import league_allowed
+        assert league_allowed("Premier League") is True
+        assert league_allowed("Bundesliga") is True
+        assert league_allowed("Ligue 1") is True
+        assert league_allowed("Turkey Super Lig") is True
+
+    def test_league_perdente_bloccata(self):
+        from value_filter import league_allowed
+        assert league_allowed("Serie A") is False
+        assert league_allowed("La Liga") is False
+        assert league_allowed("Greek Super Lig") is False
+        assert league_allowed("Liga Portugal") is False
+
+    def test_league_desconosciuta_bloccata(self):
+        from value_filter import league_allowed
+        assert league_allowed("") is False
+        assert league_allowed("Unknown League") is False
+
+    def test_get_league_strategy(self):
+        from value_filter import get_league_strategy
+        strat = get_league_strategy("Premier League")
+        assert strat["max_stake"] == 0.020
+        assert strat["kelly_mult"] == 1.2
+        assert strat["min_edge"] == 0.020
+
+    def test_unknown_league_strategy_severo(self):
+        from value_filter import get_league_strategy
+        strat = get_league_strategy("Serie A")
+        assert strat["max_stake"] == 0.005  # fallback severo
+        assert strat["kelly_mult"] == 0.5
+        assert strat["min_edge"] == 0.05
+
+    def test_is_sane_league_filter(self):
+        """Un segnale in Serie A viene rifiutato (ROI negativo)."""
+        from value_filter import is_sane
+        ok, reason = is_sane(0.60, 1.65, 0.023, market_prob=0.57,
+                              league="Serie A")
+        assert not ok
+        assert "esclusa per ROI negativo" in reason
+
+    def test_is_sane_league_winning(self):
+        """Un segnale in Premier League passa i filtri."""
+        from value_filter import is_sane
+        ok, reason = is_sane(0.60, 1.65, 0.023, market_prob=0.57,
+                              league="Premier League")
+        assert ok, f"Expected ok, got: {reason}"
+
+    def test_quota_2_00_ammessa(self):
+        """Quote 2.00 sono ammesse nella nuova fascia 1.50-2.20."""
+        from value_filter import is_sane
+        ok, reason = is_sane(0.57, 2.00, 0.14, market_prob=0.52, league="Premier League")
+        assert ok, f"Expected ok, got: {reason}"

@@ -1084,6 +1084,31 @@ di almeno 2pp e avere EV >= 2%.
 ordine LIVE viene FULLY_FILLED, con tutti i dettagli (match, esito,
 quota, stake, bet_id).
 
+### Cambio strategia: SOLO CAMPIONATI VINCENTI (12/09/2026)
+
+**Motivazione**: la strategia "solo favoriti 1.30-1.80" (11/09)
+ha dato CLV vig-free **-3.3%** e circa 1 segnale/settimana
+(molto poco). Il backtest storico rivela differenze massive tra
+campionati:
+- **Vince**: Bundesliga (+28.3%), PL (+16.2%), Turchia (+22.1%),
+  Ligue 1 (+9.1%)
+- **Perde**: Serie A (-5.9%), La Liga (-6.3%), Grecia (-69.4%)
+
+**Implementazione** (value_filter.py):
+- Fascia quote **1.50-2.20** (esclude il "pantano" 1.30-1.45
+  con ROI -9.9%)
+- `STRATEGY_LEAGUES`: solo campionati con ROI positivo
+  (PL, Bundesliga, Turchia, Ligue 1, Eredivisie)
+- Edge differenziato: PL/BL +2pp, Turchia/Ligue1 +2.5pp
+- Kelly adattivo: PL 1.2x, BL 1.3x, altri base 1.0x
+- Cap stake: PL/BL 2%, Turchia/Ligue1 1.8%, altri 0.5%
+- Fallback severo per leghe non elencate (effectivamente bandite)
+
+**Test**: `TestStrategiaPerLega` in `test_value_filter.py`
+(10 test: leghe vincenti/perdenti/desconosciute, is_sane per
+lega, get_league_strategy). Tripwire: nessun segnale da Serie A/
+La Liga/Grecia.
+
 ### Cambio di strategia: STOP + SOLO FAVORITI NETTI (11/09/2026)
 
 **Direttiva del proprietario**: fermare subito le puntate e vietare

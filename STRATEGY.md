@@ -90,6 +90,53 @@ viene calcolato su questa probabilità blend.
 - Il Kelly frazionario è lo standard dei professionisti: crescita ~50%
   di quella del Kelly pieno con metà della volatilità.
 
+## Strategia per lega (12/09/2026)
+
+Il backtest storico (16.273 partite, 2022-2026) con gate 1.30-1.80
+ha rivelato differenze massive tra campionati:
+
+| Lega | ROI | Hit | Volume | Verdetto |
+|------|-----|-----|--------|----------|
+| Bundesliga | +28.3% | 73.5% | 34 | ✅ Vince |
+| Turkey Super Lig | +22.1% | 70.6% | 17 | ✅ Vince |
+| Premier League | +16.2% | 65.7% | 35 | ✅ Vince |
+| Ligue 1 | +9.1% | 62.1% | 29 | ✅ Vince |
+| Eredivisie | -1.8% | 56.5% | 23 | ⚠️ Borderline |
+| Serie A | -5.9% | 54.2% | 24 | ❌ Perde |
+| La Liga | -6.3% | 53.8% | 26 | ❌ Perde |
+| Greek Super Lig | -69.4% | 16.7% | 6 | ❌ Perde |
+
+**CLV vig-free: -3.3%** → il modello NON batte la closing line
+mediamente. Il valore arriva dalla selezione per lega.
+
+### Regole attuali
+
+1. **SOLO campionati vincenti**:  in
+    elenca le leghe ammesse. Le altre generano
+   zero segnali.
+2. **Fascia quote 1.50-2.20**: esclude i "pantano" 1.30-1.45
+   (-9.9% ROI) e le quote alte (>2.20).
+3. **Edge differenziato**:
+   - PL/Bundesliga: min +2pp (mercato efficiente, edge piccolo
+     ma affidabile)
+   - Turchia/Ligue 1: min +2.5pp
+   - Leghe non elencate: min +5pp (effectivamente bandite)
+4. **Kelly adattivo**: PL 1.2x, Bundesliga 1.3x, Turchia 1.1x,
+   base 1.0x
+5. **Cap stake**: PL/Bundesliga 2%, Turchia/Ligue 1 1.8%,
+   altri 0.5%
+
+### Prossimi passi
+
+- Aggiungere il tracking CLV per lega in  per
+  escludere automaticamente le leghe con CLV negativo cronico
+  (la soglia di esclusione potrebbe essere CLV < -2% su 20+
+  chiusure)
+- Espandere la copertura leghe solo dopo un backtest dedicato
+  (almeno 30 scommesse per lega)
+- Valutare l'aggiunta di Asian Handicap nelle leghe vincenti
+  (attualmente solo telemetria)
+
 ## Volume e calibrazione
 
 - Servono **500-1.000+ scommesse chiuse** perché l'edge emerga dal rumore.

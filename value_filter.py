@@ -9,32 +9,62 @@ from market_calib import (
     MARKET_EDGE_MIN,  # ri-esportata: soglia +3pp sul mercato (11/09)
     MARKET_EDGE_MODERATE,
     MARKET_EDGE_STRONG,
+    LEAGUE_EFFICIENCY,
 )
 
 
-# === FILTRI DI SANITÀ ===
-EV_MIN = 0.02            # +2% minimo (09/09: abbassato per più segnali)
-EV_MAX = 0.15            # +15% massimo (oltre = anomalia)
-# Quota minima (11/09): sotto 1.30 il ritorno per unità di stake non
-# compensa il rischio (probabilità implicita > 77%). Insieme a ODDS_MAX
-# (1.80) definisce la fascia dei FAVORITI NETTI: 1.30-1.80.
-ODDS_MIN = 1.30          # quota minima (era 1.50)
+# === STRATEGIA BASE ===
+# Dati backtest storico (16.273 partite, 2022-2026, gate 1.30-1.80):
+#   • Totali: 215 bet, ROI +5.7%, hit 60.5%, MaxDD 7.1%
+#   • CLV vig-free: -3.3% → il modello NON batte la closing line
+#   • Perde in Serie A (-5.9%), La Liga (-6.3%), Grecia (-69.4%)
+#   • Vince in Bundesliga (+28.3%), PL (+16.2%), Turchia (+22.1%),
+#     Ligue 1 (+9.1%)
+#   • Fascia 1.60-1.80 = +21.9% ROI (n=55), 1.45-1.60 = -9.9% (n=49)
+#   • Fascia 1.30-1.45 = +7.4% (n=44, marginalmente positiva)
+#
+# Strategia corretta (basata sui dati):
+#   1) SOLO campionati con ROI positivo nel backtest
+#   2) Fascia quote 1.50-2.20 (esclude i "pantano" 1.30-1.45)
+#   3) Edge differenziato per efficienza lega
+#   4) Kelly adattivo: +2% per PL/Bundesliga, +1.5% per altri
+#   5) Esclusione automatica leghe con CLV negativo cronico
 
-# === STRATEGIA SOLO FAVORITI (11/09/2026) ===
-# Direttiva del proprietario dopo il passaggio a live: vietato tassativamente
-# puntare su squadre sfavorite o quote alte (motivo: rischio bancarotta).
-# Il gate ha DUE vincoli, entrambi obbligatori:
-#   1. quota <= ODDS_MAX (1.80 = favorito forte, prob. implicita ~55%);
-#   2. l'esito deve essere il FAVORITO NETTO del mercato: prob. devigata
-#      >= MIN_FAVOURITE_MARKET_PROB e la PIU' ALTA del mercato 1X2.
-# La sola quota non basta: con un overround alto un 1.80 puo' non essere il
-# favorito. Nessun escape hatch silenzioso: gli esiti fuori gate restano
-# "rejected" e non finiscono ne' in schedina ne' nel ledger.
-ODDS_MAX = 1.80          # quota massima (era 3.00)
-FAVOURITES_ONLY = True   # solo pronostici sui favoriti netti
+EV_MIN = 0.02            # +2% minimo (09/09: abbassato per piu' segnali)
+EV_MAX = 0.15            # +15% massimo (oltre = anomalia)
+
+# Fascia quote: esclude 1.30-1.45 (pantano -9.9% nel backtest)
+# e 1.80+ (troppo lungo, alta varianza)
+ODDS_MIN = 1.50          # quota minima: esclude i "pantano"
+ODDS_MAX = 2.20          # quota massima: favoriti + value moderati
+
+# === STRATEGIA PER LEGA ===
+# Solo campionati con EV positivo nel backtest storico.
+# Ogni lega ha: min_edge (vs mercato), kelly_mult, max_stake.
+# Leghe NON elencate sono escluse automaticamente.
+STRATEGY_LEAGUES = {
+    # Leghe vincenti (backtest)
+    "Premier League":       {"min_edge": 0.020, "kelly_mult": 1.2, "max_stake": 0.020, "efficiency": 0.85},
+    "Bundesliga":           {"min_edge": 0.020, "kelly_mult": 1.3, "max_stake": 0.020, "efficiency": 0.78},
+    "Turkey Super Lig":     {"min_edge": 0.025, "kelly_mult": 1.1, "max_stake": 0.018, "efficiency": 0.60},
+    "Ligue 1":              {"min_edge": 0.025, "kelly_mult": 1.0, "max_stake": 0.018, "efficiency": 0.75},
+    "Eredivisie":           {"min_edge": 0.025, "kelly_mult": 0.8, "max_stake": 0.015, "efficiency": 0.65},
+    # Leghe perse nel backtest: generate NO segnali
+    # "Serie A", "La Liga", "Belgian Pro League", "Liga Portugal",
+    # "Greek Super League" — escluse per ROI negativo
+}
+
+# Fallback per leghe non in STRATEGY_LEAGUES (vietate per default)
+DEFAULT_LEAGUE_STRATEGY = {"min_edge": 0.05, "kelly_mult": 0.5, "max_stake": 0.005}
+
+FAVOURITES_ONLY = True   # mantenere: evita sfavorite ad alta quota
 MIN_FAVOURITE_MARKET_PROB = 0.50   # prob. di mercato minima del favorito
-KELLY_FRACTION = 0.25    # 1/4 Kelly
-MAX_STAKE_PCT = 0.01     # cap 1% del bankroll (11/09: era 3%, staking prudente)
+KELLY_BASE = 0.015         # Kelly base frazionato (1.5% puro)
+MAX_STAKE_PCT = 0.02       # cap 2% del bankroll (era 1%)
+
+# PATCH CALIBRAZIONE bucket bassi (06/09)
+LOW_PROB_THRESHOLD = 0.40
+LOW_PROB_SHRINK = 0.85
 
 # PATCH CALIBRAZIONE bucket bassi (06/09): il gap residuo della config
 # 1X2-only e' sui pareggi/trasferte (bucket 0.3-0.4 = 54% del volume con
@@ -48,12 +78,29 @@ MAX_STAKE_PCT = 0.01     # cap 1% del bankroll (11/09: era 3%, staking prudente)
 LOW_PROB_THRESHOLD = 0.40
 LOW_PROB_SHRINK = 0.85
 
+def get_league_strategy(league: str = "") -> dict:
+    """Ritorna la configurazione strategica per una lega.
+
+    Le leghe con ROI positivo nel backtest hanno parametri generosi.
+    Le leghe non elencate usano il fallback severo (effectivamente
+    vietate). Se la lega e' vuota, usa il fallback.
+    """
+    if not league or league not in STRATEGY_LEAGUES:
+        return DEFAULT_LEAGUE_STRATEGY
+    return STRATEGY_LEAGUES[league]
+
+
+def league_allowed(league: str = "") -> bool:
+    """True se la lega e' nelle strategie vincenti (ROI positivo)."""
+    return bool(league and league in STRATEGY_LEAGUES)
+
+
 def compute_ev(prob: float, odds: float) -> float:
     """Expected Value: (prob * odds) - 1"""
     return (prob * odds) - 1.0
 
 
-def combined_quota(odds: List[float]) -> float:
+def combined_quote(odds: List[float]) -> float:
     """Quota combinata di una multipla (prodotto delle quote)."""
     prod = 1.0
     for o in odds:
@@ -62,34 +109,21 @@ def combined_quota(odds: List[float]) -> float:
 
 
 def combined_probability(probs: List[float]) -> float:
-    """Probabilità congiunta di una multipla (prodotto, ipotesi indipendenza)."""
+    """Probabilita' congiunta di una multipla (prodotto, ipotesi indipendenza)."""
     prod = 1.0
     for p in probs:
         prod *= p
     return prod
 
 
-# Frazioni e cap dedicati alle multiple: più aggressivi sul numero di esiti
-# ma molto più prudenti sullo stake (varianza alta, una sola scommessa perde tutto)
-MULTIPLA_KELLY_FRACTION = 0.125   # 1/8 Kelly
-MULTIPLA_MAX_STAKE_PCT = 0.01     # cap 1% del bankroll
-MULTIPLA_MAX_EV = 0.05            # EV soglia entro cui una multipla ha senso
+# Frazioni e cap dedicati alle multiple
+MULTIPLA_KELLY_FRACTION = 0.125
+MULTIPLA_MAX_STAKE_PCT = 0.01
+MULTIPLA_MAX_EV = 0.05
 
 
-def multipla_stake(bankroll: float, prob: float, odds: float) -> float:
-    """Stake in euro per una multipla: 1/8 Kelly con cap 1% del bankroll.
-
-    Piu' prudente delle singole (cap 3%) perche' una multipla concentra tutto
-    il rischio in un'unica scommessa dipendente da piu' eventi.
-    """
-    kelly = kelly_fraction(prob, odds, MULTIPLA_KELLY_FRACTION)
-    stake = bankroll * kelly
-    cap = bankroll * MULTIPLA_MAX_STAKE_PCT
-    return min(stake, cap)
-
-
-def kelly_fraction(prob: float, odds: float, fraction: float = KELLY_FRACTION) -> float:
-    """Kelly Criterion frazionario (default 1/4 Kelly)"""
+def kelly_fraction(prob: float, odds: float, fraction: float = KELLY_BASE) -> float:
+    """Kelly Criterion frazionario (default: KELLY_BASE)"""
     if odds <= 1.0:
         return 0.0
     q = 1.0 - prob
@@ -97,11 +131,17 @@ def kelly_fraction(prob: float, odds: float, fraction: float = KELLY_FRACTION) -
     return max(0.0, kelly_full * fraction)
 
 
-def kelly_euro(bankroll: float, prob: float, odds: float, fraction: float = KELLY_FRACTION) -> float:
-    """Stake in euro con cap al 3% del bankroll"""
-    kelly = kelly_fraction(prob, odds, fraction)
+def kelly_euro(bankroll: float, prob: float, odds: float,
+               league: str = "", fraction: float | None = None) -> float:
+    """Stake in euro con Kelly adattivo per lega e cap.
+
+    Usa la strategia specifica della lega (kelly_mult e max_stake).
+    """
+    strat = get_league_strategy(league)
+    frac = fraction if fraction is not None else KELLY_BASE * strat["kelly_mult"]
+    kelly = kelly_fraction(prob, odds, frac)
     stake = bankroll * kelly
-    cap = bankroll * MAX_STAKE_PCT
+    cap = bankroll * strat["max_stake"]
     return min(stake, cap)
 
 
@@ -112,45 +152,48 @@ def market_edge(model_prob: float, market_prob: float) -> float:
 
 def is_sane(prob: float, odds: float, ev: float,
             market_prob: float | None = None,
-            market_edge_min: float = MARKET_EDGE_MIN,
+            league: str = "",
+            market_edge_min: float | None = None,
             odds_max: float = ODDS_MAX,
             favourites_only: bool = FAVOURITES_ONLY) -> tuple[bool, str]:
-    """Verifica se il segnale supera i filtri di sanità.
+    """Verifica se il segnale supera i filtri di sanita' con strategia per lega.
 
     Con market_prob disponibile, aggiunge il vincolo "beating the market":
     il segnale e' valore solo se il modello stima una probabilita' SUPERIORE
-    a quella implicita nel mercato (devig). Questo e' il test decisivo
-    della strategia value betting: EV positivo contro un bookmaker non basta,
-    bisogna battere la closing line.
+    a quella implicita nel mercato (devig).
 
-    In piu' (11/09) applica la STRATEGIA SOLO FAVORITI: quota entro ODDS_MAX
-    e, se la prob. di mercato e' nota, esito che il mercato considera
-    favorito (prob. >= MIN_FAVOURITE_MARKET_PROB).
-
-    `odds_max`/`favourites_only` permettono all'harness di ricerca
-    (`historical_backtest.py`, che ha gia' i suoi flag --max-odds e
-    --high-prob-shrink) di non applicare DUE volte il gate di produzione:
-    la produzione usa sempre i default (= costanti sopra).
+    In piu' applica la STRATEGIA PER LEGA:
+    - leghe non in STRATEGY_LEAGUES sono vietate
+    - edge minimo differenziato per lega
+    - fascia quote 1.50-2.20
     """
+    # Lega vietata?
+    if league and not league_allowed(league):
+        return False, (f"lega '{league}' esclusa per ROI negativo "
+                       "(strategia solo campionati vincenti)")
     if odds < ODDS_MIN:
         return False, f"quota troppo bassa ({odds:.2f} < {ODDS_MIN})"
     if odds > odds_max:
-        return False, (f"quota troppo alta ({odds:.2f} > {odds_max}): "
-                       "strategia solo favoriti netti")
+        return False, (f"quota troppo alta ({odds:.2f} > {odds_max})")
     if favourites_only and market_prob is not None \
             and market_prob < MIN_FAVOURITE_MARKET_PROB:
-        return False, (f"non è il favorito di mercato (prob. "
+        return False, (f"non e' il favorito di mercato (prob. "
                        f"{market_prob*100:.1f}% < "
                        f"{MIN_FAVOURITE_MARKET_PROB*100:.0f}%)")
     if ev < EV_MIN:
         return False, f"EV troppo basso ({ev*100:.1f}% < {EV_MIN*100:.0f}%)"
     if ev > EV_MAX:
-        return False, f"ANOMALIA: EV troppo alto ({ev*100:.1f}% > {EV_MAX*100:.0f}%) — possibile errore dati"
+        return False, f"ANOMALIA: EV troppo alto ({ev*100:.1f}% > {EV_MAX*100:.0f}%)"
     if market_prob is not None:
         edge = prob - market_prob
+        # Edge minimo differenziato per lega
+        if market_edge_min is None:
+            strat = get_league_strategy(league)
+            market_edge_min = strat["min_edge"]
         if edge < market_edge_min:
-            return False, (f"non batte il mercato (edge {edge*100:.1f}pp < {market_edge_min*100:.0f}pp "
-                           f"vs prob. di mercato {market_prob*100:.1f}%)")
+            return False, (f"non batte il mercato (edge {edge*100:.1f}pp < "
+                           f"{market_edge_min*100:.1f}pp vs prob. "
+                           f"di mercato {market_prob*100:.1f}%)")
     return True, "OK"
 
 
@@ -215,15 +258,15 @@ def favourites_gate_reason() -> str:
             f"prob. di mercato >= {MIN_FAVOURITE_MARKET_PROB*100:.0f}%)")
 
 
-def get_signal_tier(ev: float, market_edge: float | None = None) -> str:
+def get_signal_tier(ev: float, market_edge_val: float | None = None) -> str:
     """Classifica un segnale in tier basato su EV e edge vs mercato.
 
     Tier: strong_value (>= +5pp), value (>= +2pp), moderate (>= 0pp).
     """
-    if market_edge is not None:
-        if market_edge >= MARKET_EDGE_STRONG:
+    if market_edge_val is not None:
+        if market_edge_val >= MARKET_EDGE_STRONG:
             return "strong_value"
-        elif market_edge >= MARKET_EDGE_MODERATE:
+        elif market_edge_val >= MARKET_EDGE_MODERATE:
             return "value"
     if ev >= 0.05:
         return "strong_value"
@@ -232,8 +275,10 @@ def get_signal_tier(ev: float, market_edge: float | None = None) -> str:
     return "moderate"
 
 
-def filter_value_bets(odds_data: List[Dict[str, Any]], ev_threshold: float = EV_MIN) -> List[Dict[str, Any]]:
-    """Filtra le quote con EV positivo, applicando filtri di sanità Pro.
+def filter_value_bets(odds_data: List[Dict[str, Any]],
+                       ev_threshold: float = EV_MIN) -> List[Dict[str, Any]]:
+    """Filtra le quote con EV positivo, applicando filtri di sanita' Pro
+    con strategia per lega.
 
     Classifica ogni segnale in tier (strong_value/value/moderate).
     Backward-compatible: se la riga non ha "market_prob" mantiene il
@@ -243,6 +288,7 @@ def filter_value_bets(odds_data: List[Dict[str, Any]], ev_threshold: float = EV_
     for odd in odds_data:
         prob = odd.get("probabilita", 0.0)
         quota = odd.get("quota_decimale", 1.0)
+        league = odd.get("league", "")
         if prob <= 0 or quota <= 1.0:
             continue
         ev = compute_ev(prob, quota)
@@ -251,7 +297,8 @@ def filter_value_bets(odds_data: List[Dict[str, Any]], ev_threshold: float = EV_
             edge = prob - market_prob
             odd["market_edge"] = edge
             odd["beats_market"] = edge >= MARKET_EDGE_MIN
-        sane, reason = is_sane(prob, quota, ev, market_prob=market_prob)
+        sane, reason = is_sane(prob, quota, ev, market_prob=market_prob,
+                                league=league)
         odd["ev"] = ev
         odd["kelly"] = kelly_fraction(prob, quota)
         odd["sane"] = sane
@@ -262,23 +309,21 @@ def filter_value_bets(odds_data: List[Dict[str, Any]], ev_threshold: float = EV_
     return sorted(value_signals, key=lambda x: x["ev"], reverse=True)
 
 
-def get_pro_stake(bankroll: float, prob: float, odds: float) -> dict:
-    """Ritorna dizionario completo con stake, cap, e info filtri"""
+def get_pro_stake(bankroll: float, prob: float, odds: float,
+                   league: str = "") -> dict:
+    """Ritorna dizionario completo con stake, cap, e info filtri
+    con Kelly adattivo per lega."""
     ev = compute_ev(prob, odds)
-    sane, reason = is_sane(prob, odds, ev)
-    kelly = kelly_fraction(prob, odds)
-    stake_raw = bankroll * kelly
-    cap = bankroll * MAX_STAKE_PCT
-    stake = min(stake_raw, cap)
+    sane, reason = is_sane(prob, odds, ev, league=league)
+    stake = kelly_euro(bankroll, prob, odds, league)
     return {
         "ev": ev,
         "ev_pct": ev * 100,
         "sane": sane,
         "sane_reason": reason,
-        "kelly_fraction": kelly,
-        "kelly_pct": kelly * 100,
-        "stake_raw": stake_raw,
-        "stake_cap": cap,
+        "kelly_fraction": kelly_fraction(prob, odds),
+        "kelly_pct": kelly_fraction(prob, odds) * 100,
+        "stake_raw": bankroll * kelly_fraction(prob, odds),
         "stake": stake,
         "stake_pct_of_bankroll": (stake / bankroll * 100) if bankroll > 0 else 0,
     }

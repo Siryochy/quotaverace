@@ -17,7 +17,7 @@ SOLO l'API PUBBLICA SX Bet (zero chiavi, zero crediti):
    rating dinamici inclusi) vs mercato fair (market_calib.market_implied,
    devig power su 1/X/2);
 4. segnale: EV da prob finale blend (value_filter.adjusted_probability) e
-   filtri sanità (is_sane: EV 2-15%, quote 1.30-1.80, edge >= +3pp vs
+   filtri sanità (is_sane: EV 2-15%, quote 1.50-2.20, edge >= +2pp vs
    mercato) — identici al flusso the-odds-api;
 5. ledger: match/s match_analysis/predictions via tracker (save_match,
    save_analysis, save_prediction): da qui in poi auto_bet.run_today_bets
