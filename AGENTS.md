@@ -1870,6 +1870,10 @@ distinte, tutte "non saldabili con le regole attuali", nessuna silenziosa:
   `_get_odds`/`fetch_scores` (in `fetch_scores` il `ts` della cache puo'
   essere preservato da un giro precedente, `remaining_ts` e' sempre il
   momento della chiamata), con ripiego su `ts` per le cache di formato
-  vecchio. Tripwire: `test_get_remaining_usa_la_lettura_piu_recente`,
+  vecchio. Stessa helper (`_latest_credits`) anche per `get_quota()`: la
+  `/api/health` mostrava il valore stantio perche' duplicava il minimo.
+  Verificato post-deploy: `get_quota()` = `(452, 89)` e health
+  `"remaining": 452`. Tripwire:
+  `test_get_remaining_usa_la_lettura_piu_recente`,
   `test_get_remaining_senza_remaining_ts_usa_ts`.
 
