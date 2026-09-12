@@ -1817,3 +1817,47 @@ righe**: i risultati c'erano (o erano a un passo) ma l'abbinamento falliva.
   flusso**: la copertura rating e' cresciuta (622 squadre), quindi il gate
   modello e' ora misurabile.
 
+**ESITO sul container (12/09, deploy `ce7823a0`).** Cache punteggi
+  invalidate a mano (erano scritte col vecchio `days_from=2`), poi
+  `_update_results()` + `settle_sx_bets()`:
+
+| | prima | dopo |
+|---|---|---|
+| Bet live aperte | 10 | **5** |
+| Bet saldate oggi | 3 | **8** |
+| Previsioni aperte | 182 | **93** |
+| Previsioni saldate oggi | 0 | **114** |
+| Crediti the-odds-api | 500 | **452** |
+| `match_results` aggiornati | — | 101 partite |
+
+Le 5 bet ancora aperte: 2 sono di **Primera A (Colombia)**, 1 senza riga
+  in `matches` (batch 09/09), 1 e' **CSKA–Rubin** (kickoff 17:45, in corso) e
+  1 **Atalanta–Cagliari** (18:45) — le ultime due si saldano al giro
+  successivo del job, senza intervento (la finestra 3gg le copre).
+
+**Coda residua (13 match SX con kickoff passato ancora aperti)** — cause
+distinte, tutte "non saldabili con le regole attuali", nessuna silenziosa:
+  1. **Competizioni non coperte da `SPORTS_MAP`** (5 match + 2 bet):
+     `Primera A` (Colombia), `Primera Nacional` (Argentina 2), `K2-League`
+     (Korea 2). Serve una decisione di copertura/crediti: aggiungere la
+     competizione a `SPORTS_MAP` + roster in `ALL_LEAGUES` + `LEAGUE_IDS`.
+  2. **Etichetta di lega sbagliata nel ledger** (2 match): residui
+     pre-fix-mapping (es. Millonarios–Deportivo Cali salvato come
+     `Primeira Liga`, Union Berlin–Schalke come `Austrian Bundesliga`): il
+     settlement interroga la competizione SBAGLIATA. `repair_sx_leagues()`
+     e' conservativo e ha restituito `updated 0` (`{'checked': 127,
+     'updated': 0, 'inferred': 0}`) — non indovina, quindi restano li'.
+  3. **Payload API senza la partita** (1 match): la Champions del 10/09 non
+     compare in `scores` (`soccer_uefa_champs_league` ha risposto SOLO con
+     le partite future di ottobre) — limite del piano/API, non del codice.
+  4. **Varianti di nome non coperte in modo deterministico** (3 match):
+     `BB Erzurumspor` vs `Erzurum BB`, `FC Kopenhagen` vs `FC Copenhagen`,
+     `FC Red Bull Salzburg` vs `RB Salzburg`. Coprirle richiede uno stadio
+     di similarita' (rischioso: falso positivo = verdetto di un'altra
+     partita) → possibile in futuro SOLO con threshold alta + guardia di
+     unicita' gia' presente.
+  5. **Senza riga in `matches`** (7 match / 21 previsioni + bet #21): niente
+     nomi squadra, quindi niente da abbinare (recuperabili solo se il
+     mercato SX e' ancora attivo e leggibile).
+  6. **Future o in corso**: ~22 match (12-13/09) — correttamente aperti.
+
