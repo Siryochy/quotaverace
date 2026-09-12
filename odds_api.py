@@ -363,7 +363,14 @@ def fetch_odds(sport=None, commence_time_from=None, commence_time_to=None, **kwa
         return []
     return payload
 
-def fetch_scores(sport=None, days_from=2):
+# Finestra di refertazione `daysFrom`: l'API the-odds-api copre al MASSIMO
+# 3 giorni indietro (422 oltre). Con 2 giorni le partite di due sere prima
+# (kickoff a >48h) restavano fuori dal payload e la bet non si saldava mai:
+# il costo per chiamata NON cambia, quindi tanto vale usare il massimo.
+SCORES_DAYS_FROM = 3
+
+
+def fetch_scores(sport=None, days_from=SCORES_DAYS_FROM):
     """Risultati finali (stessa chiave, ~1 credito/call, cache 24h).
 
     La cache NON viene fidata se contiene partite iniziate da oltre

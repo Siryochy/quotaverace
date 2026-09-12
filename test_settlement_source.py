@@ -22,7 +22,10 @@ def test_update_results_usa_fetch_scores_the_odds_api():
     nessuna dipendenza da settlement_apifootball in _update_results."""
     src = (ROOT / "bot.py").read_text(encoding="utf-8")
     body = src.split("def _update_results")[1].split("def _admin_chat_ids")[0]
-    assert "from odds_api import SPORTS_MAP, fetch_scores" in body
+    # L'import puo' essere su piu' righe (dal 12/09 include SCORES_DAYS_FROM):
+    # conta che fetch_scores venga importato PROPRIO da odds_api.
+    assert "from odds_api import" in body
+    assert "fetch_scores" in body
     assert "match_scores_by_name" in body
     for ref in BANNED_SETTLEMENT_REFS:
         assert ref not in body, \

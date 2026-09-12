@@ -1748,3 +1748,72 @@ non mappabili sono scelte: `Primera A`, `Primera Nacional`, `K2-League`),
   (10 bet live pre-cambio-strategia + ~186 previsioni) e riattivare la
   rotazione quote.
 
+### Chiave the-odds-api nuova + settlement SX riparato (12/09/2026)
+
+**1) CHIAVE NUOVA VALIDA.** Impronta `5c483976d988` (len 32), letta
+  identica dal container dopo il redeploy. Verifica a costo ZERO sull'endpoint
+  `/v4/sports` (non consuma crediti): **HTTP 200, `x-requests-remaining: 500`,
+  used 0, 87 sport** → account nuovo, quota azzerata. Il fix del contatore
+  crediti (deploy `f278844`) ora vede davvero il residuo.
+
+**2) LE BET NON SI SALDAVANO: 3 cause, tutte misurate sul container.**
+Con 500 crediti disponibili si poteva finalmente refertare, ma il giro
+`_update_results` + `settle_sx_bets` scaricava 72 partite e chiudeva **0
+righe**: i risultati c'erano (o erano a un passo) ma l'abbinamento falliva.
+  1. **NOMI DIVERSI tra SX e the-odds-api** (la causa principale):
+     `Cienciano` vs `Club Cienciano`, `CR Flamengo` vs `Flamengo-RJ`,
+     `Vila Nova GO` vs `Vila Nova`, `Velez Sarsfield` vs `Velez Sarsfield BA`,
+     `Corinthians SP` vs `Corinthians-SP`, `Newell's Old Boys` vs
+     `Newells Old Boys`, `Goias` vs `Goiás`. `_norm_team`/`_loose_team` NON
+     coprivano apostrofi, codici di stato (RJ/SP/GO/BA) e sigle diverse.
+  2. **FINESTRA TROPPO CORTA**: `fetch_scores(sport, days_from=2)` escludeva
+     le partite a >48h (es. Libertadores di due sere prima) — il massimo
+     consentito dall'API e' **3** e il costo per chiamata NON cambia.
+  3. **SOLO LE BET**: `_sx_open_matches()` guardava la tabella `bets`, quindi
+     le previsioni SX dei match **senza puntata** restavano aperte per
+     sempre (156 `rejected` + 6 value aperte): inquinavano la telemetria di
+     calibrazione dei mercati.
+
+**3) FIX (deploy verificato).**
+  - `team_names.same_team(a, b)`: confronto **SIMMETRICO** tra due nomi di
+     provider diversi (senza roster di verita'), a stadi deterministici —
+     grezzo case-insensitive, `normalize`, `_core` (nuovo: toglie
+     `REGION_CODES` RJ/SP/GO/BA/... e `JOIN_PARTICLES` de/del/do/da/los/...),
+     poi contenimento di token. `normalize` ora **cancella l'apostrofo
+     PRIMA della punteggiatura** ("Newell's" non diventa piu' `newell s`,
+     che non agganciava 'Newells'). Mai fuzzy: `same_team` da' False per
+     'Manchester United' vs 'Manchester City'.
+  - `sx_signals._same_event()`: stadi `_norm_team` → `_loose_team` →
+     `same_team`, **mai inversione casa/trasferta**.
+  - **GUARDIA DI UNICITA'**: il confronto tollerante puo' agganciare piu'
+     partite ("Manchester" sta in United e City). Se i candidati sono >1 la
+     riga **RESTA APERTA** con warning: meglio un ritardo nel ledger che un
+     verdetto col risultato di un'altra partita. (Il match tollerante senza
+     guardia sarebbe stato un rischio di falsi positivi.)
+  - `odds_api.SCORES_DAYS_FROM = 3` (default di `fetch_scores`) usato sia da
+     `bot._update_results` sia dal settlement SX.
+  - `_sx_open_matches()` = **UNION** bet + previsioni aperte (i match con
+     sole previsioni ora ricevono il risultato) e `settle_sx_bets()` chiama
+     anche `settle_predictions()`: in un giro chiude bet E previsioni.
+
+**4) Test**: `test_team_names.TestSameTeam` (12 coppie reali parametrizzate +
+  "mai fuzzy" + contenimento ambiguo documentato),
+  `test_league_mapping.TestSettlementNomiTolleranti` (prefisso club, codici
+  di stato + apostrofo, guardia di unicita', previsioni senza bet, finestra
+  3gg), `test_settlement_source` aggiornato (import di `bot.py` su piu'
+  righe). Focus verde: team_names + league_mapping + sx_signals +
+  settlement_* + odds_api + scores_cache + bot + football_hist + rating/
+  poisson engine.
+
+**5) ⚠️ LIMITE NOTO — leghe non coperte da SPORTS_MAP.** Restano
+  strutturalmente non saldabili le righe SX su **`Primera A` (Colombia)**,
+  **`Primera Nacional` (Argentina)** e **`K2-League`**: il settlement le logga
+  ("leghe non mappate... bet lasciate aperte") e NON brucia crediti. Per
+  saldarle serve aggiungere la competizione a `SPORTS_MAP` (decisione di
+  copertura/crediti, non un fix). Stesso limite per le righe **senza riga in
+  `matches`** (21 previsioni + 1 bet del batch 09/09 23:03: senza nomi
+  squadra non c'e' nulla da abbinare).
+  ⚠️ **Verificare sempre che le soglie di liquidita' non blocchino il
+  flusso**: la copertura rating e' cresciuta (622 squadre), quindi il gate
+  modello e' ora misurabile.
+

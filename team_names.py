@@ -33,6 +33,15 @@ conta per il modello):
      (profilo neutro) che il rating della squadra sbagliata.
 
 Il modulo e' PURO e senza dipendenze dal modello: legge solo `team_ratings`.
+
+Due punti d'ingresso:
+
+  * `resolve_team(nome)` — risolve un nome ESTERNO contro il roster del DB
+    (usato dal modello: `rating_engine`/`poisson_engine`);
+  * `same_team(a, b)` — confronto SIMMETRICO tra due nomi di provider
+    diversi, senza roster (usato dal settlement SX, dove 'Flamengo-RJ' e
+    'CR Flamengo', 'Vila Nova GO' e 'Vila Nova', "Newell's Old Boys" e
+    'Newells Old Boys' devono coincidere).
 """
 from __future__ import annotations
 
@@ -110,6 +119,11 @@ def normalize(name: str) -> str:
     if not name:
         return ""
     s = _strip_accents(str(name)).lower()
+    # L'apostrofo e' PARTE del nome, non un separatore: "Newell's Old Boys" e
+    # 'Newells Old Boys' sono la stessa squadra. Va eliminato PRIMA della
+    # sostituzione della punteggiatura, altrimenti resterebbe un token 's'
+    # ('newell s old boys') che non aggancia piu' nulla (settlement SX).
+    s = re.sub(r"['\u2019`\u00b4]", "", s)
     s = re.sub(r"[^a-z0-9]+", " ", s)
     # I token puramente numerici sono anni di fondazione, non identificativi
     # ('1. FC Koln' -> 'koln', 'Hannover 96' -> 'hannover', 'Mainz 05').
@@ -124,9 +138,84 @@ def _alias_key(name: str) -> str:
     if not name:
         return ""
     s = _strip_accents(str(name)).lower()
+    s = re.sub(r"['\u2019`\u00b4]", "", s)
     s = re.sub(r"[^a-z0-9]+", " ", s)
     toks = [t for t in s.split() if t and t not in NOISE_TOKENS]
     return " ".join(toks)
+
+
+# Codici di stato/regione (2 lettere) che i provider accodano al nome della
+# squadra: 'Flamengo-RJ', 'Velez Sarsfield BA', 'Vila Nova GO'. Non
+# identificano la squadra: nel confronto tra fonti DIVERSE vanno ignorati.
+REGION_CODES = {
+    "ac", "al", "am", "ap", "ba", "ce", "df", "es", "go", "ma", "mg",
+    "ms", "mt", "pa", "pb", "pe", "pi", "pr", "rj", "rn", "ro", "rr",
+    "rs", "sc", "se", "sp", "to",
+}
+
+# Particelle di raccordo dei nomi latini ('Estudiantes de La Plata', 'Vasco
+# da Gama'): rumore nel confronto, mai l'identita' della squadra.
+JOIN_PARTICLES = {"de", "del", "do", "da", "dos", "das", "la", "las", "los"}
+
+
+def _core(name: str) -> str:
+    """Chiave di confronto TRA PROVIDER: `normalize` senza codici di
+    stato/regione e senza particelle di raccordo.
+
+    Serve al settlement, dove si confrontano due nomi che arrivano da fonti
+    diverse (SX Bet vs the-odds-api/API-Football) e non esiste un roster di
+    riferimento: 'Flamengo-RJ' e 'CR Flamengo' devono coincidere.
+    """
+    key = normalize(name)
+    toks = [t for t in key.split()
+            if t not in REGION_CODES and t not in JOIN_PARTICLES]
+    return " ".join(toks) or key
+
+
+def same_team(a: str, b: str) -> bool:
+    """True se due nomi designano la stessa squadra (confronto SIMMETRICO).
+
+    Diverso da `resolve_team`: li' un nome viene risolto contro il roster del
+    DB, qui si confrontano due nomi di provider DIVERSI (SX Bet vs
+    the-odds-api) senza un elenco di verita'. Stadi, tutti deterministici:
+
+      1. nome grezzo uguale (case-insensitive);
+      2. chiave `normalize` uguale (accenti, punteggiatura, apostrofi, token
+         societari: 'Club Cienciano' == 'Cienciano');
+      3. chiave `_core` uguale (anche codici di stato e particelle:
+         'Flamengo-RJ' == 'CR Flamengo', 'Vila Nova GO' == 'Vila Nova');
+      4. contenimento dei token (`MIN_TOKEN_SCORE`): 'cr flamengo' contiene
+         'flamengo'.
+
+    Il contenimento (e in generale il confronto tollerante) puo' essere
+    AMBIGUO: 'Manchester' sta dentro sia 'Manchester United' sia
+    'Manchester City'. Per questo da solo non basta a chiudere una bet —
+    il chiamante deve verificare che la partita sia UNICA tra i candidati
+    (`sx_signals._results_from_the_odds_api`). Mai fuzzy: un falso positivo
+    chiuderebbe una bet col risultato di un'altra partita.
+    """
+    if not a or not b:
+        return False
+    ra, rb = str(a).strip(), str(b).strip()
+    if not ra or not rb:
+        return False
+    if ra.lower() == rb.lower():
+        return True
+    ka, kb = normalize(ra), normalize(rb)
+    if not ka or not kb:
+        return False
+    if ka == kb:
+        return True
+    ca, cb = _core(ra), _core(rb)
+    if ca == cb:
+        return True
+    ta, tb = set(ca.split()), set(cb.split())
+    if not ta or not tb:
+        return False
+    if not (ta <= tb or tb <= ta):
+        return False
+    inter = len(ta & tb)
+    return inter / float(len(ta | tb)) >= MIN_TOKEN_SCORE
 
 
 def invalidate() -> None:

@@ -556,7 +556,8 @@ def _update_results():
       2. Salda cassa / previsioni / puntate auto (ora i risultati esistono)
       3. Aggiorna rating
     """
-    from odds_api import SPORTS_MAP, fetch_scores, match_scores_by_name
+    from odds_api import (SPORTS_MAP, fetch_scores, match_scores_by_name,
+                          SCORES_DAYS_FROM)
     from tracker import (save_result, get_results_stats, get_leagues_with_open_rows,
                           settle_cassa, settle_predictions, settle_bets)
     from rating_engine import compute_ratings
@@ -596,7 +597,7 @@ def _update_results():
             logger.warning("_update_results: lega '%s' non mappata a uno sport "
                            "key the-odds-api — risultati non scaricati", lg)
             continue
-        for m in fetch_scores(sport, days_from=2):
+        for m in fetch_scores(sport, days_from=SCORES_DAYS_FROM):
             if not m.get("id"):
                 continue
             parsed = match_scores_by_name(m)

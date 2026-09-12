@@ -170,6 +170,121 @@ class TestSettlementLeghe:
 
 
 # ---------------------------------------------------------------------------
+# Settlement con nomi TOLLERANTI (12/09/2026). Misurato sul container: i nomi
+# SX Bet e the-odds-api non coincidevano e le bet restavano aperte per sempre
+# ('Cienciano' vs 'Club Cienciano', 'CR Flamengo' vs 'Flamengo-RJ',
+# "Newell's Old Boys" vs 'Newells Old Boys', 'Vila Nova GO' vs 'Vila Nova').
+# ---------------------------------------------------------------------------
+
+class TestSettlementNomiTolleranti:
+    def _mk(self, mid, home, away, esito="1", league="Serie A"):
+        tracker.save_match(mid, league, home, away, "2026-09-10T00:00:00Z")
+        tracker.save_bet(mid, "1X2", esito, "0xabc", 1, 2.0, 1.0)
+
+    def _event(self, home, away, sh, sa, eid="m1"):
+        return {"id": eid, "home_team": home, "away_team": away,
+                "scores": [{"name": home, "score": sh},
+                           {"name": away, "score": sa}],
+                "completed": True}
+
+    def _outcome(self, mid):
+        conn = tracker._get_conn()
+        row = conn.execute("SELECT esito_finale FROM bets WHERE match_id=?",
+                           (mid,)).fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    def test_prefisso_club_chiude_la_bet(self, temp_db, monkeypatch):
+        monkeypatch.setenv("ODDS_API_KEY", "test")
+        monkeypatch.setenv("API_FOOTBALL_KEY", "")
+        self._mk("sx-LN1", "Cienciano", "Montevideo City Torque")
+        monkeypatch.setattr("odds_api.fetch_scores",
+                            lambda sport=None, days_from=3: [
+                                self._event("Club Cienciano",
+                                            "Montevideo City Torque", 2, 0)])
+        res = sx_signals.settle_sx_bets()
+        assert res["settled"] == 1
+        assert self._outcome("sx-LN1") == "won"
+
+    def test_codice_stato_e_apostrofo(self, temp_db, monkeypatch):
+        """'Vila Nova GO' vs 'Vila Nova' e "Newell's" vs 'Newells'."""
+        monkeypatch.setenv("ODDS_API_KEY", "test")
+        monkeypatch.setenv("API_FOOTBALL_KEY", "")
+        self._mk("sx-LN2", "Vila Nova GO", "Goias", esito="2")
+        self._mk("sx-LN3", "Newell's Old Boys", "Velez Sarsfield", esito="1")
+        monkeypatch.setattr("odds_api.fetch_scores",
+                            lambda sport=None, days_from=3: [
+                                self._event("Vila Nova", "Goiás", 2, 0),
+                                self._event("Newells Old Boys",
+                                            "Velez Sarsfield BA", 1, 1, "m2")])
+        res = sx_signals.settle_sx_bets()
+        assert res["settled"] == 2
+        assert self._outcome("sx-LN2") == "lost"    # esito 2, ha vinto la casa
+        assert self._outcome("sx-LN3") == "lost"    # esito 1, pareggio
+
+    def test_guardia_unicita_lascia_aperto(self, temp_db, monkeypatch):
+        """Con piu' partite candidate il match e' AMBIGUO: meglio la bet
+        aperta che un verdetto col risultato di un'altra partita."""
+        monkeypatch.setenv("ODDS_API_KEY", "test")
+        monkeypatch.setenv("API_FOOTBALL_KEY", "")
+        self._mk("sx-LN4", "Alpha", "Beta")
+        monkeypatch.setattr("odds_api.fetch_scores",
+                            lambda sport=None, days_from=3: [
+                                self._event("Alpha", "Beta", 1, 0, "m1"),
+                                self._event("Alpha", "Beta", 3, 0, "m2")])
+        res = sx_signals.settle_sx_bets()
+        assert res["settled"] == 0
+        assert res["open"] == 1
+        assert self._outcome("sx-LN4") is None
+
+    def test_salda_anche_le_previsioni_senza_bet(self, temp_db, monkeypatch):
+        """Le previsioni SX senza una bet restavano aperte per SEMPRE (il
+        settlement guardava solo la tabella `bets`): inquinavano la
+        telemetria di calibrazione. Ora il risultato viene salvato anche per
+        i match con sole previsioni."""
+        monkeypatch.setenv("ODDS_API_KEY", "test")
+        monkeypatch.setenv("API_FOOTBALL_KEY", "")
+        tracker.save_match("sx-LNP", "Serie A", "Alpha", "Beta",
+                           "2026-09-10T00:00:00Z")
+        tracker.save_prediction("sx-LNP", "1X2", "1", 1.8, 0.6, 0.05,
+                                status="value")
+        monkeypatch.setattr("odds_api.fetch_scores",
+                            lambda sport=None, days_from=3: [
+                                self._event("Alpha", "Beta", 2, 0)])
+        res = sx_signals.settle_sx_bets()
+        assert res["open"] == 1          # nessuna bet, ma la previsione c'e'
+        assert res["predictions"] == 1
+        conn = tracker._get_conn()
+        out = conn.execute(
+            "SELECT esito_finale FROM predictions WHERE match_id='sx-LNP'"
+        ).fetchone()[0]
+        conn.close()
+        assert out == "won"
+
+    def test_finestra_tre_giorni(self, temp_db, monkeypatch):
+        """L'API copre al massimo 3 giorni: con 2 le partite di due sere
+        prima restavano fuori e la bet non si saldava mai."""
+        import bot
+        import inspect
+        import odds_api
+
+        assert odds_api.SCORES_DAYS_FROM == 3
+        assert "SCORES_DAYS_FROM" in inspect.getsource(bot._update_results)
+        monkeypatch.setenv("ODDS_API_KEY", "test")
+        monkeypatch.setenv("API_FOOTBALL_KEY", "")
+        self._mk("sx-LN5", "Alpha", "Beta")
+        seen = {}
+
+        def fake_fetch(sport=None, days_from=None):
+            seen["days_from"] = days_from
+            return []
+
+        monkeypatch.setattr("odds_api.fetch_scores", fake_fetch)
+        sx_signals.settle_sx_bets()
+        assert seen["days_from"] == 3
+
+
+# ---------------------------------------------------------------------------
 # Repair dei residui STORICI: partite non piu' su SX -> lega inferita dai
 # roster di ALL_LEAGUES (deterministico: serve UNA sola lega compatibile).
 # ---------------------------------------------------------------------------

@@ -37,6 +37,63 @@ class TestNormalize:
         once = team_names.normalize("AS Monaco FC")
         assert team_names.normalize(once) == once
 
+    def test_apostrofo_non_lascia_token_s(self):
+        """L'apostrofo e' parte del nome, non un separatore: senza il fix
+        "Newell's" diventava 'newell s' e non agganciava piu' 'Newells'."""
+        assert team_names.normalize("Newell's Old Boys") == \
+            team_names.normalize("Newells Old Boys")
+
+
+# ---------------------------------------------------------------------------
+# 1b. Confronto SIMMETRICO tra nomi di provider diversi (`same_team`)
+# ---------------------------------------------------------------------------
+
+class TestSameTeam:
+    """Casi REALI misurati sul container il 12/09/2026: i nomi SX Bet non
+    coincidevano con quelli the-odds-api e le bet restavano aperte per sempre
+    (Cienciano/Club Cienciano, CR Flamengo/Flamengo-RJ, ...)."""
+
+    @pytest.mark.parametrize("sx,api", [
+        ("Cienciano", "Club Cienciano"),
+        ("CR Flamengo", "Flamengo-RJ"),
+        ("Vila Nova GO", "Vila Nova"),
+        ("Velez Sarsfield", "Velez Sarsfield BA"),
+        ("Corinthians SP", "Corinthians-SP"),
+        ("Newell's Old Boys", "Newells Old Boys"),
+        ("Goias", "Goiás"),
+        ("Estudiantes de La Plata", "Estudiantes La Plata"),
+        ("Independiente del Valle", "Independiente del Valle"),
+        ("Atlanta United", "Atlanta"),
+        ("AS Roma", "Roma"),
+        ("AFC Bournemouth", "Bournemouth"),
+    ])
+    def test_stessa_squadra(self, sx, api):
+        assert team_names.same_team(sx, api) is True
+        assert team_names.same_team(api, sx) is True
+        assert team_names.same_team(sx, sx) is True
+
+    def test_squadre_diverse_mai_uguali(self):
+        """Mai fuzzy: un falso positivo chiuderebbe una bet col risultato di
+        un'altra partita."""
+        assert team_names.same_team("Manchester United", "Manchester City") is False
+        assert team_names.same_team("Roma", "Lazio") is False
+        assert team_names.same_team("Estudiantes", "Velez Sarsfield") is False
+        assert team_names.same_team("Corinthians", "Vila Nova") is False
+        assert team_names.same_team("Alpha", "Beta") is False
+
+    def test_contenimento_ambiguo_risolto_dal_chiamante(self):
+        """Il contenimento da solo NON e' una prova: 'Manchester' sta sia in
+        'Manchester United' sia in 'Manchester City'. Per questo il chiamante
+        (settlement) richiede l'UNICITA' del match — vedi
+        test_league_mapping.TestSettlementNomiTolleranti."""
+        assert team_names.same_team("Manchester", "Manchester United") is True
+        assert team_names.same_team("Manchester", "Manchester City") is True
+
+    def test_input_vuoti(self):
+        assert team_names.same_team("", "Roma") is False
+        assert team_names.same_team("Roma", None) is False
+        assert team_names.same_team("   ", "   ") is False
+
 
 # ---------------------------------------------------------------------------
 # 2. Risoluzione contro un pool esplicito (nessun DB)

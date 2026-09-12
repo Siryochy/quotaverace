@@ -587,20 +587,56 @@ def scan(provider: Optional[SxBetProvider] = None) -> List[dict]:
 # ---------------------------------------------------------------------------
 
 def _sx_open_matches() -> Dict[str, dict]:
-    """Meta delle partite SX con bet aperte: {match_id: info}.
+    """Meta delle partite SX APERTE (bet oppure previsioni): {match_id: info}.
 
     info = {home, away, league, kickoff} — serve per abbinare i risultati
     per NOME+LEGA (le fonti esterne non conoscono i match_id sx-*).
+
+    Copre ENTRAMBI i ledger: il risultato viene salvato in `match_results`
+    con la chiave `sx-<eventId>`, quindi il giorno dopo salda sia le bet sia
+    le PREVISIONI (`settle_predictions` aggancia per match_id). Limitarsi
+    alle bet lasciava aperte per sempre le previsioni dei match senza una
+    puntata, inquinando la telemetria di calibrazione.
     """
     from tracker import _get_conn
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT DISTINCT b.match_id, m.home_team, m.away_team, m.league, "
-        "m.commence_time FROM bets b JOIN matches m ON m.id = b.match_id "
-        "WHERE b.esito_finale IS NULL AND b.match_id LIKE 'sx-%'").fetchall()
+        "SELECT DISTINCT t.match_id, m.home_team, m.away_team, m.league, "
+        "m.commence_time FROM ("
+        "  SELECT match_id FROM bets WHERE esito_finale IS NULL"
+        "    AND match_id LIKE 'sx-%'"
+        "  UNION"
+        "  SELECT match_id FROM predictions WHERE esito_finale IS NULL"
+        "    AND match_id LIKE 'sx-%'"
+        ") t JOIN matches m ON m.id = t.match_id").fetchall()
     conn.close()
     return {r[0]: {"home": r[1], "away": r[2], "league": r[3],
                    "kickoff": r[4]} for r in rows}
+
+
+def _same_event(event: dict, home: str, away: str) -> bool:
+    """True se l'evento the-odds-api E' la partita (home, away).
+
+    Tre stadi, dal piu' stretto al piu' tollerante:
+
+      1. `_norm_team`  — nome normalizzato (accenti, fc/cf);
+      2. `_loose_team` — tollera i prefissi societari ('CA Osasuna');
+      3. `team_names.same_team` — tollera apostrofi, punteggiatura e codici
+         di stato: 'Club Cienciano' == 'Cienciano', 'Flamengo-RJ' ==
+         'CR Flamengo', 'Vila Nova GO' == 'Vila Nova', "Newell's Old Boys"
+         == 'Newells Old Boys'.
+
+    MAI inversione casa/trasferta: l'esito 1/2 dipende dal lato.
+    """
+    from tracker import _norm_team, _loose_team
+    from team_names import same_team
+    h = event.get("home_team", "")
+    a = event.get("away_team", "")
+    if _norm_team(home) == _norm_team(h) and _norm_team(away) == _norm_team(a):
+        return True
+    if _loose_team(home) == _loose_team(h) and _loose_team(away) == _loose_team(a):
+        return True
+    return same_team(home, h) and same_team(away, a)
 
 
 def _results_from_the_odds_api(meta: Dict[str, dict]) -> int:
@@ -612,12 +648,17 @@ def _results_from_the_odds_api(meta: Dict[str, dict]) -> int:
     restano aperte e vengono loggate (fix mapping leghe 11/09: prima il
     fuzzy mappava alla lega sbagliata e la bet non si saldava mai).
 
-    Il match dei nomi usa sia la normalizzazione stretta sia quella loose
-    (`_loose_team`, tollerante ai prefissi club): 'FC Cincinnati' aggancia
-    'Cincinnati' senza mai invertire casa/trasferta.
+    Il match dei nomi usa `_same_event` (stretto -> loose -> tollerante) e la
+    finestra `SCORES_DAYS_FROM` = 3 giorni (massimo dell'API): con 2 giorni
+    le partite di due sere prima restavano fuori e la bet non si saldava.
+
+    GUARDIA DI UNICITA' (12/09): il confronto tollerante puo' agganciare piu'
+    di una partita ('Manchester' sta in United e City). Se i candidati sono
+    piu' di uno la bet RESTA APERTA con un warning: meglio un ritardo nel
+    ledger che un verdetto col risultato di un'altra partita.
     """
-    from tracker import _norm_team, _loose_team, save_result
-    from odds_api import fetch_scores, match_scores_by_name
+    from tracker import save_result
+    from odds_api import fetch_scores, match_scores_by_name, SCORES_DAYS_FROM
     by_sport: Dict[str, list] = {}
     unmapped = set()
     for mid, info in meta.items():
@@ -634,26 +675,30 @@ def _results_from_the_odds_api(meta: Dict[str, dict]) -> int:
     saved = 0
     for sport, items in by_sport.items():
         try:
-            scores = fetch_scores(sport, days_from=2)
+            scores = fetch_scores(sport, days_from=SCORES_DAYS_FROM)
         except Exception as e:
             logger.warning("sx_signals: fetch_scores %s fallita: %s", sport, e)
             continue
+        events = []
         for m in scores:
             parsed = match_scores_by_name(m)
             if parsed is None:
                 continue
-            sh, sa = parsed
-            mh = _norm_team(m.get("home_team", ""))
-            ma = _norm_team(m.get("away_team", ""))
-            mlh = _loose_team(m.get("home_team", ""))
-            mla = _loose_team(m.get("away_team", ""))
-            for mid, info in items:
-                ih, ia = info["home"], info["away"]
-                if ((_norm_team(ih) == mh and _norm_team(ia) == ma)
-                        or (_loose_team(ih) == mlh and _loose_team(ia) == mla)):
-                    save_result(mid, info.get("league"), ih, ia, sh, sa, "")
-                    saved += 1
-                    break
+            events.append((m, parsed[0], parsed[1]))
+        for mid, info in items:
+            ih, ia = info["home"], info["away"]
+            hits = [e for e in events if _same_event(e[0], ih, ia)]
+            if not hits:
+                continue
+            if len(hits) > 1:
+                logger.warning(
+                    "sx_signals: settlement AMBIGUO per %s (%s vs %s): %d "
+                    "partite candidate in %s — bet lasciata aperta",
+                    mid, ih, ia, len(hits), sport)
+                continue
+            _m, sh, sa = hits[0]
+            save_result(mid, info.get("league"), ih, ia, sh, sa, "")
+            saved += 1
     return saved
 
 
@@ -845,7 +890,7 @@ def settle_sx_bets() -> dict:
     interrogare le fonti punteggi — nessuna chiusura e nessun credito
     the-odds-api/API-Football consumato.
     """
-    from tracker import settle_bets, settlement_paused
+    from tracker import settle_bets, settle_predictions, settlement_paused
     if settlement_paused():
         logger.info("sx_signals: settlement in PAUSA — nessun download punteggi")
         return {"open": 0, "results": 0, "settled": 0, "source": None,
@@ -868,8 +913,14 @@ def settle_sx_bets() -> dict:
         except Exception as e:
             logger.warning("sx_signals: settlement api-football fallito: %s", e)
     settled, pushes = settle_bets()
+    # Anche le PREVISIONI: il risultato appena salvato ha la chiave sx-<id>,
+    # quindi `settle_predictions` le chiude per match_id. Senza questo passo
+    # restavano aperte fino al watchdog successivo (o per sempre, se il
+    # match non aveva bet).
+    pred_n, pred_pushes = settle_predictions()
     return {"open": len(meta), "results": results, "settled": settled,
-            "pushes": pushes, "source": source}
+            "pushes": pushes, "predictions": pred_n,
+            "prediction_pushes": pred_pushes, "source": source}
 
 
 if __name__ == "__main__":
