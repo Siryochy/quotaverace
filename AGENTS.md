@@ -1723,3 +1723,28 @@ crediti the-odds-api **6** (reset 01/10), `team_ratings` **622** squadre,
 `match_results` 15.192, 186 previsioni aperte su 26 leghe (23 mappabili; le
 non mappabili sono scelte: `Primera A`, `Primera Nacional`, `K2-League`),
 10 bet live aperte tutte pre-cambio-strategia (quote 2.09-4.35).
+
+### Decisioni del proprietario 12/09/2026 (ripartenza degli ordini reali)
+
+- **`STAKE_CAP_HARD=0`** (env su Railway, dichiarata in `preserve()`):
+  scelta esplicita del proprietario per far ripartire gli ordini senza
+  top-up. I cap PERCENTUALI restano 1% (value/moderate) e 2% (strong_value),
+  ma ora il floor dell'exchange (1 USDC) prevale: su un wallet di 38 USDC
+  ogni bet e' ~2.6% del bankroll. I risk cap di portafoglio sono intatti
+  (correlazione 30% per blocco, esposizione totale 40%/giorno).
+  ⚠️ Da rivedere se il wallet cresce (con >= 100 USDC il cap severo torna
+  sostenibile e si puo' rimettere `STAKE_CAP_HARD=1`).
+- **Prima bet reale della fase ripartita** (12/09 15:22 UTC): Atalanta vs
+  Cagliari, esito `1` @ **1.75**, **1.00 USDC**, `FULLY_FILLED`
+  (tx `0x0bea0e28…`). Wallet 37.9978 -> **36.9978** (exposure 1.0).
+  Secondo candidato nella stessa tornata (CSKA Moscow vs Rubin Kazan,
+  `sx-L19947936`, `1` @ 1.69): ordine **CANCELLED non riempito** -> nessuna
+  riga a ledger e nessun ordine in eccesso (floor EV rispettato).
+- **Crediti the-odds-api**: il proprietario crea una **chiave/account nuovi**
+  (500 crediti freschi) e la imposta da se' (mai in chat, regola 7):
+  `railway variables --service api --environment production --set-from-stdin ODDS_API_KEY`
+  dalla root del repo (incolla il valore e Ctrl-D). Dopo il set: verificare
+  la nuova impronta, poi lanciare il settlement delle righe rimaste aperte
+  (10 bet live pre-cambio-strategia + ~186 previsioni) e riattivare la
+  rotazione quote.
+
