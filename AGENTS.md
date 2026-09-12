@@ -1623,3 +1623,58 @@ settlement in pausa e kill-switch off il consumo e' solo la rotazione value
 ampio + 130 sul set mirato (league_mapping, team_names, football_hist,
 odds_api, rating_engine, poisson_engine, sx_signals, market_calib); tutti
 gli id hanno roster; nessun roster vuoto in `ALL_LEAGUES`.
+### Rotazione chiave API-Football + prima sync storica (12/09/2026)
+
+**1) La chiave "nuova" era nel PROGETTO SBAGLIATO.** Esiste un **secondo
+progetto Railway** (`valiant-liberation`) con un servizio chiamato
+`quotaverace`: le modifiche fatte via RAW Editor e CLI finivano LÌ, non su
+`quotaverace/api` (impronta `5a6df8a8325e` rimasta identica per 24h). Il
+servizio orfano gira la stessa immagine ma crash-loopava su `ValueError:
+Token non configurato.` perche' `config.py:53` legge `QUOTAVERACE_BOT_TOKEN`
+mentre la' le variabili si chiamavano `TOKEN`/`BOT_TOKEN`/`TELEGRAM_TOKEN`
+(mai lette → il crash-loop NON era il bot di produzione: lo scheduler di
+`api` non si e' mai riavviato, ancoraggio `:25.416895` continuo).
+⚠️ **Lezione operativa**: `railway list` prima di inseguire i log — con due
+progetti attivi i log possono essere di un container estraneo.
+Chiave valida trovata nel progetto orfano (`API_FOOTBALL_KEY` sha12
+`fc8972c3a59e`; `/status` → `errors: []`, account "giuseppe bona", **piano
+Free attivo fino al 12/09/2027**) e copiata su `quotaverace/api` con pipe
+diretto fra i due progetti (valore MAI stampato in chat). Redeploy
+`4d2dc56c` SUCCESS, container sano, nessun `ValueError`. **Progetto orfano
+ELIMINATO** (`railway delete -p <id> --yes`, deletedAt programmato).
+La chiave vecchia (`5a6df8a8325e`) e' morta: rigenerare la chiave invalida la
+precedente (`Error/Missing application key`).
+
+**2) Rate limit del piano Free: 10 richieste/MINUTO** (oltre alle
+100/giorno). Sono limiti DIVERSI e il primo uccide i burst: `--verify-ids`
+(41 chiamate di fila) ha dato **9/41 OK e 32 BAD** con `rateLimit: Too many
+requests`. Non lanciare mai loop API-Football senza pacing.
+
+**3) DUE BUG REALI trovati dalla sync** (silenziosi: `_league_response_ok`
+scarta la lega e la sync importa 0 righe senza errore):
+- `LEAGUE_API["La Liga"] = ("laliga", "spain")` ma l'API dice `La Liga` →
+  **La Liga veniva saltata in OGNI sync**;
+- `Turkey Super Lig` atteso `"super lig"` ma l'API dice `Süper Lig` (la
+  dieresi rompe il contenimento); `Argentina Primera` atteso `"primera"` ma
+  l'API dice `Liga Profesional Argentina`.
+Corretti (le due leghe ora validano il solo PAESE). Tripwire:
+`test_football_hist.TestNomiApiVerificati` (nomi reali API del 12/09).
+
+**4) PACING del rate limit** (`football_hist._throttle`): ogni chiamata
+`_api_get` (incluso il fallback di settlement in `sx_signals`) e' distanziata
+di `API_FOOTBALL_MIN_INTERVAL` secondi (default **6.5** ≈ 9/min; `0` =
+disattivato; environment dichiarata in `preserve()` in `.railway/railway.ts`).
+Prima un burst bruciava richieste nei retry e faceva saltare le leghe. Test:
+`test_football_hist.TestRateLimitThrottle` (default/env/attese).
+
+**5) SYNC STORICA ESEGUITA (12/09, a lotti con pacing)**: 35 leghe,
+**12.467 partite salvate**, zero leghe saltate (3 lotti: 5.791 + 3.933 +
+2.743). `match_results` 2.725 → **15.192**; `team_ratings` 200 → **622
+squadre su 40 leghe**; `sync_state` = **33 leghe marcate** (il job 08:30 non
+le riscarica). Restano le 8 leghe core gia' profonde (Serie A, PL, La Liga,
+Bundesliga, Ligue 1, Eredivisie, MLS, Brasileirao): le prende il job
+automatico. Quota residua il 12/09: **31 richieste**.
+⚠️ NB: il conteggio per lega in `team_ratings` ora e' "sporcato" dalle coppe
+(una squadra che gioca in piu' competizioni prende la prima etichetta del
+set: Brasileirao 18 → 2, Europa League 52): il gate usa il NOME SQUADRA, non
+la lega, quindi nessuna regressione — le squadre rated sono triplicate.

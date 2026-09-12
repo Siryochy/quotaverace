@@ -17,8 +17,13 @@ def _tmp_db(monkeypatch, tmp_path):
     # Il memo in-process delle stagioni accessibili non deve attraversare i
     # test (ogni test parte dall'anno corrente).
     fh.reset_sync_state()
+    # Throttle del rate limit DISATTIVATO nei test: altrimenti ogni chiamata
+    # dopo la prima aspetterebbe 6.5s reali (il default di produzione).
+    monkeypatch.setenv("API_FOOTBALL_MIN_INTERVAL", "0")
+    fh.reset_throttle()
     yield
     fh.reset_sync_state()
+    fh.reset_throttle()
 
 
 def _fixture(status="FT", home="Roma", away="Empoli", gh=2, ga=0, fxid=1001,
@@ -229,6 +234,76 @@ class TestCoperturaLeghe:
     def test_id_unici(self):
         ids = list(fh.LEAGUE_IDS.values())
         assert len(ids) == len(set(ids))
+
+
+class TestRateLimitThrottle:
+    """Il piano Free ha 10 richieste/MINUTO: senza distanziamento un burst
+    (es. `--verify-ids` su 41 leghe) prende 429 a raffica e brucia richieste
+    nei retry (osservato in produzione il 12/09/2026: 9/41 verificate)."""
+
+    def test_default_e_override_env(self, monkeypatch):
+        monkeypatch.delenv("API_FOOTBALL_MIN_INTERVAL", raising=False)
+        assert fh.api_min_interval() == fh.MIN_INTERVAL_SECONDS
+        monkeypatch.setenv("API_FOOTBALL_MIN_INTERVAL", "0")
+        assert fh.api_min_interval() == 0.0
+        monkeypatch.setenv("API_FOOTBALL_MIN_INTERVAL", "non-numerico")
+        assert fh.api_min_interval() == fh.MIN_INTERVAL_SECONDS
+
+    def test_interval_zero_non_aspetta(self, monkeypatch):
+        sleeps = []
+        monkeypatch.setattr(fh.time, "sleep", lambda s: sleeps.append(s))
+        fh.reset_throttle()
+        fh._throttle()
+        fh._throttle()
+        assert sleeps == []
+
+    def test_seconda_chiamata_viene_distanziata(self, monkeypatch):
+        sleeps = []
+        clock = [1000.0]
+        monkeypatch.setenv("API_FOOTBALL_MIN_INTERVAL", "0.5")
+        monkeypatch.setattr(fh.time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(fh.time, "sleep", lambda s: sleeps.append(s))
+        fh.reset_throttle()
+        fh._throttle()                 # prima chiamata: nessuna attesa
+        fh._throttle()                 # seconda: deve aspettare l'intervallo
+        assert sleeps == [0.5]
+
+    def test_burst_verify_ids_distanziato(self, monkeypatch):
+        """`_api_get` distanzia OGNI tentativo: niente raffica di 429."""
+        monkeypatch.setenv("API_FOOTBALL_MIN_INTERVAL", "2")
+        monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+        sleeps = []
+        clock = [500.0]
+        monkeypatch.setattr(fh.time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(fh.time, "sleep", lambda s: sleeps.append(s))
+        _stub_requests(monkeypatch, [_fixture()])
+        fh.reset_throttle()
+        for _ in range(3):
+            fh._api_get("fixtures", {"league": 135, "season": 2024})
+        assert sleeps == [2, 2]        # 3 chiamate -> 2 attese
+
+
+class TestNomiApiVerificati:
+    """Attese id<->nome confermate con chiamate reali all'API il 12/09/2026.
+    Un'attesa sbagliata NON e' un errore visibile: `_league_response_ok`
+    scarta la lega in silenzio e la sync importa 0 righe."""
+
+    def test_la_liga(self):
+        fx = [_fixture(api_league="La Liga", api_country="Spain")]
+        assert fh._league_response_ok(fx, "La Liga") is True
+
+    def test_turkey_super_lig_con_dieresi(self):
+        fx = [_fixture(api_league="S\u00fcper Lig", api_country="Turkey")]
+        assert fh._league_response_ok(fx, "Turkey Super Lig") is True
+
+    def test_argentina_liga_profesional(self):
+        fx = [_fixture(api_league="Liga Profesional Argentina",
+                       api_country="Argentina")]
+        assert fh._league_response_ok(fx, "Argentina Primera") is True
+
+    def test_paese_sbagliato_blocca_ancora(self):
+        fx = [_fixture(api_league="Primera Divisi\u00f3n", api_country="Chile")]
+        assert fh._league_response_ok(fx, "Argentina Primera") is False
 
 
 class TestValidazioneId:

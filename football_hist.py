@@ -96,7 +96,10 @@ LEAGUE_IDS: Dict[str, int] = {
 LEAGUE_API: Dict[str, Tuple[str, str]] = {
     "Serie A": ("serie a", "italy"),
     "Premier League": ("premier league", "england"),
-    "La Liga": ("laliga", "spain"),
+    # ⚠️ Nome/paese verificati DAL VIVO il 12/09/2026: un'attesa sbagliata fa
+    # SCARTARE la lega da sync_history (_league_response_ok) senza importare
+    # nulla. "laliga" non e' contenuto in "La Liga" -> La Liga veniva saltata.
+    "La Liga": ("la liga", "spain"),
     "Bundesliga": ("bundesliga", "germany"),
     "Ligue 1": ("ligue 1", "france"),
     "Eredivisie": ("eredivisie", "netherlands"),
@@ -119,7 +122,9 @@ LEAGUE_API: Dict[str, Tuple[str, str]] = {
     "Eliteserien": ("eliteserien", "norway"),
     "A-League": ("a-league", "australia"),
     "Veikkausliiga": ("veikkausliiga", "finland"),
-    "Argentina Primera": ("primera", "argentina"),
+    # API: "Liga Profesional Argentina" (il nome non contiene "primera"):
+    # si valida il solo PAESE (un id sbagliato punta a un altro paese).
+    "Argentina Primera": ("", "argentina"),
     "Chile Primera": ("primera", "chile"),
     "Colombia Primera": ("primera", "colombia"),
     "Egyptian Premier League": ("premier", "egypt"),
@@ -129,7 +134,9 @@ LEAGUE_API: Dict[str, Tuple[str, str]] = {
     # nome): basta a intercettare un id sbagliato.
     "Austrian Bundesliga": ("bundesliga", "austria"),
     "Russian Premier League": ("premier league", "russia"),
-    "Turkey Super Lig": ("super lig", "turkey"),
+    # API: "Süper Lig" (la dieresi rompe il confronto per contenimento con
+    # "super lig"): si valida il solo PAESE.
+    "Turkey Super Lig": ("", "turkey"),
     "Belgian First Div": ("", "belgium"),
     "Scottish Premiership": ("premiership", "scotland"),
     "Greek Super League": ("super league", "greece"),
@@ -180,6 +187,43 @@ RETRY_BACKOFF = 3      # secondi tra i tentativi (x2 a ogni retry)
 MAX_YEAR_RETRIES = 3
 
 
+# Rate limit del piano free: 10 richieste al MINUTO (oltre a 100/giorno).
+# Un burst (es. `--verify-ids` su 41 leghe) prende 429 a raffica e brucia
+# richieste nei retry: le chiamate vanno DISTANZIATE. Il ritmo e'
+# configurabile in secondi (env `API_FOOTBALL_MIN_INTERVAL`, 0 = nessun
+# ritardo) e vale per OGNI chiamata API-Football del processo, incluso il
+# fallback di settlement in `sx_signals`.
+MIN_INTERVAL_SECONDS = 6.5   # ~9 richieste/minuto: sotto il limite di 10
+_last_call_ts = [0.0]        # timestamp monotono dell'ultima chiamata
+
+
+def api_min_interval() -> float:
+    """Secondi minimi fra due chiamate API-Football (env, default 6.5)."""
+    raw = _env("API_FOOTBALL_MIN_INTERVAL")
+    if not raw:
+        return MIN_INTERVAL_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return MIN_INTERVAL_SECONDS
+
+
+def _throttle() -> None:
+    """Attende il tempo necessario per non superare il limite per minuto."""
+    interval = api_min_interval()
+    if interval <= 0:
+        return
+    wait = interval - (time.monotonic() - _last_call_ts[0])
+    if wait > 0:
+        time.sleep(wait)
+    _last_call_ts[0] = time.monotonic()
+
+
+def reset_throttle() -> None:
+    """Azzera il timer del throttle (usato dai test)."""
+    _last_call_ts[0] = 0.0
+
+
 def _api_get(path: str, params: Dict) -> Optional[dict]:
     """GET con header x-apisports-key. Ritorna il body json (o None).
 
@@ -193,6 +237,7 @@ def _api_get(path: str, params: Dict) -> Optional[dict]:
         return None
     for attempt in range(MAX_RETRIES):
         try:
+            _throttle()  # ogni tentativo e' una richiesta: va distanziato
             r = requests.get(f"{BASE_URL}/{path}", headers={"x-apisports-key": key},
                              params=params, timeout=30)
             if r.status_code in (401, 403):

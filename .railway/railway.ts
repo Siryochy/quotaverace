@@ -20,6 +20,11 @@ export default defineRailway(() => {
     QUOTAVERACE_BOT_TOKEN: preserve(),
     ODDS_API_KEY: preserve(),
     API_FOOTBALL_KEY: preserve(),
+    // Rate limit del piano free API-Football (10 richieste al MINUTO, oltre a
+    // 100/giorno): secondi minimi fra due chiamate, letto da
+    // football_hist.api_min_interval(). Default di codice 6.5 (≈9/min);
+    // preserve() per non distruggerlo se un giorno viene tarato su Railway.
+    API_FOOTBALL_MIN_INTERVAL: preserve(),
     BANKROLL_DEFAULT: preserve(),
     ADMIN_CHAT_ID: preserve(),
     TEST_NOTIFY_KEY: preserve(),
