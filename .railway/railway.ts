@@ -55,6 +55,11 @@ export default defineRailway(() => {
     // data/execution/settlement_paused.json) i settle non chiudono nulla e
     // _update_results non scarica risultati (zero crediti).
     SETTLEMENT_PAUSED: preserve(),
+    // Tetto giornaliero di chiamate quote (default 12): le leghe in eccesso
+    // vengono rinviate al giorno dopo. Tarato al 12/09 per non esaurire i
+    // crediti residui del piano free (il contatore era cieco al consumo del
+    // settlement: vedi fix `remaining` in odds_api.fetch_scores).
+    ODDS_DAILY_BUDGET: preserve(),
     // Guardrail di rischio (11/09): stop-loss giornaliero (-5% per 24h) e
     // filtro liquidita' SX (profondita' taker minima del match e del singolo
     // esito). preserve() per non farli distruggere da `railway config apply`.

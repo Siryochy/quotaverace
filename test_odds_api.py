@@ -268,3 +268,38 @@ def test_stagger_scadenza_per_intervallo_invariata(monkeypatch, tmp_path):
     interval = odds_api.interval_for_sport(key)
     _write_cache(tmp_path, key, now - interval * 86400 - 1)
     assert odds_api.is_sport_due(key) is True
+
+
+def test_scores_cache_persiste_i_crediti(monkeypatch, tmp_path):
+    """Bug 12/09: `fetch_scores` non salvava `remaining` nella cache dei
+    punteggi, quindi `get_remaining()`/`get_quota()` (guardia proattiva +
+    credit watchdog) vedevano solo il consumo della rotazione quote: il
+    contatore restava fermo a 58 mentre l'API ne riportava 6 -> nessun
+    throttle, nessun alert, crediti bruciati dal settlement fino a zero.
+    La cache dei punteggi deve rendere visibile il credito residuo
+    restituito dall'header `x-requests-remaining`."""
+    import json
+    import odds_api
+    monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+
+    class _Resp:
+        status_code = 200
+        headers = {"x-requests-remaining": "6"}
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"id": "m1", "home_team": "A", "away_team": "B",
+                     "completed": True,
+                     "scores": [{"name": "A", "score": "1"}]}]
+
+    monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _Resp())
+    odds_api.fetch_scores("soccer_italy_serie_a")
+
+    cached = json.loads(
+        (tmp_path / "toa_scores_soccer_italy_serie_a.json").read_text())
+    assert cached["remaining"] == 6
+    assert odds_api.get_remaining() == 6
+    assert odds_api.get_quota() == (6, 1)

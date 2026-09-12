@@ -419,7 +419,14 @@ def fetch_scores(sport=None, days_from=2):
                 save_ts = old["ts"]
         except Exception:
             pass
-    cache_file.write_text(json.dumps({"ts": save_ts, "payload": payload}))
+    # Il consumo crediti va PERSISTITO anche nelle cache dei punteggi:
+    # `get_remaining()`/`get_quota()` (guardia proattiva + credit watchdog)
+    # leggono le cache `toa_*.json`, quindi senza questo campo il consumo di
+    # `fetch_scores` era invisibile (bug 12/09: il contatore restava a 58
+    # mentre l'API ne riportava 6 -> nessun throttle, nessun alert, crediti
+    # bruciati fino all'esaurimento).
+    cache_file.write_text(json.dumps({"ts": save_ts, "payload": payload,
+                                      "remaining": remaining}))
     logger.info(f"the-odds-api scores {sport}: {len(payload)} | crediti residui: {remaining}")
     return payload
 

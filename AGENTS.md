@@ -1678,3 +1678,48 @@ automatico. Quota residua il 12/09: **31 richieste**.
 (una squadra che gioca in piu' competizioni prende la prima etichetta del
 set: Brasileirao 18 → 2, Europa League 52): il gate usa il NOME SQUADRA, non
 la lega, quindi nessuna regressione — le squadre rated sono triplicate.
+
+### Riavvio bot + fix contatore crediti (12/09/2026)
+
+**1) RIPRESA DELL'OPERATIVITA' (12/09, verificata sul container).**
+- `data/execution/settlement_paused.json` -> `{"paused": false}` e
+  `data/execution/auto_bet_mode.json` -> `{"mode": "live"}`: kill-switch
+  `effective: live`, `provider_ready: true`, `_execution_mode()` = live,
+  settlement RIATTIVATO. Nessun redeploy necessario (i job leggono i file a
+  ogni giro).
+- Primo giro di settlement reale: **72 partite aggiornate**, 17 previsioni
+  saldate, 1 bet live (Venezia) saldata. Costo: ~52 crediti the-odds-api
+  (26 leghe x ~2 crediti) -> **remaining 6** (reset 01/10). I 10 sx-* bets
+  ancora aperti NON si saldano con `bot._update_results`: le bet con
+  `match_id` sx-* passano da `sx_signals.settle_sx_bets()` (risultati
+  salvati con l'id SX), che ha bisogno di credito per lega.
+- Il bot gira e valuta i candidati: nei log `auto_bet: bankroll LIVE =
+  saldo wallet 38.00 USDC` e **2 candidati favoriti ammessi dal gate**
+  (uno strong su `sx-L19947936`) ma **0 ordini** per il CAP SEVERO
+  (`stake 0.38/0.76 USDC < minimo ordine 1.00`). Con wallet 38 USDC il cap
+  1%/2% non e' sostenibile: servono >= 100 USDC (1%) o >= 50 (2%), oppure
+  `STAKE_CAP_HARD=0` per accettare il floor da 1 USDC (2.6% del bankroll).
+  La decisione e' del proprietario: la configurazione attuale e' live ma
+  senza ordini.
+
+**2) BUG FIXATO — il contatore crediti era CIECO al consumo del settlement
+(`odds_api.fetch_scores`).** `fetch_scores` salvava la cache punteggi come
+`{"ts", "payload"}` SENZA `remaining`, mentre `_get_odds` lo salva: quindi
+`get_remaining()`/`get_quota()` (minimo fra le cache `toa_*.json`) vedevano
+solo il consumo della rotazione quote. Misura reale del 12/09: il contatore
+diceva **58** mentre l'ultima risposta dell'API riportava **6** -> la guardia
+proattiva `should_query_sport` NON ha ridotto le leghe e il credit watchdog
+(`credit_watchdog_job`, soglie 50/20/10/5) non ha mai allertato: i crediti
+sono stati bruciati dal settlement fino quasi a zero senza nessun campanello.
+Fix: la cache punteggi registra anche `remaining` (con commento). Tripwire:
+`test_odds_api.test_scores_cache_persiste_i_crediti` (fake response con
+header `x-requests-remaining: 6` -> cache con `remaining`, `get_remaining()`
+e `get_quota()` coerenti). Nota: le cache gia' scritte senza il campo restano
+cieche finche' non vengono riscritte (un fetch le aggiorna).
+`ODDS_DAILY_BUDGET` aggiunta in `preserve()` di `.railway/railway.ts`.
+
+**3) Numeri utili del giro.** Wallet SX **37.9978 USDC** (exposure 0),
+crediti the-odds-api **6** (reset 01/10), `team_ratings` **622** squadre,
+`match_results` 15.192, 186 previsioni aperte su 26 leghe (23 mappabili; le
+non mappabili sono scelte: `Primera A`, `Primera Nacional`, `K2-League`),
+10 bet live aperte tutte pre-cambio-strategia (quote 2.09-4.35).
