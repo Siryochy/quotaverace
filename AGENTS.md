@@ -1861,3 +1861,15 @@ distinte, tutte "non saldabili con le regole attuali", nessuna silenziosa:
      mercato SX e' ancora attivo e leggibile).
   6. **Future o in corso**: ~22 match (12-13/09) — correttamente aperti.
 
+**BONUS fix contatore crediti (12/09, `get_remaining`).** Con la chiave nuova
+  l'API riportava **452** crediti ma `/api/health` e la guardia proattiva
+  continuavano a leggere **58**: `get_remaining()` prendeva il **MINIMO** tra
+  tutte le cache `toa_*.json`, e le cache quote scritte con la chiave VECCHIA
+  tengono quel valore per 3-30 giorni (si rinnovano per lega). Ora vale la
+  lettura **piu' recente**: nuovo campo `remaining_ts` scritto da
+  `_get_odds`/`fetch_scores` (in `fetch_scores` il `ts` della cache puo'
+  essere preservato da un giro precedente, `remaining_ts` e' sempre il
+  momento della chiamata), con ripiego su `ts` per le cache di formato
+  vecchio. Tripwire: `test_get_remaining_usa_la_lettura_piu_recente`,
+  `test_get_remaining_senza_remaining_ts_usa_ts`.
+

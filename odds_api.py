@@ -29,17 +29,40 @@ CORE_LEAGUES_HIGH = {"soccer_italy_serie_a", "soccer_england_pl", "soccer_spain_
 CORE_LEAGUES_EMERGENCY = {"soccer_italy_serie_a", "soccer_england_pl", "soccer_spain_la_liga"}
 
 def get_remaining() -> int:
-    """Legge i crediti minimi residui da tutte le cache toa_*.json."""
-    remaining = []
+    """Crediti residui secondo la lettura PIU' RECENTE tra le cache toa_*.json.
+
+    Ogni risposta dell'API riporta lo stesso contatore autoritativo
+    (`x-requests-remaining`), quindi vale l'ULTIMA lettura per data — non il
+    MINIMO tra le cache. Con il minimo un file vecchio inchioda il valore per
+    settimane (12/09: la chiave nuova riportava 452 crediti ma le cache quote
+    scritte con la chiave vecchia tenevano il contatore a 58, cosi' la
+    rotazione veniva throttled come se i crediti fossero quasi finiti).
+
+    Si usa `remaining_ts` (istante della LETTURA del credito) quando presente,
+    altrimenti `ts`: in `fetch_scores` il `ts` della cache puo' essere
+    preservato da un giro precedente, mentre `remaining_ts` e' sempre il
+    momento della chiamata che ha prodotto quel valore.
+    """
+    best = None            # (timestamp lettura credito, remaining)
+    fallback = []
     if CACHE_DIR.exists():
         for f in CACHE_DIR.glob("toa_*.json"):
             try:
                 d = json.loads(f.read_text())
-                if d.get("remaining") is not None:
-                    remaining.append(int(d["remaining"]))
+                if d.get("remaining") is None:
+                    continue
+                rem = int(d["remaining"])
+                ts = d.get("remaining_ts", d.get("ts"))
+                if isinstance(ts, (int, float)):
+                    if best is None or ts > best[0]:
+                        best = (ts, rem)
+                else:
+                    fallback.append(rem)
             except Exception:
                 continue
-    return min(remaining) if remaining else None
+    if best is not None:
+        return best[1]
+    return min(fallback) if fallback else None
 
 def should_query_sport(sport_key: str) -> bool:
     """Decide se una sport key deve essere interrogata in base ai crediti.
@@ -351,7 +374,9 @@ def _get_odds(sport, frm, to):
         logger.warning(f"Errore the-odds-api {sport}: {e}")
         return [], 999
     CACHE_DIR.mkdir(exist_ok=True)
-    cache_file.write_text(json.dumps({"ts": time.time(), "payload": payload, "remaining": remaining}))
+    cache_file.write_text(json.dumps({"ts": time.time(), "payload": payload,
+                                      "remaining": remaining,
+                                      "remaining_ts": time.time()}))
     logger.info(f"the-odds-api {sport}: {len(payload)} match | crediti residui: {remaining}")
     return payload, remaining
 
@@ -433,7 +458,8 @@ def fetch_scores(sport=None, days_from=SCORES_DAYS_FROM):
     # mentre l'API ne riportava 6 -> nessun throttle, nessun alert, crediti
     # bruciati fino all'esaurimento).
     cache_file.write_text(json.dumps({"ts": save_ts, "payload": payload,
-                                      "remaining": remaining}))
+                                      "remaining": remaining,
+                                      "remaining_ts": time.time()}))
     logger.info(f"the-odds-api scores {sport}: {len(payload)} | crediti residui: {remaining}")
     return payload
 

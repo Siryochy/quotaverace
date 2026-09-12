@@ -303,3 +303,45 @@ def test_scores_cache_persiste_i_crediti(monkeypatch, tmp_path):
     assert cached["remaining"] == 6
     assert odds_api.get_remaining() == 6
     assert odds_api.get_quota() == (6, 1)
+
+
+def test_get_remaining_usa_la_lettura_piu_recente(monkeypatch, tmp_path):
+    """Il contatore non deve restare inchiodato a un valore STANTIO.
+
+    Caso reale del 12/09: chiave nuova con 452 crediti, ma le cache quote
+    scritte con la chiave vecchia portavano ancora `remaining: 58` -> con il
+    MINIMO tra le cache la lettura restava 58 per settimane (le cache quote
+    si rinnovano ogni 3-30 giorni) e la rotazione veniva throttled a vuoto.
+    Vale la lettura piu' recente; con `ts` preservato in `fetch_scores` e'
+    `remaining_ts` a datare il valore del credito.
+    """
+    import json
+    import time
+    import odds_api
+    monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+    now = time.time()
+    # cache QUOTE vecchia (chiave precedente): 58 crediti, letta 2 giorni fa
+    (tmp_path / "toa_soccer_italy_serie_a.json").write_text(json.dumps(
+        {"ts": now - 2 * 86400, "payload": [], "remaining": 58,
+         "remaining_ts": now - 2 * 86400}))
+    # cache PUNTEGGI fresca (chiave nuova): 452 crediti, letta ora;
+    # attenzione: `ts` puo' essere quello vecchio, `remaining_ts` e' ora
+    (tmp_path / "toa_scores_soccer_italy_serie_a.json").write_text(json.dumps(
+        {"ts": now - 86400, "payload": [], "remaining": 452,
+         "remaining_ts": now}))
+    assert odds_api.get_remaining() == 452
+
+
+def test_get_remaining_senza_remaining_ts_usa_ts(monkeypatch, tmp_path):
+    """Ripiego: cache di formato vecchio (senza `remaining_ts`) ordinate
+    per `ts`, per non perdere la telemetria dei crediti."""
+    import json
+    import time
+    import odds_api
+    monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+    now = time.time()
+    (tmp_path / "toa_a.json").write_text(json.dumps(
+        {"ts": now - 3600, "payload": [], "remaining": 10}))
+    (tmp_path / "toa_b.json").write_text(json.dumps(
+        {"ts": now, "payload": [], "remaining": 33}))
+    assert odds_api.get_remaining() == 33
