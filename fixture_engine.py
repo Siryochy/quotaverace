@@ -440,7 +440,8 @@ def _analyze_match(match_id, match, home_db, away_db, league):
 
     if favourites_ok:
         sane, reason = is_sane(best["prob"], best["quota"], best["ev"],
-                               market_prob=best["market_prob"])
+                               market_prob=best["market_prob"],
+                               league=league)
     else:
         sane, reason = False, favourites_gate_reason()
     if not sane:
@@ -496,7 +497,8 @@ def _analyze_match(match_id, match, home_db, away_db, league):
 def _candidate_status(cand: Dict) -> str:
     """Classifica un candidato: strong_value / value / no_value / rejected."""
     sane, _ = is_sane(cand["prob"], cand["quota"], cand["ev"],
-                      market_prob=cand.get("market_prob"))
+                      market_prob=cand.get("market_prob"),
+                      league=cand.get("league", ""))
     if not sane:
         return "rejected"
     if cand["ev"] > 0.08 and (cand["market_edge"] is None

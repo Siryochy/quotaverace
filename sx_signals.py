@@ -544,7 +544,8 @@ def scan(provider: Optional[SxBetProvider] = None) -> List[dict]:
         if shortlist:
             sane, reason = is_sane(best_c["prob"], best_c["quota"],
                                    best_c["ev"],
-                                   market_prob=best_c["market_prob"])
+                                   market_prob=best_c["market_prob"],
+                                   league=league_name)
         else:
             sane, reason = False, favourites_gate_reason()
         if not sane:
@@ -565,7 +566,8 @@ def scan(provider: Optional[SxBetProvider] = None) -> List[dict]:
             # Stessa classificazione per-candidato del flusso the-odds-api
             # (_candidate_status): nel ledger finiscono anche i no_value.
             csane, _ = is_sane(cand["prob"], cand["quota"], cand["ev"],
-                               market_prob=cand["market_prob"])
+                               market_prob=cand["market_prob"],
+                               league=cand.get("league", ""))
             if csane:
                 if cand["ev"] > 0.08 and (cand["market_edge"] is None
                                           or cand["market_edge"] >= MARKET_EDGE_STRONG):

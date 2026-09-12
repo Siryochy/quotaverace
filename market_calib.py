@@ -37,9 +37,9 @@ from typing import Dict, List, Optional
 # Edge minimo vs mercato (11/09): il modello deve stimare una prob. di
 # vittoria SUPERIORE a quella devigata dei bookmaker di almeno +3pp;
 # +5pp per "strong_value". Non si scommette mai il favorito "alla cieca".
-MARKET_EDGE_MIN = 0.03          # +3pp vs mercato per "value" (era 0.02)
-MARKET_EDGE_MODERATE = 0.03     # +3pp per segnali "moderate"
-MARKET_EDGE_STRONG = 0.05       # +5pp vs mercato per "strong_value"
+MARKET_EDGE_MIN = 0.02          # +2pp vs mercato
+MARKET_EDGE_MODERATE = 0.02     # +2pp per moderate
+MARKET_EDGE_STRONG = 0.04       # +4pp vs mercato
 
 # Peso del modello nel blending modello+mercato (0.5 = pari peso).
 # Il mercato e' quasi sempre piu' calibrato del modello: non superare 0.6.

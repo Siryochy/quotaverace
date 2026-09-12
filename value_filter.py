@@ -30,7 +30,7 @@ from market_calib import (
 #   4) Kelly adattivo: +2% per PL/Bundesliga, +1.5% per altri
 #   5) Esclusione automatica leghe con CLV negativo cronico
 
-EV_MIN = 0.02            # +2% minimo (09/09: abbassato per piu' segnali)
+EV_MIN = 0.015            # +1.5% minimo
 EV_MAX = 0.15            # +15% massimo (oltre = anomalia)
 
 # Fascia quote: esclude 1.30-1.45 (pantano -9.9% nel backtest)
