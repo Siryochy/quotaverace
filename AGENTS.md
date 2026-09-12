@@ -164,7 +164,41 @@ cd webapp && npm run build            # build Next.js
 - Il token va rinnovato quando scade o dopo l'esposizione in chat (flusso:
   fine-grained PAT → Contents RW → va nel VAULT, non più nel `.env`).
 
-## Stato attuale (aggiornato al 09/09/2026)
+## Stato attuale (aggiornato al 12/09/2026)
+
+- **SETTLEMENT NATIVO SX (12/09, deploy `0305ffc`, VERIFICATO IN PRODUZIONE)**:
+  le leghe che SX scansiona ma the-odds-api NON copre (Primera A Colombia,
+  Primera Nacional, K2-League) lasciavano bet/previsioni aperte per sempre —
+  nessuna fonte esterna puo' refertarle. Ora `_results_from_sx` (sx_signals.py)
+  legge l'esito DALL'EXCHANGE, gratis e senza matching per nome:
+  1) `markets/find` sui market_hash salvati sulle bet (batch da SX_FIND_BATCH=30,
+     docs: max 30 hash/chiamata): ogni mercato binario porta SEMPRE i punteggi
+     dell'evento (teamOneScore/teamTwoScore) e, se saldato, `outcome` — la
+     semantica e' relativa alla GAMBA ("T1 vs Not T1": outcome 1 = vince T1),
+     quindi il verdetto 1X2 lo emette SEMPRE settle_bets/settle_predictions dai
+     punteggi (fail-closed, mai dal campo outcome della gamba). Si saldano
+     anche le bet ORFANE senza riga in `matches` (i nomi vengono dalla find;
+     la find riporta anche la lega vera: America MG–Nautico era Serie B).
+  2) `/markets/active` per i match con riga nel ledger: punteggi live usati
+     come finali SOLO a >= SX_LIVE_MIN_AGE_MS (120') dal kickoff — sotto, il
+     punteggio puo' ancora cambiare (fermate riprese il test che usava 1h).
+  3) Le fonti esterne restano per i match ANCORA senza risultato sx-* (query
+     diretta su match_results, tabella garantita da _create_results_table).
+  Il percorso SX e' attivo SOLO se esiste almeno una fonte punteggi
+  (ODDS_API_KEY o API_FOOTBALL_KEY) cosi' i test offline restano senza rete;
+  disattivabile con `SX_NATIVE_SETTLEMENT=0`. Provider iniettabile
+  (`settle_sx_bets(provider=...)`). Fail-safe: eccezioni catturate e
+  loggate, mai chiuse righe senza punteggio reale.
+  **Esito produzione 12/09 18:35 UTC**: bet #21 America MG–Nautico WON +2.25,
+  #33 Jaguares–Fortaleza LOST -1.00, #34 Santa Fe–Tolima WON +1.46
+  (netto +2.71 USDC, ZERO crediti the-odds-api). Restavano aperte solo le
+  due del giorno: CSKA (si chiude coi punteggi live del percorso active)
+  e Atalanta (kickoff 18:45, percorso normale). Test: 12 verdi in
+  `test_sx_native_settlement.py` + autouse dummy provider in
+  test_league_mapping (no rete) + regressioni settlement/bot/odds_api verdi.
+  **Scoperta corollario**: the-odds-api NON copre Primera A/Nacional/K2
+  (verificato su /v4/sports, 86 sport): NON aggiungerle a SPORTS_MAP — la
+  copertura settlement di quelle leghe e' solo SX-native.
 
 - **FIX regressione 71b2c4c (09/09, deployato c299abe)**: il cleanup OU2.5
   aveva rimosso il parametro posizionale `p_over` dalla chiamata a
