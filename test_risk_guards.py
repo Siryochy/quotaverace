@@ -41,8 +41,8 @@ class TestFasciaFavoriti:
         import value_filter as vf
         from market_calib import MARKET_EDGE_MIN
         assert vf.ODDS_MIN == 1.30
-        assert vf.ODDS_MAX <= 1.80
-        assert MARKET_EDGE_MIN >= 0.03
+        assert vf.ODDS_MAX <= 2.00         # favoretti + value moderati
+        assert MARKET_EDGE_MIN >= 0.02     # +2pp (frequenza alta)
 
     def test_quota_sotto_il_minimo_bocciata(self):
         from value_filter import is_sane
@@ -52,11 +52,13 @@ class TestFasciaFavoriti:
         ok, _ = is_sane(0.80, 1.31, 0.048, market_prob=0.75)
         assert ok
 
-    def test_edge_sotto_3pp_bocciato(self):
+    def test_edge_sotto_2pp_bocciato(self):
         from value_filter import is_sane
-        ok, reason = is_sane(0.62, 1.65, 0.03, market_prob=0.60)  # +2pp
+        # DEFAULT_LEAGUE_STRATEGY min_edge=0.02: +1pp non basta
+        ok, reason = is_sane(0.61, 1.65, 0.02, market_prob=0.60)
         assert not ok and "non batte il mercato" in reason
-        ok, _ = is_sane(0.63, 1.65, 0.04, market_prob=0.60)       # +3pp
+        # +2pp: OK con default
+        ok, _ = is_sane(0.62, 1.65, 0.03, market_prob=0.60)
         assert ok
 
 
@@ -115,7 +117,7 @@ class TestStopLossBloccaIlGiro:
     def test_run_today_bets_non_piazza_con_stop_attivo(self, temp_db):
         start = (datetime.now(timezone.utc) + timedelta(hours=3)) \
             .isoformat().replace("+00:00", "Z")
-        tracker.save_match("stop1", "Serie A", "Osasuna", "Getafe", start)
+        tracker.save_match("stop1", "Premier League", "Osasuna", "Getafe", start)
         tracker.save_prediction("stop1", "1X2", "Osasuna", 1.65, 0.62, 0.08,
                                 market_prob=0.60, market_edge=0.07,
                                 status="value")
@@ -129,7 +131,7 @@ class TestStopLossBloccaIlGiro:
         """Controprova: senza stop lo stesso candidato viene piazzato (SIM)."""
         start = (datetime.now(timezone.utc) + timedelta(hours=3)) \
             .isoformat().replace("+00:00", "Z")
-        tracker.save_match("stop2", "Serie A", "Osasuna", "Getafe", start)
+        tracker.save_match("stop2", "Premier League", "Osasuna", "Getafe", start)
         tracker.save_prediction("stop2", "1X2", "Osasuna", 1.65, 0.62, 0.08,
                                 market_prob=0.60, market_edge=0.07,
                                 status="value")

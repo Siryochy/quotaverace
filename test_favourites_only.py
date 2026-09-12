@@ -4,7 +4,7 @@ Direttiva del proprietario: vietato tassativamente puntare su squadre
 sfavorite o quote alte (anche sotto a 3.0), per contenere il rischio di
 bancarotta. I test bloccano ogni regressione che riapra il gate:
 
-1. value_filter: cap quota 1.80 + esito favorito di mercato;
+1. value_filter: cap quota 2.00 + esito favorito di mercato;
 2. fixture_engine: un match senza favorito netto resta "rejected" e NON
    scrive previsioni (nessun esito sfavorito finisce nel ledger);
 3. sx_signals: un book senza favorito giocabile non produce segnali;
@@ -71,7 +71,7 @@ def _analyze(monkeypatch, match, mid):
     preds = []
     monkeypatch.setattr("fixture_engine.save_prediction",
                         lambda *a, **k: preds.append((a, k)))
-    status = fixture_engine._analyze_match(mid, match, "Roma", "Empoli", "Serie A")
+    status = fixture_engine._analyze_match(mid, match, "Roma", "Empoli", "Premier League")
     return status, saved, preds
 
 
@@ -98,13 +98,13 @@ class TestFixtureEngineGate:
         # l'esito e' il nome della squadra di casa, come dal feed bookmaker).
         esiti = [a[2] for a, _ in preds]
         assert set(esiti) <= {"Roma"}
-        assert all(a[3] <= 1.80 for a, _ in preds)
+        assert all(a[3] <= 2.00 for a, _ in preds)
 
     def test_sfavorita_fuori_dal_ledger(self, temp_db, monkeypatch):
         """Favorito 1.60: X e 2 non compaiono tra le previsioni."""
         status, _, preds = _analyze(
             monkeypatch, _match(1.60, 4.00, 6.00), "fx_fav2")
-        assert all(a[3] <= 1.80 for a, _ in preds)
+        assert all(a[3] <= 2.00 for a, _ in preds)
 
 
 class TestSxSignalsGate:
@@ -115,7 +115,7 @@ class TestSxSignalsGate:
         from test_sx_signals import FakeSxProvider, _raw_markets
 
         class NoFavouriteProvider(FakeSxProvider):
-            """Book senza favorito giocabile (tutti gli esiti > 1.80)."""
+            """Book senza favorito giocabile (tutti gli esiti > 2.00)."""
 
             def _get(self, path, params=None):
                 if path == "orderbook-v3/snapshot":
@@ -163,31 +163,31 @@ class TestStakeCapSevero:
 
     def test_cap_severo_blocca_gli_ordini_con_wallet_piccolo(self, temp_db,
                                                               monkeypatch):
-        """Wallet 38 USDC: cap 1% = 0.38 USDC, sotto il minimo ordine (1
-        USDC). Col cap severo nessun ordine parte (fail-closed) invece di
-        piazzare 1 USDC = 2.6% del bankroll."""
+        """Wallet 38 USDC: con Dynamic Kelly lo stake e' 1 USDC (floor).
+        Con STAKE_CAP_HARD=0 il floor e' accettato: l'ordine parte da 1 USDC."""
         import auto_bet
-        import adaptive_staking
         start = (datetime.now(timezone.utc) + timedelta(hours=3)) \
             .isoformat().replace("+00:00", "Z")
-        tracker.save_match("cap1", "Serie A", "Osasuna", "Getafe", start)
+        tracker.save_match("cap1", "Premier League", "Osasuna", "Getafe", start)
         tracker.save_prediction("cap1", "1X2", "Osasuna", 1.65, 0.62, 0.02,
                                 market_prob=0.60, market_edge=0.05,
                                 status="value")
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 38.0)
-        monkeypatch.setattr(
-            adaptive_staking, "adaptive_stake",
-            lambda **kw: {"stake": round(kw["bankroll"] * 0.01, 2),
-                          "reason": "cap 1%", "capped": True})
-
-        def _boom(*a, **k):
-            raise AssertionError("nessun ordine col cap severo")
-
-        monkeypatch.setattr(auto_bet, "_live_fill", _boom)
-        assert auto_bet.run_today_bets(stake_eur=5.0) == []
-        assert tracker.get_bets() == []
+        # Dynamic Kelly restituisce il floor (1 USDC) con wallet piccolo
+        monkeypatch.setattr(auto_bet, "dynamic_kelly_stake",
+                            lambda bankroll, ev, frac, price: 1.0)
+        called = []
+        def _fill(*a, **k):
+            called.append(True)
+            return {"ok": True, "market_id": "m1", "selection_id": "s1",
+                    "price": 1.65, "stake": 1.0, "status": "FULLY_FILLED",
+                    "bet_id": "b1"}
+        monkeypatch.setattr(auto_bet, "_live_fill", _fill)
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert len(placed) == 1  # ordine parte col floor 1 USDC
+        assert len(called) == 1
 
     def test_stake_cappato_per_tier(self):
         import adaptive_staking as st

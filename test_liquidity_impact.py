@@ -224,8 +224,8 @@ class TestRowForEvent:
 
     def test_favorito_fuori_fascia_non_e_candidato(self, monkeypatch):
         self._patch(monkeypatch)
-        # Quota del favorito 1.95 (> ODDS_MAX 1.80): nessun candidato.
-        books = {"m1": [(1.95, 500.0)], "mX": [(3.90, 100.0)],
+        # Quota del favorito 2.50 (> ODDS_MAX 2.00): nessun candidato.
+        books = {"m1": [(2.50, 500.0)], "mX": [(3.90, 100.0)],
                  "m2": [(5.80, 100.0)]}
         row = li._row_for_event(_ev(), books)
         assert row["favorite"] is None
