@@ -135,16 +135,18 @@ cd webapp && npm run build            # build Next.js
   `SECRETS_MASTER_KEY` nel `.env` gitignored, chmod 600). Mai plaintext nel
   repo, mai loggati, caricati solo in memoria da `secrets_store.py` al
   bootstrap (`config.py` → `load_secrets_dir`).
+- **Rotazione chiave (12/09/2026)**: `SECRETS_MASTER_KEY` ruotata (la vecchia
+  era esposta in chat) — nuovi segreti cifrati con chiave fresca.
+  Vecchia `secrets/betfair/` (cert SSL) rimossa.
 - CLI: `venv/bin/python secrets_store.py vault|check|get NOME`. Per aggiungere
   un segreto: file plaintext in `secrets/` → `vault --commit` (cancella il
   plaintext). Se perdi `SECRETS_MASTER_KEY` senza plaintext, i segreti sono
   persi.
 - Su Railway i segreti restano nelle env vars del progetto (cassaforte vera).
-- `vault --commit` NON è ricorsivo: considera solo i file diretti in
-  `secrets/` (`iterdir`) — le sottocartelle non vengono toccate (es. la
-  vecchia `secrets/betfair/` col cert SSL, ora inutile e ignorabile). MAI
-  mettere `*.key`/`*.pem` direttamente in `secrets/`: verrebbero trattati
-  come segreti e cancellati dal commit.
+- `vault --commit` NON è ricorsivo: considera solo i file
+  diretti in `secrets/` (`iterdir`). MAI mettere `*.key`/`*.pem`
+  direttamente in `secrets/`. (Cartella `secrets/betfair/`
+  rimossa il 12/09.)
 - **Tripwire igiene segreti** (`test_secret_hygiene.py`): la suite ROMPE se un
   sorgente .py contiene una credenziale in chiaro (formati noti: token
   Telegram, GitHub PAT, Google API key, AWS, Slack, Stripe, PEM, Bearer;
