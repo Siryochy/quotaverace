@@ -30,13 +30,13 @@ from market_calib import (
 #   4) Kelly adattivo: +2% per PL/Bundesliga, +1.5% per altri
 #   5) Esclusione automatica leghe con CLV negativo cronico
 
-EV_MIN = 0.015            # +1.5% minimo
+EV_MIN = 0.05            # +5% minimo (filtro qualità)
 EV_MAX = 0.15            # +15% massimo (oltre = anomalia)
 
 # Fascia quote: esclude 1.30-1.45 (pantano -9.9% nel backtest)
 # e 1.80+ (troppo lungo, alta varianza)
 ODDS_MIN = 1.50          # quota minima: esclude i "pantano"
-ODDS_MAX = 2.20          # quota massima: favoriti + value moderati
+ODDS_MAX = 1.90          # solo top favoriti
 
 # === STRATEGIA PER LEGA ===
 # Solo campionati con EV positivo nel backtest storico.
