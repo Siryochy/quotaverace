@@ -100,7 +100,7 @@ def compute_ev(prob: float, odds: float) -> float:
     return (prob * odds) - 1.0
 
 
-def combined_quote(odds: List[float]) -> float:
+def combined_quota(odds: List[float]) -> float:
     """Quota combinata di una multipla (prodotto delle quote)."""
     prod = 1.0
     for o in odds:
