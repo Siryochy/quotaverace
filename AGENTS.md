@@ -1713,6 +1713,100 @@ automatico. Quota residua il 12/09: **31 richieste**.
 set: Brasileirao 18 → 2, Europa League 52): il gate usa il NOME SQUADRA, non
 la lega, quindi nessuna regressione — le squadre rated sono triplicate.
 
+### Settlement nativo SX + favoriti netti positivi nel backtest + scadenza righe stale (12/09 pomeriggio/sera)
+
+**1) SETTLEMENT NATIVO SX (commit `0305ffc`, deployato e VERIFICATO in produzione).**
+the-odds-api NON copre le leghe di alcune bet sx-* (Colombia Primera A,
+Primera Nacional Argentina, K League 2: assenti dal catalogo /v4/sports —
+verificato). Ma per le bet `sx-*` l'esito lo decide **SX stesso**: la fonte
+corretta in assoluto per il nostro denaro e' il market risolto
+sull'exchange, GRATIS (zero crediti). Implementato in `sx_signals.py`:
+- `_results_from_sx(provider)`: (a) `markets/find` a BATCH di 30 sui
+  `market_id` salvati sulle bet (bets.market_id = marketHash, li porta
+  gia' dall'ordine) -> `outcome` 1|2 + `teamOneScore/teamTwoScore` per i
+  mercati risolti; (b) fallback punteggi live su `markets/active` SOLO a
+  >= 120' dal kickoff (prima: il punteggio live di un match in corso e'
+  un verdetto sbagliato — test dedicato); (c) bet orfana senza riga in
+  `matches` (es. bet #21 America MG–Nautico): ricostruita da zero
+  (_same_event -> save_match -> save_result), la find ha anche rivelato
+  la lega vera (Brasileiro Serie B). Semantica outcome: relativo alla
+  gamba binaria del mercato (su "T1 vs Not T1": 1 = vince T1, 2 = non
+  vince T1). Sempre `same_event`/`_norm_team` per l'aggancio, mai
+  inversione casa/trasferta; guardia di unicita' come nel path esterno.
+- **Gate attivazione**: il percorso SX-native segue le stesse regole delle
+  altre fonti — attivo SOLO se `ODDS_API_KEY` o `API_FOOTBALL_KEY` sono
+  configurate (i test offline restano network-free senza toccarli);
+  disattivabile con `SX_NATIVE_SETTLEMENT=0`.
+- Ordine fonti in `settle_sx_bets`: SX-native (gratis) -> the-odds-api
+  (solo match ANCORA senza risultato sx-*, `missing`) -> API-Football
+  (fallback). Poi `settle_bets` + `settle_predictions` (chiusura per
+  match_id). Clamps per i test: `_sx_open_matches()` ora accetta
+  `conn=None`, `_results_from_sx` usa `_create_results_table`.
+- **Verificato IN PRODUZIONE** (job background post-deploy, 18:35 UTC):
+  #21 America MG ✅ +2.25, #33 Jaguares ❌ −1.00, #34 Santa Fe ✅ +1.46
+  → **netto +2.71 USDC, zero crediti**. #35 Atalanta e #36 CSKA si
+  saldano da soli coi giri normali (erano in gioco al momento del check).
+- Test: `test_sx_native_settlement.py` (18 test: find batch, live window,
+  bet orfana, leghe non coperte, pausa, gate offline).
+
+**2) ANALISI LEGHE — LA FASCIA FAVORITI E' POSITIVA NEL BACKTEST STORICO.**
+Run walk-forward 2022–2026 (16.273 partite, `historical_backtest.py
+--no-ou --max-odds 1.8 --save`, modello locale senza rating reali =
+misura della sola macchina blend vs closing line reali): **215 bet,
+ROI flat +5.9%, hit 60.5%, MaxDD 7.1%** (equity 100 → 112.7 senza mai
+scavare). Tagli di robustezza (stake Kelly variabili -> P/L / STAKED):
+- **Bucket quota (LA combinazione vincente): 1.60–1.80 = +21.9% ROI su
+  55 bet (staked +18.5%), hit 65.5%** — e' il cuore del sistema.
+  1.30–1.45 +7.4% (n=44), 1.45–1.60 **−9.9% (n=49, il pantano: solo
+  12 con edge>=5pp)**, 1.60–1.80 +21.9% (n=55, 27 con edge>=5pp).
+- Casa +9.0% (n=171) vs Trasferta −4.6% (n=44, p-value 0.08: non
+  significativo ma orientato come la letteratura).
+- La combo 1.60–1.80 ∩ edge>=5pp e' POSITIVA in TUTTE le 4 stagioni
+  (n=25, +26.5% staked): consistente, non un anno fortunato.
+- Confronto con lo stato AGENTS dell'11/09 ("produzione: 0 bet, il
+  modello NON batte la closing line"): la differenza e' la FASCIA —
+  quel run misurava l'universo lungo (fino a 5.0). Sui SOLO favoriti
+  netti il gate e' positivo. ⚠️ Campione piccolo (215), staking Kelly
+  1/4 cap 1%, niente look-ahead; e il gate live richiede edge >= 3pp
+  (piu' selettivo del >= 5pp della combo migliore).
+- Campiono reale sul container (liquidita', --with-model): 26 favoriti
+  in fascia, 24/26 eseguibili (2 persi per profondita', −7.7%); edge
+  positivi sul favorito 22/113 (p90 +12.5pp); 0 segnali value completi
+  nel campione di 120 (la catena blend+fascia+EV+edge filtra tutto,
+  come atteso con 5pp reali rari). CSV delle bet: data/
+  historical_backtest_bets.csv (rigenerato col gate 1.30–1.80).
+- **Non e' stato cambiato nessun gate di produzione** (solo evidenza
+  di ricerca): eventuale restrizione futura della fascia live a
+  1.60–1.80 = decisione del proprietario.
+
+**3) SCADENZA RIGHE SX-* STALE (commit `d94bb6a`) — il buco crediti
+chiuso.** Misurato sul container: 44 match sx-* aperti, 38 in finestra
+(saldabili), **6 orfani fuori finestra da giorni** (batch 09/09 senza
+riga in `matches`): a ogni giro entravano in `missing` e provocavano
+`fetch_scores` (2 crediti) che NON li avrebbe mai trovati (la finestra
+the-odds-api e' di 3 giorni). Nuovo `tracker.expire_stale_sx_rows()`:
+- Riga SCADUTA = `match_id LIKE 'sx-%'`, `esito_finale IS NULL`,
+  kickoff (commence_time in `matches`) piu' vecchio di `SX_STALE_DAYS`
+  giorni (default **5**, letta a RUNTIME: env override senza redeploy)
+  e NESSUN risultato in match_results → chiusa come **push (P/L 0)**:
+  nessun verdetto inventato, solo lo stop ai costi.
+- **Ramo orfani**: righe sx-* senza `matches` usano `created_at` come
+  riferimento temporale (senza questo ramo le 6 righe del batch 09/09
+  resterebbero aperte per sempre).
+- Chiamata in CODA a `settle_sx_bets` (DOPO le fonti e i settle): se una
+  fonte ha appena salvato il risultato, la riga e' gia' chiusa col
+  verdetto vero — mai scadere una riga che una fonte stava per chiudere.
+  Ritorno: campo `expired` = {bets, predictions} nel dict del settlement.
+- Pausa settlement rispettata (0 righe scadute in pausa). Test: 18 in
+  test_sx_native_settlement (incl. orfani scaduta/non-scade, pausa,
+  SX_STALE_DAYS runtime).
+
+**4) STATO OPERATIVO 12/09 sera.** Wallet 35.9978 USDC (exposure 2.0 =
+le 2 bet del giorno), P/L live da ripartenza −3.13 USDC su 11 chiuse
+(3 vinte, 8 perse — le perse quasi tutte pre-cambio-strategia a quota
+3.0–4.35). Crediti the-odds-api ~450 con reset 01/10. Kill-switch live,
+settlement attivo, STAKE_CAP_HARD=0 (floor 1 USDC su wallet 38).
+
 ### Riavvio bot + fix contatore crediti (12/09/2026)
 
 **1) RIPRESA DELL'OPERATIVITA' (12/09, verificata sul container).**
