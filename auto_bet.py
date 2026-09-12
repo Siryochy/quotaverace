@@ -1128,7 +1128,11 @@ def run_today_bets(stake_eur: float | None = None,
 
     # --- FREQUENCY BOOST: con EV_MIN=0.02 + ODDS_MAX=2.00,
     # il bot trova piu' segnali = piu' profitto potenziale ---
+<<<<<<< HEAD
     logger.info("auto_bet: strategia FREQUENZA alta (EV_MIN=2%%, "
+=======
+    logger.info("auto_bet: strategia FREQUENZA alta (EV_MIN=2%, "
+>>>>>>> 68d15a3 (Strategy: FREQUENZA boost - EV_MIN 2%, ODDS_MAX 2.00, dynamic Kelly + odds movement + timing filter + exposure control)
                 "ODDS_MAX=2.00, dynamic Kelly)")
 
     # --- FASE 1: costruisci i candidati (guardie + stake, senza salvare) ---
