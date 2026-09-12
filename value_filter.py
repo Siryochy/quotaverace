@@ -122,6 +122,14 @@ MULTIPLA_MAX_STAKE_PCT = 0.01
 MULTIPLA_MAX_EV = 0.05
 
 
+def multipla_stake(bankroll: float, prob: float, odds: float) -> float:
+    """Stake per una multipla: 1/8 Kelly con cap 1% del bankroll."""
+    kelly = kelly_fraction(prob, odds, MULTIPLA_KELLY_FRACTION)
+    stake = bankroll * kelly
+    cap = bankroll * MULTIPLA_MAX_STAKE_PCT
+    return min(stake, cap)
+
+
 def kelly_fraction(prob: float, odds: float, fraction: float = KELLY_BASE) -> float:
     """Kelly Criterion frazionario (default: KELLY_BASE)"""
     if odds <= 1.0:
