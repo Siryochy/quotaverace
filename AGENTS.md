@@ -2102,3 +2102,52 @@ distinte, tutte "non saldabili con le regole attuali", nessuna silenziosa:
   minimo prudente per design, non un residuo del bug). Il log auto_bet ora
   recita "adaptive Kelly" (prima "dynamic Kelly").
 
+### Verifica settlement + orfani + copertura leghe (13/09/2026, sera)
+
+**1) ESITO DEL SETTLEMENT IN PRODUZIONE (giro manuale + automatico).**
+  Previsioni aperte **107 → 92**, bet aperte **2 → 1** (l'unica rimasta e' una
+  live di Serie A con kickoff posticipato), 139 risultati scaricati (39 nuovi
+  in `match_results`), costo **24 crediti** (410 → 386). Il settlement
+  automatico gira: `sx_signals_job` ogni 15' (percorso SX-native, gratis) +
+  watchdog. **0 delle 92 righe aperte ha un risultato in `match_results`**:
+  nessun disallineamento, il residuo e' tutto spiegato — 21 righe orfane +
+  1 OU senza riga in `matches`, ~34 in leghe fuori dal catalogo
+  the-odds-api, il resto partite future o oltre la finestra di 3 giorni.
+  ⚠️ Nota operativa: `sx_signals_job` puo' durare ~4-5 minuti e in quella
+  finestra fa scattare `auto_bet_job skipped: max running instances (1)`
+  (anti-sovrapposizione voluta; il giro si riprende al minuto dopo).
+
+**2) RIGHE ORFANE: NON RECUPERABILI, E ORA SCADONO TUTTE.** Le 21 righe
+  `sx-*` senza riga in `matches` (batch 09/09 e 10/09) **non hanno market_hash
+  sul ledger** (nessuna bet associata) ne' nomi squadra: `markets/find`
+  richiede gli hash e `markets/active` non le elenca piu' (eventi conclusi),
+  quindi **nessuna fonte puo' piu' saldarle**. Erano gia' coperte dal ramo
+  orfani di `expire_stale_sx_rows` (chiusura come push dopo `SX_STALE_DAYS`).
+  **Estensione 13/09**: il ramo orfani non e' piu' limitato a `sx-%` —
+  senza riga in `matches` mancano kickoff E nomi, quindi la riga e'
+  insaldabile con QUALSIASI prefisso (caso reale: la previsione OU
+  `6185eb4f...` del 01/09, rimasta senza partita e aperta da 12 giorni).
+  Le righe CON riga in `matches` restano intatte (refertabili, le chiude il
+  settle vero): test dedicati `test_orfana_non_sx_senza_matches_scade` e
+  `test_orfana_non_sx_con_match_non_scade` in test_sx_native_settlement.py.
+
+**3) COPERTURA LEGHE SCOPERte — VERIFICATO: NON AGGIUNGIBILI.** Chiamata
+  REALE a `/v4/sports` (costo **0 crediti**: l'endpoint non consuma quota,
+  remaining invariato a 386): 84 sport totali, 49 di calcio. **Colombia:
+  ASSENTE**; **Korea: solo `soccer_korea_kleague1`** (nessuna K League 2);
+  **Argentina: solo `soccer_argentina_primera_division`** (nessuna Nacional).
+  Quindi `Primera A`, `Primera Nacional`, `K2-League` non sono copribili —
+  non e' una scelta di crediti, la competizione non esiste nel catalogo.
+  Confermata la nota 12/09: **NON aggiungerle a `SPORTS_MAP`**. Le altre
+  label non mappate (`Division Profesional`, `LigaPro`, `First League`)
+  sono ambigue senza corrispondenza univoca (il resolver torna None per
+  prudenza: mai indovinare la competizione). Per queste leghe l'unico
+  percorso di settlement e' SX-native, e funziona solo per le righe con
+  market_hash sul ledger.
+
+**4) ETICHETTA LOG CORRETTA.** `auto_bet` stampava "strategia FREQUENZA
+  alta" (residuo del commit 13/09): ora dice "strategia favoriti netti
+  (EV_MIN=2%, ODDS 1.30-1.80, edge >= +3pp, adaptive Kelly)", con i valori
+  presi dalle costanti reali — cosi' un operatore che legge i log non puo'
+  credere attiva una strategia che non c'e' piu'.
+

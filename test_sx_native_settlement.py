@@ -331,6 +331,36 @@ class TestScadenzaRigheStale:
         assert res["expired"] == {"bets": 0, "predictions": 0}
         assert _bet_outcome("sx-ORF2") == (None, None)
 
+    def test_orfana_non_sx_senza_matches_scade(self, temp_db, monkeypatch):
+        """13/09: il ramo orfani NON e' piu' limitato a `sx-%`. Una riga
+        senza partita in `matches` (es. la previsione OU del 01/09 rimasta
+        senza match) e' insaldabile per costruzione — nessun kickoff, nessun
+        nome squadra da abbinare: scade come le altre invece di restare
+        aperta per sempre."""
+        monkeypatch.setenv("SX_STALE_DAYS", "2")
+        mid = "6185eb4fd80c8e430e49b2f45c4edd5a"
+        tracker.save_prediction(mid, "OU", "Over 2.5", 2.4, 0.42, 0.01,
+                                status="strong_value")
+        conn = tracker._get_conn()
+        conn.execute("UPDATE predictions SET created_at=datetime('now', "
+                     "'-6 days') WHERE match_id=?", (mid,))
+        conn.commit()
+        conn.close()
+        res = sx_signals.settle_sx_bets(provider=FakeSxSettle())
+        assert res["expired"]["predictions"] == 1
+        assert _pred_outcome(mid) == ("push", 0.0)
+
+    def test_orfana_non_sx_con_match_non_scade(self, temp_db, monkeypatch):
+        """Guardia opposta: con una riga in `matches` la partita e' ancora
+        refertabile per nome/lega, quindi la scadenza NON la tocca."""
+        monkeypatch.setenv("SX_STALE_DAYS", "2")
+        tracker.save_match("api-OLD9", "Serie A", "Alpha", "Beta",
+                           "2026-09-08T15:00:00Z")
+        tracker.save_prediction("api-OLD9", "1X2", "1", 1.7, 0.60, 0.04)
+        res = sx_signals.settle_sx_bets(provider=FakeSxSettle())
+        assert res["expired"] == {"bets": 0, "predictions": 0}
+        assert _pred_outcome("api-OLD9") == (None, None)
+
     def test_pausa_blocca_la_scadenza(self, temp_db, monkeypatch):
         monkeypatch.setenv("SX_STALE_DAYS", "2")
         tracker.save_match("sx-OLD3", "Primera A", "Alpha", "Beta",

@@ -796,11 +796,16 @@ def expire_stale_sx_rows() -> dict:
     quel match_id (se c'e' il risultato le fonti hanno gia' parlato: il
     settle normale la chiudera' col verdetto vero).
 
-    RAMO ORFANI (12/09): le righe sx-* SENZA riga in `matches` (batch 09/09:
+    RAMO ORFANI (12/09): le righe SENZA riga in `matches` (batch 09/09:
     niente nomi squadra, nessuna fonte puo' mai abbinarle) usano `created_at`
     come riferimento temporale — senza questo ramo resterebbero aperte per
     sempre E continuerebbero a finire in `missing` nel settlement (fetch_scores
     a credito sprecato).
+    Dal 13/09 il ramo orfani NON e' piu' limitato a `sx-%`: senza riga in
+    `matches` non esistono ne' kickoff ne' nomi squadra, quindi la riga e'
+    insaldabile per COSTRUZIONE con qualsiasi prefisso (es. una previsione
+    OU del 01/09 rimasta senza partita). Le righe CON riga in `matches`
+    restano invece intatte: sono refertabili e le chiude il settle vero.
 
     Ritorna {bets: n, predictions: m} (righe appena chiuse, 0 se in pausa).
     """
@@ -819,15 +824,18 @@ def expire_stale_sx_rows() -> dict:
             (cutoff,)).fetchall()}
         # Ramo orfani: nessuna riga in `matches` -> il kickoff non esiste,
         # usa la data di creazione della riga (bets + predictions, UNION).
+        # Nessun filtro sul prefisso: senza partita in `matches` la riga e'
+        # insaldabile con QUALSIASI fonte (i rami per nome/lega partono da
+        # `_sx_open_matches`, che fa JOIN su `matches`).
         stale |= {r[0] for r in c.execute(
-            "SELECT DISTINCT match_id FROM bets WHERE match_id LIKE 'sx-%' "
-            "AND esito_finale IS NULL AND created_at < datetime('now', ?) "
+            "SELECT DISTINCT match_id FROM bets "
+            "WHERE esito_finale IS NULL AND created_at < datetime('now', ?) "
             "AND match_id NOT IN (SELECT id FROM matches) "
             "AND NOT EXISTS (SELECT 1 FROM match_results r WHERE r.match_id = bets.match_id)",
             (cutoff,)).fetchall()}
         stale |= {r[0] for r in c.execute(
-            "SELECT DISTINCT match_id FROM predictions WHERE match_id LIKE 'sx-%' "
-            "AND esito_finale IS NULL AND created_at < datetime('now', ?) "
+            "SELECT DISTINCT match_id FROM predictions "
+            "WHERE esito_finale IS NULL AND created_at < datetime('now', ?) "
             "AND match_id NOT IN (SELECT id FROM matches) "
             "AND NOT EXISTS (SELECT 1 FROM match_results r WHERE r.match_id = predictions.match_id)",
             (cutoff,)).fetchall()}
@@ -849,9 +857,10 @@ def expire_stale_sx_rows() -> dict:
             if nb or np_:
                 conn.commit()
                 logger.warning(
-                    "expire_stale_sx_rows: %d bet e %d previsioni sx-* "
-                    "scadute (kickoff > %.0fgg senza risultato) chiuse come "
-                    "push — smettono di generare fetch_scores",
+                    "expire_stale_sx_rows: %d bet e %d previsioni "
+                    "scadute (> %.0fgg senza risultato: partita passata o "
+                    "assente) chiuse come push — insaldabili, smettono di "
+                    "generare fetch_scores",
                     nb, np_, stale_days)
         return {"bets": nb, "predictions": np_}
     finally:
