@@ -127,7 +127,7 @@ class TestValueFilterMarketGate:
         # quota della strategia resta vincolante.
         ok, _ = is_sane(0.60, 1.75, 0.05)
         assert ok
-        # Il test segue il cap REALE (dal 13/09 ODDS_MAX=2.00, prima 1.80):
+        # Il test segue il cap REALE (guardrail 11/09: ODDS_MAX=1.80):
         # una quota appena sopra il cap deve essere respinta.
         ok, reason = is_sane(0.55, ODDS_MAX + 0.05, 0.10)
         assert not ok and "quota troppo alta" in reason

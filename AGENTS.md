@@ -128,6 +128,11 @@ cd webapp && npm run build            # build Next.js
    vault senza mai vedere il valore — GitHub: PAT fine-grained → vault;
    Telegram: @BotFather). Vincolo custodito dal tripwire
    `test_secret_hygiene.py` (rompe se compare una credenziale in chiaro).
+8. **Push su `main` = deploy IMMEDIATO → prima di pushare controllare i
+   marker di conflitto**: `grep -rn "^<<<<<<<" *.py` deve essere vuoto. Il
+   13/09 un conflitto di merge committato in `auto_bet.py` ha messo giù
+   l'INTERA produzione (502, bot fermo, zero settlement) e nessuno se ne e'
+   accorto per ore. I test vanno eseguiti PRIMA del push.
 
 ## Segreti: vault cifrato (`secrets/`)
 
@@ -2031,4 +2036,69 @@ distinte, tutte "non saldabili con le regole attuali", nessuna silenziosa:
   `"remaining": 452`. Tripwire:
   `test_get_remaining_usa_la_lettura_piu_recente`,
   `test_get_remaining_senza_remaining_ts_usa_ts`.
+
+### Audit completo + 502 in produzione + guardrail ripristinati (13/09/2026)
+
+**1) PRODUZIONE GIU' (502): conflitto di merge COMMITTATO.** `origin/main`
+  conteneva le righe `<<<<<<< / ======= / >>>>>>>` dentro `auto_bet.py`
+  (commit `2c42baa`, dalla serie "FREQUENZA boost" `40deffb`/`742bb9f`/
+  `2c42baa`): il container crashava all'import → **502 su tutto** (bot fermo,
+  nessun settlement, nessuna puntata) e nessuna notifica Telegram (il bot e'
+  morto col container). `origin/main` differiva dal commit locale **SOLO** per
+  quelle 4 righe. Fix: merge risolto (commit `81f2bff`), con verifica che
+  l'albero finale sia IDENTICO al fix locale (`git diff --stat <fix> HEAD`
+  vuoto — il primo merge aveva ripreso il test vecchio, corretto con
+  `git checkout <fix> -- test_favourites_only.py` + `--amend`).
+  **Regola permanente (nuova regola 8):** prima di ogni push,
+  `grep -rn "^<<<<<<<" *.py` deve essere vuoto.
+
+**2) BUG REALE nel commit "FREQUENZA boost": `dynamic_kelly_stake` scalava
+  l'EV DUE VOLTE** (`frac = dynamic_kelly(ev, ...)` e poi
+  `ev_factor = ev/0.20`), quindi lo stake finiva **sempre** sul floor
+  dell'exchange: con wallet 38 USDC 0.07–0.35 → **1.00 USDC = 2.63% del
+  bankroll**, cioe' il CAP SEVERO 1%/2% e il fail-closed di `STAKE_CAP_HARD`
+  erano **di fatto disattivati** (fail-open silenzioso). Misura: bankroll 38 →
+  1.00; 100 → 1.00; 500 → 1.00–14.53 (solo con bankroll grande il floor
+  smetteva di mordere). **Ripristinato l'adaptive staking** (`adaptive_stake`,
+  cap severo rispettato), conservando timing filter (`get_optimal_timing`),
+  odds movement bonus (+20% stake su quota a -5%) ed exposure control
+  (`calculate_exposure`). Rimossa `dynamic_kelly_stake`;
+  `value_filter.dynamic_kelly` resta esportata (retrocompatibilita' test).
+
+**3) GUARDRAIL 11/09 RIPRISTINATI.** Il commit "FREQUENZA boost" aveva
+  rilassato le soglie **e anche le asserzioni del tripwire che le
+  proteggevano** (`assert ODDS_MAX <= 2.00`, `MARKET_EDGE_MIN >= 0.02` — col
+  docstring che continuava a dichiarare "1.30-1.80 / +3pp": il tripwire non
+  proteggeva piu' nulla). Ripristinati i valori della direttiva prudente:
+  - `ODDS_MAX` 2.00 → **1.80** (con `ODDS_MIN` 1.30 = fascia favoriti netti)
+  - `MARKET_EDGE_MIN` 0.02 → **0.03** (+3pp), `MARKET_EDGE_MODERATE` → **0.03**
+  - `MARKET_EDGE_STRONG` 0.04 → **0.05** (+5pp strong_value)
+  - `DEFAULT_LEAGUE_STRATEGY.min_edge` 0.02 → **0.03**
+  Tripwire riallineato: `test_risk_guards.TestFasciaFavoriti` asserisce
+  `ODDS_MAX == 1.80`, `MARKET_EDGE_MIN >= 0.03`, `MARKET_EDGE_STRONG >= 0.05`;
+  `test_edge_sotto_3pp_bocciato` (+1pp e +2pp bocciati, +3pp passa);
+  `test_value_filter` (`ODDS_MAX == 1.80`, `min_edge fallback 0.03`,
+  `test_quota_2_00_bocciata`). La webapp (`webapp/app/value/page.tsx`) diceva
+  gia' "1.30-1.80 / +3pp": ora e' di nuovo vero. ⚠️ Conseguenza ATTESA:
+  **meno segnali** (gate piu' selettivo) — e' la scelta prudente, non un bug.
+
+**4) ALTRI FIX.** Testi dei filtri Telegram derivati dalle costanti reali
+  (`bot.FILTRI_TXT` → "EV 2%-20% | Odds 1.30-1.80 | Edge ≥ +3pp | Kelly
+  frazionato | Cap 0.5-2%") invece che hardcoded; `historical_backtest._kelly_stake`
+  importava `KELLY_FRACTION` da `value_filter` (inesistente → ImportError),
+  ora usa la frazione locale.
+
+**5) VERIFICA FINALE (13/09).** Suite completa **1050 test verdi** su 63 file
+  (in lotti: la suite intera supera il timeout di 10' della shell — NON
+  utilizzabile in background, i processi figli vengono terminati), 0 marker di
+  conflitto, `compileall` OK. Produzione: `/api/health` **200**, scheduler +
+  tutti i job registrati, ensemble retrain **n=219** (Brier 0.0448, acc 0.982),
+  calibrazione isotonica **65 campioni OOF** (0.2691 → 0.2145), backup
+  integrity ok, kill-switch `effective: live` + `provider_ready: true`,
+  settlement NON in pausa, wallet SX **35.98 USDC**. Ledger: 38 bet (2 aperte,
+  entrambe live), 107 previsioni aperte, `match_results` 15.378,
+  `team_ratings` 661, `matches` 316. Contatore crediti **410**
+  (`get_remaining()`; `/api/credits` mostra ancora `remaining_min` 58 =
+  minimo prudente per design, non un residuo del bug). Il log auto_bet ora
+  recita "adaptive Kelly" (prima "dynamic Kelly").
 

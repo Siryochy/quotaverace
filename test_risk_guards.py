@@ -39,10 +39,13 @@ def _isolate_daily_stop(tmp_path, monkeypatch):
 class TestFasciaFavoriti:
     def test_odmins_e_edge_tripwire(self):
         import value_filter as vf
-        from market_calib import MARKET_EDGE_MIN
+        from market_calib import (MARKET_EDGE_MIN, MARKET_EDGE_MODERATE,
+                                  MARKET_EDGE_STRONG)
         assert vf.ODDS_MIN == 1.30
-        assert vf.ODDS_MAX <= 2.00         # favoretti + value moderati
-        assert MARKET_EDGE_MIN >= 0.02     # +2pp (frequenza alta)
+        assert vf.ODDS_MAX == 1.80         # favoriti netti (niente "pantano")
+        assert MARKET_EDGE_MIN >= 0.03     # +3pp minimo vs mercato
+        assert MARKET_EDGE_MODERATE >= 0.03
+        assert MARKET_EDGE_STRONG >= 0.05  # +5pp per strong_value
 
     def test_quota_sotto_il_minimo_bocciata(self):
         from value_filter import is_sane
@@ -52,13 +55,16 @@ class TestFasciaFavoriti:
         ok, _ = is_sane(0.80, 1.31, 0.048, market_prob=0.75)
         assert ok
 
-    def test_edge_sotto_2pp_bocciato(self):
+    def test_edge_sotto_3pp_bocciato(self):
         from value_filter import is_sane
-        # DEFAULT_LEAGUE_STRATEGY min_edge=0.02: +1pp non basta
-        ok, reason = is_sane(0.61, 1.65, 0.02, market_prob=0.60)
+        # Guardrail 11/09: +3pp minimo vs mercato (il fallback
+        # DEFAULT_LEAGUE_STRATEGY e' allineato a +3pp).
+        ok, reason = is_sane(0.61, 1.65, 0.02, market_prob=0.60)   # +1pp
         assert not ok and "non batte il mercato" in reason
-        # +2pp: OK con default
-        ok, _ = is_sane(0.62, 1.65, 0.03, market_prob=0.60)
+        ok, reason = is_sane(0.62, 1.65, 0.03, market_prob=0.60)   # +2pp
+        assert not ok and "non batte il mercato" in reason
+        # +3pp: OK
+        ok, _ = is_sane(0.64, 1.65, 0.05, market_prob=0.60)
         assert ok
 
 

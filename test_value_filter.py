@@ -127,9 +127,9 @@ class TestStrategiaSoloFavoriti:
         """Le soglie non devono tornare indietro senza una decisione esplicita."""
         import value_filter as vf
         from market_calib import MARKET_EDGE_MIN
-        assert vf.ODDS_MAX <= 2.00         # solo favoriti + value moderati
-        assert vf.ODDS_MIN >= 1.30         # fascia 1.30-2.00 (esclude pantano)
-        assert MARKET_EDGE_MIN >= 0.02     # edge minimo +2pp per leghe vincenti
+        assert vf.ODDS_MAX == 1.80         # favoriti NETTI (guardrail 11/09)
+        assert vf.ODDS_MIN >= 1.30         # fascia 1.30-1.80 (esclude pantano)
+        assert MARKET_EDGE_MIN >= 0.03     # edge minimo +3pp per leghe vincenti
         assert vf.FAVOURITES_ONLY is True
         assert vf.MIN_FAVOURITE_MARKET_PROB == 0.50
         # Test funzioni nuove
@@ -252,7 +252,7 @@ class TestStrategiaPerLega:
         strat = get_league_strategy("Serie A")
         assert strat["max_stake"] == 0.005  # fallback severo
         assert strat["kelly_mult"] == 0.5
-        assert strat["min_edge"] == 0.02     # abbassato per frequenza
+        assert strat["min_edge"] == 0.03     # allineato al guardrail +3pp
 
     def test_is_sane_league_filter(self):
         """Un segnale in Serie A viene rifiutato (ROI negativo)."""
@@ -269,8 +269,8 @@ class TestStrategiaPerLega:
                               league="Premier League")
         assert ok, f"Expected ok, got: {reason}"
 
-    def test_quota_2_00_ammessa(self):
-        """Quote 2.00 sono ammesse nella nuova fascia 1.50-2.20."""
+    def test_quota_2_00_bocciata(self):
+        """Guardrail 11/09: sopra 1.80 e' fuori strategia (pantano)."""
         from value_filter import is_sane
         ok, reason = is_sane(0.57, 2.00, 0.14, market_prob=0.52, league="Premier League")
-        assert ok, f"Expected ok, got: {reason}"
+        assert not ok and "quota troppo alta" in reason

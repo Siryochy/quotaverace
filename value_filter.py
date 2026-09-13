@@ -25,7 +25,7 @@ from market_calib import (
 #
 # Strategia corretta (basata sui dati):
 #   1) SOLO campionati con ROI positivo nel backtest
-#   2) Fascia quote ODDS_MIN-ODDS_MAX (default 1.30-2.00)
+#   2) Fascia quote ODDS_MIN-ODDS_MAX (default 1.30-1.80)
 #   3) Edge differenziato per efficienza lega
 #   4) Kelly adattivo per lega (kelly_mult + max_stake)
 #   5) Esclusione automatica leghe con CLV negativo cronico
@@ -33,9 +33,9 @@ from market_calib import (
 EV_MIN = 0.02            # +2% minimo (frequenza + profitto)
 EV_MAX = 0.20            # +20% massimo (oltre = anomalia)
 
-# Fascia quote: favoriti NETTI ma con piu' margine
-ODDS_MIN = 1.30          # quota minima: esclude i "pantano"
-ODDS_MAX = 2.00          # favoriti + value moderati (piu' segnali)
+# Fascia quote: favoriti NETTI (guardrail 11/09)
+ODDS_MIN = 1.30          # quota minima: sotto, il ritorno non paga il rischio
+ODDS_MAX = 1.80          # quota massima: sopra e' "pantano" o sfavorita
 
 # === DINAMIC KELLY ===
 # Stake proporzionale all'edge: piu' EV = piu' stake, meno rischio
@@ -85,10 +85,10 @@ STRATEGY_LEAGUES = {
 }
 
 # Fallback per leghe non in STRATEGY_LEAGUES (vietate per default)
-# NB: min_edge allineato a +2pp (13/09, "frequenza"): il fallback si applica
+# NB: min_edge allineato al guardrail 11/09 (+3pp): il fallback si applica
 # solo ai segnali con lega VUOTA — le leghe note ma non in STRATEGY_LEAGUES
 # vengono rifiutate prima da league_allowed.
-DEFAULT_LEAGUE_STRATEGY = {"min_edge": 0.02, "kelly_mult": 0.5, "max_stake": 0.005}
+DEFAULT_LEAGUE_STRATEGY = {"min_edge": 0.03, "kelly_mult": 0.5, "max_stake": 0.005}
 
 FAVOURITES_ONLY = True   # mantenere: evita sfavorite ad alta quota
 MIN_FAVOURITE_MARKET_PROB = 0.50   # prob. di mercato minima del favorito
@@ -203,7 +203,7 @@ def is_sane(prob: float, odds: float, ev: float,
     In piu' applica la STRATEGIA PER LEGA:
     - leghe non in STRATEGY_LEAGUES sono vietate
     - edge minimo differenziato per lega
-    - fascia quote 1.30-2.00
+    - fascia quote 1.30-1.80
     - odds_movement: se la quota scende > 5%, segnale +20% (sharp money)
     """
     # Lega vietata?
