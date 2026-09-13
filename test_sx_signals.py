@@ -20,10 +20,16 @@ def _pct(price: float) -> int:
     return int(SX_PROB_SCALE / price)
 
 
-def _raw_markets() -> list:
-    """3 mercati binari 1X2 coerenti per un evento finto."""
+def _raw_markets(league: str = "Italy Serie A") -> list:
+    """3 mercati binari 1X2 coerenti per un evento finto.
+
+    `league` e' parametrizzabile: dal 12/09 la strategia ammette segnali
+    SOLO nei campionati con ROI positivo, quindi i test che pretendono un
+    segnale salvato devono usare una lega ammessa (es. "English Premier
+    League" -> "Premier League").
+    """
     now = int(time.time())
-    base = {"sportId": 5, "leagueId": 999, "leagueLabel": "Italy Serie A",
+    base = {"sportId": 5, "leagueId": 999, "leagueLabel": league,
             "gameTime": now + 3600, "type": 1, "status": "ACTIVE",
             "teamOneName": "Alpha", "teamTwoName": "Beta"}
     legs = [("mkt1", "Alpha"), ("mkt2", "Tie"), ("mkt3", "Beta")]
@@ -109,8 +115,9 @@ def test_league_map_fuzzy():
 
 
 def test_scan_saves_value_signals(temp_db, monkeypatch):
-    """scan() con provider fake: salva match/analisi/predictions con
-    match_id sx-*, classifica il best esito e il candidato 1 esce value."""
+    """scan() con provider fake su lega AMMESSA: salva match/analisi/
+    predictions con match_id sx-*, classifica il best esito e il candidato
+    1 esce value."""
     monkeypatch.setattr(sx_signals, "expected_goals",
                         lambda h, a: (1.9, 0.8))
     monkeypatch.setattr(sx_signals, "prob_1x2",
@@ -121,7 +128,10 @@ def test_scan_saves_value_signals(temp_db, monkeypatch):
                         lambda model_prob, market_prob, price, league=None:
                         model_prob)
 
-    saved = sx_signals.scan(provider=FakeSxProvider())
+    # Lega AMMESSA dalla strategia per lega (Serie A e' esclusa per ROI
+    # negativo): il segnale value viene salvato nel ledger.
+    saved = sx_signals.scan(
+        provider=FakeSxProvider(_raw_markets("English Premier League")))
     assert len(saved) == 1
     sig = saved[0]
     assert sig["match_id"] == SX
@@ -137,7 +147,7 @@ def test_scan_saves_value_signals(temp_db, monkeypatch):
     na = conn.execute("SELECT COUNT(*) FROM match_analysis WHERE match_id=?",
                       (SX,)).fetchone()[0]
     conn.close()
-    assert mrow == ("Alpha", "Beta", "Serie A")
+    assert mrow == ("Alpha", "Beta", "Premier League")
     # Strategia solo favoriti (11/09): X e 2 non entrano nemmeno nel ledger.
     assert [p[0] for p in preds] == ["1"]
     assert dict(preds)["1"] == "strong_value"

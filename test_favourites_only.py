@@ -163,9 +163,11 @@ class TestStakeCapSevero:
 
     def test_cap_severo_blocca_gli_ordini_con_wallet_piccolo(self, temp_db,
                                                               monkeypatch):
-        """Wallet 38 USDC: con Dynamic Kelly lo stake e' 1 USDC (floor).
-        Con STAKE_CAP_HARD=0 il floor e' accettato: l'ordine parte da 1 USDC."""
+        """Wallet 38 USDC: cap 1% = 0.38 USDC, sotto il minimo ordine (1
+        USDC). Col cap severo nessun ordine parte (fail-closed) invece di
+        piazzare 1 USDC = 2.6% del bankroll."""
         import auto_bet
+        import adaptive_staking
         start = (datetime.now(timezone.utc) + timedelta(hours=3)) \
             .isoformat().replace("+00:00", "Z")
         tracker.save_match("cap1", "Premier League", "Osasuna", "Getafe", start)
@@ -175,19 +177,17 @@ class TestStakeCapSevero:
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 38.0)
-        # Dynamic Kelly restituisce il floor (1 USDC) con wallet piccolo
-        monkeypatch.setattr(auto_bet, "dynamic_kelly_stake",
-                            lambda bankroll, ev, frac, price: 1.0)
-        called = []
-        def _fill(*a, **k):
-            called.append(True)
-            return {"ok": True, "market_id": "m1", "selection_id": "s1",
-                    "price": 1.65, "stake": 1.0, "status": "FULLY_FILLED",
-                    "bet_id": "b1"}
-        monkeypatch.setattr(auto_bet, "_live_fill", _fill)
-        placed = auto_bet.run_today_bets(stake_eur=5.0)
-        assert len(placed) == 1  # ordine parte col floor 1 USDC
-        assert len(called) == 1
+        monkeypatch.setattr(
+            adaptive_staking, "adaptive_stake",
+            lambda **kw: {"stake": round(kw["bankroll"] * 0.01, 2),
+                          "reason": "cap 1%", "capped": True})
+
+        def _boom(*a, **k):
+            raise AssertionError("nessun ordine col cap severo")
+
+        monkeypatch.setattr(auto_bet, "_live_fill", _boom)
+        assert auto_bet.run_today_bets(stake_eur=5.0) == []
+        assert tracker.get_bets() == []
 
     def test_stake_cappato_per_tier(self):
         import adaptive_staking as st

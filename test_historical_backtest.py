@@ -37,7 +37,15 @@ from historical_backtest import (
 # Produce ~43-50 bet (verificato): il 90% sul mercato OU, il resto 1X2.
 # ---------------------------------------------------------------------------
 
-def _synthetic_matches(n_league: int = 60) -> list:
+def _synthetic_matches(n_league: int = 60, op=(2.2, 3.4, 3.2)) -> list:
+    """Dataset sintetico minimo.
+
+    `op` sono le quote di apertura usate come MERCATO: con i default
+    (2.20/3.40/3.20) il modello sui rating neutri non batte il mercato e
+    nessun candidato 1X2 passa il gate di strategia (EV >= 2%). I test che
+    pretendono bet 1X2 possono passare un `op` con un favorito mispriced
+    (es. 2.80), che il blend vede come valore.
+    """
     teams = [f"Team{i}" for i in range(12)]
     start = datetime(2022, 8, 1)
     matches = []
@@ -55,7 +63,7 @@ def _synthetic_matches(n_league: int = 60) -> list:
             matches.append(dict(
                 date=d, season="2223", bet=True, code=code, league=league,
                 home=home, away=away, sh=sh, sa=sa, ftr=FTR_MAP[ftr],
-                op=[2.2, 3.4, 3.2], cl=[2.1, 3.5, 3.3],
+                op=list(op), cl=[2.1, 3.5, 3.3],
                 ou_entry=[1.9, 1.9], ou_closing=[1.85, 1.95],
             ))
     return matches
@@ -318,8 +326,10 @@ class TestFlatStake:
 
 class TestNoOuNoUnder:
     def test_no_ou_nessuna_bet_ou(self):
-        res = run_backtest(_synthetic_matches(), ensemble=False,
-                           flat_stake=20.0, no_ou=True)
+        # op con il favorito casa mispriced: senza almeno un candidato 1X2
+        # value il test sarebbe vacuo (0 bet = nessuna bet OU, banalmente).
+        res = run_backtest(_synthetic_matches(op=(2.8, 3.3, 3.1)),
+                           ensemble=False, flat_stake=20.0, no_ou=True)
         assert res["status"] == "ok"
         assert res["n_bets"] > 0
         assert all(b["mercato"] != "OVER_UNDER_25" for b in res["_bets"])

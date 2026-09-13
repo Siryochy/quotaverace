@@ -82,25 +82,6 @@ KILL_SWITCH_VALUES = ("off", "sim", "live")
 # vero), in SIM la cassa. Env: DAILY_STOP_LOSS_PCT, DAILY_STOP_HOURS.
 DAILY_STOP_LOSS_PCT = float(os.getenv("DAILY_STOP_LOSS_PCT", "0.05"))
 DAILY_STOP_HOURS = float(os.getenv("DAILY_STOP_HOURS", "24"))
-
-def dynamic_kelly_stake(bankroll: float, ev: float, frac: float,
-                          price: float) -> float:
-    """Calcola lo stake con Dynamic Kelly.
-
-    stake = bankroll * frac * ev_factor, dove ev_factor scala
-    con l'edge (EV alto = stake piu' alto).
-    Se lo stake e' sotto il minimo ordine, usa MIN_STAKE_EUR
-    (floor accettato con STAKE_CAP_HARD=0).
-    """
-    if bankroll <= 0 or ev <= 0 or frac <= 0 or price <= 1.0:
-        return 0.0
-    # Ev_factor: scala da 0.1x a 1.0x in base all'edge
-    ev_factor = min(ev / 0.20, 1.0) if ev < 0.20 else 1.0
-    stake = bankroll * frac * ev_factor
-    # Usa il floor dell'exchange se lo stake e' sotto il minimo
-    if stake < MIN_STAKE_EUR:
-        return MIN_STAKE_EUR
-    return normalize_stake(stake)
 DAILY_STOP_FILE = DATA_DIR / "execution" / "daily_stop.json"
 
 # --- Correlation risk cap ---
@@ -1122,14 +1103,14 @@ def run_today_bets(stake_eur: float | None = None,
         _avg_clv = 0.0
 
     from tracker import bet_exists_open
-    from value_filter import (dynamic_kelly, detect_odds_movement,
-                                get_optimal_timing, calculate_exposure,
-                                MOVEMENT_BONUS_MULTIPLIER, EV_MAX)
+    from value_filter import (get_optimal_timing, calculate_exposure,
+                                MOVEMENT_THRESHOLD, MOVEMENT_BONUS_MULTIPLIER,
+                                EV_MIN, EV_MAX, ODDS_MIN, ODDS_MAX)
 
-    # --- FREQUENCY BOOST: con EV_MIN=0.02 + ODDS_MAX=2.00,
-    # il bot trova piu' segnali = piu' profitto potenziale ---
-    logger.info("auto_bet: strategia FREQUENZA alta (EV_MIN=2%, "
-                "ODDS_MAX=2.00, dynamic Kelly)")
+    # --- FREQUENCY BOOST: soglie lette dalle costanti di value_filter,
+    # cosi' il log non puo' divergere dalla strategia reale ---
+    logger.info("auto_bet: strategia FREQUENZA alta (EV_MIN=%.0f%%, "
+                "ODDS_MAX=%.2f, adaptive Kelly)", EV_MIN * 100, ODDS_MAX)
 
     # --- FASE 1: costruisci i candidati (guardie + stake, senza salvare) ---
     candidates: list[dict] = []
@@ -1171,28 +1152,39 @@ def run_today_bets(stake_eur: float | None = None,
                 continue
             logger.info("auto_bet: stake flat €%.2f per %s (%s)",
                         pick_stake, pick["match_id"], pick["esito_key"])
-        # Dynamic Kelly: stake proporzionale all'edge (EV alto = stake alto)
+        # Adaptive staking: stake dinamico (identico per SIM e live). Kelly
+        # frazionato (0.05-0.40 via env KELLY_MIN/MAX_FRACTION) con drawdown
+        # protection e confidence weighting (market_edge/status). Il cap per
+        # singola bet (STAKE_CAP_PCT 1%/2%) e il CAP SEVERO sono applicati a
+        # valle: il floor dell'exchange non deve MAI alzare lo stake sopra il
+        # cap (in quel caso l'ordine viene saltato).
         elif _adaptive:
-            ev = float(pick.get("best_ev", 0.0))
-            # Dynamic Kelly basato sull'edge
-            frac = dynamic_kelly(ev, EV_MAX, base_fraction=0.05)
-            # Odds movement bonus: se la quota scende > 5%, +20% stake
-            odds_move = pick.get("odds_movement", 0.0)
-            if odds_move <= -0.05:
-                frac *= MOVEMENT_BONUS_MULTIPLIER
+            as_result = adaptive_stake(
+                bankroll=_bankroll,
+                prob=(pick.get("best_ev", 0.0) + 1.0 / price) if price > 0 else 0.5,
+                odds=price, market_edge=pick.get("market_edge"),
+                status=pick.get("status", "value"),
+                peak_bankroll=_peak,
+                # CLV storico: conferma dell'edge -> stake piu' alto se
+                # stiamo battendo la closing line (wiring del segnale CLV).
+                has_clv_positive=(_avg_clv > 0.0))
+            pick_stake = as_result["stake"]
+            # Odds movement (sharp money): se il pick porta un movimento di
+            # quota <= -5% lo stake sale del 20% (resta dentro i risk cap).
+            odds_move = float(pick.get("odds_movement", 0.0) or 0.0)
+            if pick_stake > 0 and odds_move <= MOVEMENT_THRESHOLD:
+                pick_stake *= MOVEMENT_BONUS_MULTIPLIER
                 logger.info("auto_bet: %s odds MOVEMENT %.1f%% (sharp money) "
                             "+20%% stake", pick["match_id"], odds_move * 100)
-            pick_stake = dynamic_kelly_stake(
-                bankroll=_bankroll, ev=ev, frac=frac,
-                price=price)
             if pick_stake <= 0:
-                logger.info("auto_bet: dynamic Kelly = 0 per %s, salto",
+                logger.info("auto_bet: stake adaptive = 0 per %s (EV negativo), salto",
                             pick["match_id"])
                 continue
-            logger.info("auto_bet: stake dynamic Kelly €%.2f (frac=%.2f, "
-                        "EV=%.3f, timing=%0.1fh) per %s",
-                        pick_stake, frac, ev, timing["hours_before"],
-                        pick["match_id"])
+            logger.info("auto_bet: stake adaptive €%.2f (EV=%.3f, "
+                        "timing=%.1fh) per %s (%s)",
+                        pick_stake, float(pick.get("best_ev", 0.0) or 0.0),
+                        timing["hours_before"], pick["match_id"],
+                        as_result["reason"])
         else:
             pick_stake = normalize_stake(stake_eur_default)
         if pick_stake <= 0:

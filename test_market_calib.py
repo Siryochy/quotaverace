@@ -122,12 +122,14 @@ class TestValueFilterMarketGate:
         assert ok
 
     def test_sane_backward_compat(self):
-        from value_filter import is_sane
+        from value_filter import is_sane, ODDS_MAX
         # Senza market_prob il gate "favorito" non si applica, ma il cap
-        # quota della strategia solo-favoriti (11/09) resta vincolante.
+        # quota della strategia resta vincolante.
         ok, _ = is_sane(0.60, 1.75, 0.05)
         assert ok
-        ok, reason = is_sane(0.55, 2.00, 0.10)
+        # Il test segue il cap REALE (dal 13/09 ODDS_MAX=2.00, prima 1.80):
+        # una quota appena sopra il cap deve essere respinta.
+        ok, reason = is_sane(0.55, ODDS_MAX + 0.05, 0.10)
         assert not ok and "quota troppo alta" in reason
 
 

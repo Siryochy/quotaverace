@@ -15,7 +15,9 @@ from tracker import (init_db, log_signal, get_signals, get_performance_summary,
                      add_subscriber, remove_subscriber, get_subscribers, set_tier,
                      get_subscription, is_premium, is_notified, mark_notified)
 from odds_ingest import load_odds
-from value_filter import compute_ev, kelly_fraction, kelly_euro, filter_value_bets, is_sane, get_pro_stake
+from value_filter import (compute_ev, kelly_fraction, kelly_euro,
+                          filter_value_bets, is_sane, get_pro_stake,
+                          EV_MIN, EV_MAX, ODDS_MIN, ODDS_MAX, MARKET_EDGE_MIN)
 from surebet_scanner import scan_surebets
 from backtest import run_backtest
 from football_hist import run_sync
@@ -101,6 +103,14 @@ DISCLAIMER = (
     "permetterti di perdere. Se hai bisogno di aiuto, visita il portale ADM: "
     "[www.adm.gov.it](https://www.adm.gov.it)"
 )
+
+# Riga dei filtri mostrata all'utente: derivata dalle costanti REALI di
+# value_filter, cosi' non puo' piu' restare indietro rispetto alla strategia
+# (prima era hardcoded: diceva "Odds 1.30-1.80 / Edge +3pp / EV 2-15%" anche
+# dopo i cambi di strategia del 12-13/09).
+FILTRI_TXT = (f"EV {EV_MIN*100:.0f}%-{EV_MAX*100:.0f}% | "
+              f"Odds {ODDS_MIN:.2f}-{ODDS_MAX:.2f} | "
+              f"Edge ≥ +{MARKET_EDGE_MIN*100:.0f}pp | Kelly frazionato | Cap 0.5-2%")
 
 chat_bankrolls: dict[int, float] = {}
 
@@ -236,12 +246,13 @@ def format_segnale_pronto(home, away, lam_h, lam_a, bookmaker="Generico", bankro
         f"📈 *Probabilità:*\n   1: {p1*100:.1f}% | X: {px*100:.1f}% | 2: {p2*100:.1f}%\n\n"
         f"🎯 *SEGNALE:* {best_label}\n   Bookmaker: {bookmaker} | Quota: {best_quota:.2f}\n"
         f"   EV: {ev_percent:+.2f}%\n\n"
-        f"💰 *Kelly Pro (1/4 + cap 3%):*\n"
+        f"💰 *Kelly Pro (frazionato + cap per lega):*\n"
         f"   Bankroll: €{bankroll:.2f}\n"
-        f"   Kelly grezzo: {pro['kelly_pct']:.1f}% | Cap: €{pro['stake_cap']:.2f} (3%)\n"
+        f"   Kelly grezzo: {pro['kelly_pct']:.1f}% | Cap: €{pro['stake_cap']:.2f} "
+        f"({pro['stake_cap_pct']:.1f}%)\n"
         f"   *Stake finale: €{stake_euro:.2f}* ({pro['stake_pct_of_bankroll']:.1f}% bankroll)\n\n"
         f"🛡 *Filtri applicati:*\n"
-        f"   EV: 2%-15% | Odds: 1.30-1.80 | Edge ≥ +3pp | Kelly: 1/4 | Cap: 1-2%\n\n"
+        f"   {FILTRI_TXT}\n\n"
         f"{valore_label}\n{raccomandazione}\n\n📅 *Data:* oggi"
     )
     if extra_note:
@@ -321,7 +332,7 @@ async def cmd_setbankroll(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         amount = float(args[0].replace(",","."))
         set_bankroll(chat_id, amount)
-        await update.message.reply_text(f"✅ Bankroll: €{amount:.2f}\n\n🛡 Sistema Pro attivo:\n• Kelly 1/4 | Cap 1-2%\n• EV 2%-15% | Odds 1.30-1.80 | Edge ≥ +3pp", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Bankroll: €{amount:.2f}\n\n🛡 Sistema Pro attivo:\n• Kelly frazionato | Cap 0.5-2%\n• {FILTRI_TXT}", parse_mode="Markdown")
     except ValueError:
         await update.message.reply_text("❌ Numero non valido.", parse_mode="Markdown")
 
@@ -362,12 +373,12 @@ async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(
         "🔔 *Iscrizione attivata!* (piano: FREE)\n\nRiceverai:\n"
         "• Schedina mattutina alle 8:00\n"
-        "• Notifiche value bet (EV 2%-15%, Odds 1.30-1.80, Edge ≥ +3pp)\n"
+        f"• Notifiche value bet ({FILTRI_TXT})\n"
         "• Aggiornamenti pomeriggio e sera\n\n"
         "🛡 *Filtri Pro attivi:*\n"
-        "• Kelly 1/4 | Cap puntata 3%\n"
-        "• EV min +3% | EV max +15%\n"
-        "• Odds 1.30-1.80 (solo favoriti netti)\n\n"
+        "• Kelly frazionato | Cap puntata 0.5-2%\n"
+        f"• EV min +{EV_MIN*100:.0f}% | EV max +{EV_MAX*100:.0f}%\n"
+        f"• Odds {ODDS_MIN:.2f}-{ODDS_MAX:.2f} (solo favoriti netti)\n\n"
         "💎 *Premium* (segnali istantanei, strong value, surebet): "
         "`/premium` per info.", parse_mode="Markdown")
 
@@ -515,11 +526,12 @@ def enrich_odds_with_probs(odds_data):
 
 def format_value_bets(odds_data, bankroll=100.0):
     enriched = enrich_odds_with_probs(odds_data)
-    value_signals = filter_value_bets(enriched, ev_threshold=0.03)
+    value_signals = filter_value_bets(enriched, ev_threshold=EV_MIN)
     if not value_signals:
-        return "📊 *Value Bet Pro*\n\nNessun segnale che supera i filtri (EV 2%-15%, Odds 1.30-1.80, Edge ≥ +3pp)." + DISCLAIMER
+        return (f"📊 *Value Bet Pro*\n\nNessun segnale che supera i filtri "
+                f"({FILTRI_TXT})." + DISCLAIMER)
     msg = "📊 *VALUE BET PRO — Filtri attivi*\n"
-    msg += "🛡 EV: 2%-15% | Odds: 1.30-1.80 | Edge ≥ +3pp | Kelly 1/4 | Cap 1-2%\n"
+    msg += f"🛡 {FILTRI_TXT}\n"
     msg += "🎯 Bonus: confronto col mercato (devig power)\n"
     msg += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
     for sig in value_signals[:5]:
@@ -1391,7 +1403,7 @@ async def notify_job(context: ContextTypes.DEFAULT_TYPE, delayed: bool = False):
                 f"🏟 {sig['evento']}\n"
                 f"🎯 {sig['esito']} @ {sig['quota_decimale']:.2f} ({sig['bookmaker']})\n"
                 f"📈 EV: +{ev_pct:.2f}% | Stake ref: €{pro['stake']:.2f} ({pro['stake_pct_of_bankroll']:.1f}%)\n\n"
-                f"🛡 Filtri: EV 2%-15% | Odds 1.30-1.80 | Edge ≥ +3pp | Kelly 1/4 | Cap 1-2%\n\n"
+                f"🛡 Filtri: {FILTRI_TXT}\n\n"
                 f"💡 `/segnale` per analisi dettagliata"
             )
             for chat_id in subscribers:

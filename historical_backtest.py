@@ -577,8 +577,13 @@ class EnsembleBT:
 # ---------------------------------------------------------------------------
 
 def _kelly_stake(bankroll: float, prob: float, odds: float) -> float:
-    """Kelly 1/4 con cap 3% del bankroll (come value_filter.kelly_euro)."""
-    from value_filter import kelly_euro, KELLY_FRACTION
+    """Kelly 1/4 (KELLY_FRACTION del modulo) col cap di value_filter.
+
+    `KELLY_FRACTION` NON esiste piu' in value_filter (la strategia per lega
+    usa kelly_mult + max_stake): si importa solo `kelly_euro` e si passa la
+    frazione locale, altrimenti il backtest va in ImportError.
+    """
+    from value_filter import kelly_euro
     return kelly_euro(bankroll, prob, odds, fraction=KELLY_FRACTION)
 
 

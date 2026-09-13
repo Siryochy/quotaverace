@@ -25,9 +25,9 @@ from market_calib import (
 #
 # Strategia corretta (basata sui dati):
 #   1) SOLO campionati con ROI positivo nel backtest
-#   2) Fascia quote 1.50-2.20 (esclude i "pantano" 1.30-1.45)
+#   2) Fascia quote ODDS_MIN-ODDS_MAX (default 1.30-2.00)
 #   3) Edge differenziato per efficienza lega
-#   4) Kelly adattivo: +2% per PL/Bundesliga, +1.5% per altri
+#   4) Kelly adattivo per lega (kelly_mult + max_stake)
 #   5) Esclusione automatica leghe con CLV negativo cronico
 
 EV_MIN = 0.02            # +2% minimo (frequenza + profitto)
@@ -85,16 +85,15 @@ STRATEGY_LEAGUES = {
 }
 
 # Fallback per leghe non in STRATEGY_LEAGUES (vietate per default)
-DEFAULT_LEAGUE_STRATEGY = {"min_edge": 0.05, "kelly_mult": 0.5, "max_stake": 0.005}
+# NB: min_edge allineato a +2pp (13/09, "frequenza"): il fallback si applica
+# solo ai segnali con lega VUOTA — le leghe note ma non in STRATEGY_LEAGUES
+# vengono rifiutate prima da league_allowed.
+DEFAULT_LEAGUE_STRATEGY = {"min_edge": 0.02, "kelly_mult": 0.5, "max_stake": 0.005}
 
 FAVOURITES_ONLY = True   # mantenere: evita sfavorite ad alta quota
 MIN_FAVOURITE_MARKET_PROB = 0.50   # prob. di mercato minima del favorito
 KELLY_BASE = 0.015         # Kelly base frazionato (1.5% puro)
 MAX_STAKE_PCT = 0.02       # cap 2% del bankroll (era 1%)
-
-# PATCH CALIBRAZIONE bucket bassi (06/09)
-LOW_PROB_THRESHOLD = 0.40
-LOW_PROB_SHRINK = 0.85
 
 # PATCH CALIBRAZIONE bucket bassi (06/09): il gap residuo della config
 # 1X2-only e' sui pareggi/trasferte (bucket 0.3-0.4 = 54% del volume con
@@ -359,6 +358,9 @@ def get_pro_stake(bankroll: float, prob: float, odds: float,
     ev = compute_ev(prob, odds)
     sane, reason = is_sane(prob, odds, ev, league=league)
     stake = kelly_euro(bankroll, prob, odds, league)
+    # Cap della strategia per lega, in euro: usato dai formatter Telegram
+    # (`bot.format_segnale_pronto`) per mostrare il tetto reale applicato.
+    cap_pct = get_league_strategy(league)["max_stake"]
     return {
         "ev": ev,
         "ev_pct": ev * 100,
@@ -368,6 +370,8 @@ def get_pro_stake(bankroll: float, prob: float, odds: float,
         "kelly_pct": kelly_fraction(prob, odds) * 100,
         "stake_raw": bankroll * kelly_fraction(prob, odds),
         "stake": stake,
+        "stake_cap": bankroll * cap_pct,
+        "stake_cap_pct": cap_pct * 100,
         "stake_pct_of_bankroll": (stake / bankroll * 100) if bankroll > 0 else 0,
     }
 
