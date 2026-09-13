@@ -261,3 +261,151 @@ def test_tracker_get_leagues_with_open_rows_finestra(temp_db):
 
     leagues = tracker.get_leagues_with_open_rows()
     assert leagues == ["Serie A"]
+
+
+class TestRisparmioCreditiSettlement:
+    """13/09: la finestra di refertazione deve combaciare con quella della API
+    /scores, altrimenti si pagano chiamate che non possono saldare nulla."""
+
+    def test_finestra_allineata_alla_api_scores(self):
+        import odds_api
+        assert (tracker._settlement_window_days()
+                == int(odds_api.SCORES_DAYS_FROM))
+
+    def _settled_league(self, league, sport, tmp_path, age_hours):
+        """Lega con una riga CHIUSA da poco (entra solo per la verifica)."""
+        import json
+        import time
+        recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        mid = "h-" + league.replace(" ", "")
+        tracker.save_match(mid, league, "A", "B", recent)
+        tracker.save_bet(mid, "1X2", "1", None, None, 2.1, 10.0)
+        conn = tracker._get_conn()
+        conn.execute("UPDATE bets SET esito_finale='won', profit=1.1, "
+                     "settled_at=? WHERE match_id=?",
+                     (datetime.now(timezone.utc).isoformat(), mid))
+        conn.commit()
+        conn.close()
+        if age_hours is not None:
+            (tmp_path / f"toa_scores_{sport}.json").write_text(json.dumps(
+                {"ts": time.time() - age_hours * 3600, "payload": []}))
+
+    def test_verifica_periodica_leghe_senza_righe_aperte(self, temp_db,
+                                                        monkeypatch, tmp_path):
+        """Le leghe che entrano SOLO per la verifica di righe chiuse non si
+        ri-interrogano a ogni scadenza della cache punteggi (24h): con
+        l'intervallo di verifica (default 36h) una cache FRESCA le esclude dal
+        giro. Al 13/09 erano 14 leghe su 28 — meta' del costo di settlement."""
+        monkeypatch.setattr(tracker, "DATA_DIR", tmp_path)
+        monkeypatch.delenv("SETTLEMENT_HEAL_INTERVAL_HOURS", raising=False)
+        sport = odds_api.SPORTS_MAP["Serie A"]
+        self._settled_league("Serie A", sport, tmp_path, age_hours=2)
+        assert tracker.get_leagues_with_open_rows() == []      # cache fresca
+        self._settled_league("Serie A", sport, tmp_path, age_hours=40)
+        assert tracker.get_leagues_with_open_rows() == ["Serie A"]
+        # intervallo 0 = comportamento pre-13/09 (verifica a ogni scadenza)
+        assert tracker.get_leagues_with_open_rows(
+            heal_interval_hours=0) == ["Serie A"]
+
+    def test_lega_con_righe_aperte_sempre_interrogata(self, temp_db,
+                                                     monkeypatch, tmp_path):
+        """Controprova: una lega con righe APERTE si interroga sempre, anche
+        con cache punteggi fresca (il risultato serve per saldare)."""
+        import json
+        import time
+        monkeypatch.setattr(tracker, "DATA_DIR", tmp_path)
+        recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        tracker.save_match("op-1", "Serie A", "Inter", "Napoli", recent)
+        tracker.save_bet("op-1", "1X2", "1", None, None, 2.1, 10.0)
+        sport = odds_api.SPORTS_MAP["Serie A"]
+        (tmp_path / f"toa_scores_{sport}.json").write_text(json.dumps(
+            {"ts": time.time(), "payload": []}))
+        assert tracker.get_leagues_with_open_rows() == ["Serie A"]
+
+    def test_lega_fuori_finestra_non_interrogata(self, temp_db, monkeypatch):
+        """Una lega con sole righe aperte su partite FUORI dalla finestra
+        /scores non viene piu' interrogata: era la voce di spreco principale
+        (prima la finestra del pianificatore era 5 giorni vs 3 della API)."""
+        # 4 giorni fa: dentro la vecchia finestra (5gg), fuori da quella
+        # della API /scores (3gg) e da `daysBack` massimo.
+        old = (datetime.now(timezone.utc)
+               - timedelta(days=4, hours=1)).isoformat()
+        tracker.save_match("old1", "Serie A", "Inter", "Napoli", old)
+        tracker.save_bet("old1", "1X2", "1", None, None, 2.1, 10.0)
+        # controprova: con la vecchia finestra a 5 giorni veniva interrogata
+        assert tracker.get_leagues_with_open_rows() == []
+        assert tracker.get_leagues_with_open_rows(days_back=5) == ["Serie A"]
+
+
+class TestResiduoSettlement:
+    """Diagnosi del residuo: perche' ogni riga e' ancora aperta."""
+
+    def test_classifica_i_motivi(self, temp_db, monkeypatch, tmp_path):
+        monkeypatch.setenv("SETTLEMENT_WINDOW_DAYS", "3")
+        monkeypatch.setenv("SX_STALE_DAYS", "2")
+        monkeypatch.setattr(tracker, "DATA_DIR", tmp_path)
+        recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        # orfana senza riga in `matches` (e oltre la soglia stale)
+        tracker.save_prediction("orf-1", "1X2", "1", 1.7, 0.60, 0.04)
+        conn = tracker._get_conn()
+        conn.execute("UPDATE predictions SET created_at=datetime('now', "
+                     "'-6 days') WHERE match_id='orf-1'")
+        conn.commit(); conn.close()
+        # lega non mappata
+        tracker.save_match("m-unk", "Lega Inventata", "A", "B", recent)
+        tracker.save_prediction("m-unk", "1X2", "1", 1.7, 0.60, 0.04)
+        # fuori finestra
+        tracker.save_match("m-old", "Serie A", "Inter", "Napoli", old)
+        tracker.save_prediction("m-old", "1X2", "1", 1.7, 0.60, 0.04)
+        # futura
+        tracker.save_match("m-fut", "Serie A", "Roma", "Lazio", future)
+        tracker.save_prediction("m-fut", "1X2", "1", 1.7, 0.60, 0.04)
+        # refertabile
+        tracker.save_match("m-ok", "Serie A", "Milan", "Genoa", recent)
+        tracker.save_prediction("m-ok", "1X2", "1", 1.7, 0.60, 0.04)
+
+        res = tracker.settlement_residue()
+        assert res["open"] == {"bets": 0, "predictions": 5}
+        assert res["reasons"] == {"no_match_row": 1, "league_unmapped": 1,
+                                  "out_of_window": 1, "not_started": 1,
+                                  "awaiting_result": 1}
+        # Il pianificatore elenca le leghe dal ledger (anche quelle non
+        # mappate: le salta il chiamante, costo 0) — vedi estimated_credits.
+        assert res["leagues_to_query"] == ["Lega Inventata", "Serie A"]
+        assert res["leagues_to_query_mapped"] == ["Serie A"]
+        assert res["cost_open_driven"] == ["Serie A"]
+        assert res["cost_heal_only"] == []
+        # l'orfana e' oltre la soglia: DEVE essere contata (se >0 la scadenza
+        # automatica non sta girando)
+        assert res["overdue_orphans"] == 1
+        # senza cache scores la sola lega mappata costa 1 credito
+        assert res["estimated_credits"] == 1
+        # con la cache FRESCA il costo atteso scende a 0 (nessuna chiamata)
+        import json
+        import time
+        sport = odds_api.SPORTS_MAP["Serie A"]
+        (tmp_path / f"toa_scores_{sport}.json").write_text(json.dumps(
+            {"ts": time.time(), "payload": []}))
+        assert tracker.settlement_residue()["estimated_credits"] == 0
+
+    def test_residuo_vuoto_senza_righe_aperte(self, temp_db, monkeypatch,
+                                               tmp_path):
+        monkeypatch.setattr(tracker, "DATA_DIR", tmp_path)
+        tracker.save_match("m-x", "Serie A", "Inter", "Napoli",
+                           (datetime.now(timezone.utc)
+                            - timedelta(days=1)).isoformat())
+        tracker.save_prediction("m-x", "1X2", "1", 1.7, 0.60, 0.04)
+        tracker.save_result("m-x", "Serie A", "Inter", "Napoli", 2, 0, "")
+        tracker.settle_predictions()
+        res = tracker.settlement_residue()
+        assert res["open"] == {"bets": 0, "predictions": 0}
+        assert res["reasons"] == {"no_match_row": 0, "league_unmapped": 0,
+                                  "out_of_window": 0, "not_started": 0,
+                                  "awaiting_result": 0}
+        assert res["overdue_orphans"] == 0
+        # Nessuna riga aperta: la lega entra solo per la verifica periodica
+        # delle righe appena chiuse (non per saldare).
+        assert res["cost_open_driven"] == []
+        assert res["cost_heal_only"] == ["Serie A"]

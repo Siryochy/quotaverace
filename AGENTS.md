@@ -2151,3 +2151,64 @@ distinte, tutte "non saldabili con le regole attuali", nessuna silenziosa:
   presi dalle costanti reali — cosi' un operatore che legge i log non puo'
   credere attiva una strategia che non c'e' piu'.
 
+### Costo reale del settlement + diagnosi del residuo (13/09/2026, notte)
+
+**1) MISURATO: il settlement costava ~28 leghe/giorno, di cui META' per pura
+  verifica.** Un giro manuale reale e' costato **24 crediti** (410 → 386) —
+  valore in eccesso, perche' nella stessa finestra giravano anche gli altri
+  job. Il pianificatore sul DB di produzione (13/09) dice: **28 leghe
+  pianificate**, di cui **14 con righe aperte** (7 delle quali NON mappate →
+  saltate a costo 0) e **14 che entravano SOLO per la finestra di
+  verifica/heal** (tutte le grandi: PL, Serie A, La Liga, Bundesliga,
+  Ligue 1, Eredivisie, Brasileirao, CL, EL, Championship, Serie B,
+  Allsvenskan, Belgio, Brazil B). Poiche' la cache punteggi ha TTL 24h,
+  quelle 14 venivano riscaricate ogni giorno per ri-verificare righe GIA'
+  CHIUSE: era la voce di costo principale. Le leghe NON mappate
+  (`Primera A`, `Nacional`, `K2-League`, `Division Profesional`, `LigaPro`,
+  `First League`) erano gia' saltate PRIMA della chiamata → costo 0,
+  nessuno spreco da tagliare li'.
+
+**2) DUE LEVE DI RISPARMIO (env, zero redeploy di codice).**
+  - **Finestra di refertazione allineata alla API** (`SETTLEMENT_WINDOW_DAYS`,
+    default `3` = `odds_api.SCORES_DAYS_FROM`): il pianificatore usava **5**
+    giorni mentre `/scores` copre **3**, quindi una lega le cui uniche righe
+    aperte stavano a 3-5 giorni veniva interrogata (PAGATA) senza poter
+    saldare nulla. Ora `_settlement_window_days()` li tiene allineati e un
+    tripwire lo verifica.
+  - **Verifica periodica invece che a ogni scadenza cache**
+    (`SETTLEMENT_HEAL_INTERVAL_HOURS`, default **36**): una lega SENZA righe
+    aperte viene ri-interrogata solo se la sua cache punteggi e' piu'
+    vecchia dell'intervallo (prima: ogni 24h, cioe' ogni giorno). Con 0 si
+    torna al comportamento pre-13/09. Le leghe **con righe aperte si
+    interrogano sempre**, con cache fresca o no: il risultato serve per
+    saldare.
+  Sui numeri del 13/09: la popolazione di verifica passa da 1 fetch/24h a
+  1/36h (-33% su 14 leghe) → costo atteso da ~21 a ~16 crediti/giorno.
+
+**3) IL COSTO ORA E' MISURABILE E LEGGIBILE A COLPO D'OCCHIO.**
+  - **Log per giro** (`bot._update_results`): `settlement: N leghe
+    interrogate (M non mappate, saltate), K partite aggiornate, crediti
+    X -> Y (D usati)` — prima il consumo del settlement non era misurato da
+    nessuna parte (si leggeva solo il contatore globale).
+  - **`tracker.settlement_residue()`** rompe le righe aperte per MOTIVO:
+    `no_match_row` (insaldabile: niente kickoff ne' nomi), `league_unmapped`
+    (fuori catalogo/etichetta ambigua), `out_of_window` (partita piu' vecchia
+    della finestra /scores), `not_started` (futura), `awaiting_result`
+    (refertabile, risultato non ancora arrivato). Aggiunge il costo atteso
+    del prossimo giro (`estimated_credits`, conta solo le leghe mappate con
+    cache scaduta), lo split `cost_open_driven` / `cost_heal_only`, il
+    pianificatore (`leagues_to_query`) e **`overdue_orphans`**.
+  - **Esposto in `GET /api/health`** (campo `settlement`): il residuo non e'
+    piu' un numero opaco.
+  - **`overdue_orphans` DEVE essere 0**: sono righe insaldabili oltre la
+    soglia di scadenza. Se sale, la scadenza automatica (`expire_stale_sx_rows`)
+    non sta girando. **E' il controllo automatico dei 21 orfani `sx-*`**: la
+    verifica "dopo il 15/09" e' che questo campo resti **0** e che le righe
+    del batch 09/09 (18 righe, scadenza 14/09 23:03 UTC) e 10/09 (3 righe,
+    15/09 18:30 UTC) non siano piu' aperte.
+  Test: `test_settlement_watchdog.py` (`TestRisparmioCreditiSettlement`,
+  `TestResiduoSettlement` — allineamento finestra, controprova che la vecchia
+  finestra a 5gg le interrogava, verifica periodica vs cache fresca, lega con
+  righe aperte sempre interrogata, classificazione dei motivi, costo atteso
+  con cache fresca/scaduta, residuo vuoto).
+

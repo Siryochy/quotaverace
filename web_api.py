@@ -241,12 +241,23 @@ def _health_json(params=None):
     except Exception:
         quota = None
     creds = {"remaining": quota[0], "cache": quota[1]} if quota else None
+    # RESIDUO DI SETTLEMENT (13/09): perche' le righe restano aperte, per
+    # motivo, invece di un conteggio opaco. `overdue_orphans` DEVE essere 0:
+    # se sale, la scadenza automatica delle righe insaldabili non sta girando.
+    # `estimated_credits` = costo atteso del prossimo giro di refertazione.
+    settlement = None
+    try:
+        from tracker import settlement_residue
+        settlement = settlement_residue()
+    except Exception:
+        settlement = None
     # Refertazione e quote/CLV: the-odds-api (API-Football solo storico
     # ratings 2022-2024). Dal 06/09 l'ESECUZIONE passa dall'aggregatore
     # (execution_engine.py, BetInAsia BLACK/MollyBet). Il flag
     # betfair_enabled resta per compatibilita col frontend, sempre False.
     return {"status": "ok", "api_football_key": bool(os.getenv("API_FOOTBALL_KEY")),
-            "quota": creds, "betfair_enabled": False, "betfair": None}
+            "quota": creds, "settlement": settlement,
+            "betfair_enabled": False, "betfair": None}
 
 
 def _credits_json(params=None):

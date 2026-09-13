@@ -602,10 +602,22 @@ def _update_results():
         from sx_signals import league_to_sport as _league_to_sport
     except Exception:
         _league_to_sport = None
+    # MISURA DEL COSTO (13/09): i crediti the-odds-api sono la risorsa piu'
+    # scarsa del progetto, ma il loro consumo nel settlement non era mai
+    # stato misurato (si leggeva solo il contatore globale). Logghiamo il
+    # delta reale di questo giro: quanti crediti e quante leghe.
+    try:
+        from odds_api import get_remaining as _credits_left
+        _cr_before = _credits_left()
+    except Exception:
+        _credits_left = None
+        _cr_before = None
     updated = 0
+    skipped_unmapped = 0
     for lg in leagues:
         sport = SPORTS_MAP.get(lg) or (_league_to_sport(lg) if _league_to_sport else None)
         if not sport:
+            skipped_unmapped += 1
             logger.warning("_update_results: lega '%s' non mappata a uno sport "
                            "key the-odds-api — risultati non scaricati", lg)
             continue
@@ -619,6 +631,16 @@ def _update_results():
             save_result(m["id"], lg, m.get("home_team", ""), m.get("away_team", ""),
                         sh, sa, m.get("last_update", ""))
             updated += 1
+    if _credits_left is not None and _cr_before is not None:
+        try:
+            _cr_after = _credits_left()
+            logger.info(
+                "settlement: %d leghe interrogate (%d non mappate, saltate), "
+                "%d partite aggiornate, crediti %s -> %s (%d usati)",
+                len(leagues) - skipped_unmapped, skipped_unmapped, updated,
+                _cr_before, _cr_after, _cr_before - _cr_after)
+        except Exception:
+            pass
     if updated:
         logger.info("Risultati scaricati: %d partite aggiornate.", updated)
     # --- STEP 2: salda cassa, previsioni e puntate AUTO ---

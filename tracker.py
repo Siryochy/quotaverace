@@ -4,6 +4,7 @@ import logging
 import math
 import sqlite3
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -1486,8 +1487,65 @@ def _parse_ts_utc(s):
     return dt
 
 
+# Finestra di refertazione in giorni: DEVE combaciare con
+# `odds_api.SCORES_DAYS_FROM` (la API /scores restituisce ~3 giorni di
+# risultati e `daysFrom` ha massimo 3). Se le due finestre divergono, il
+# settlement interroga leghe che l'API non puo' piu' refertare: chiamate
+# PAGATE che non possono saldare nulla. Override: env SETTLEMENT_WINDOW_DAYS.
+SETTLEMENT_WINDOW_DAYS_DEFAULT = 3
+
+# Intervallo (ore) con cui ri-verificare le leghe SENZA righe aperte.
+# Quelle leghe entrano nel giro solo per la finestra di verifica/heal (un
+# punteggio corretto dopo la chiusura deve poter ri-saldare la riga): senza
+# questo intervallo verrebbero ri-interrogate a ogni scadenza della cache
+# punteggi (24h), cioe' OGNI GIORNO — misurato il 13/09: erano 14 leghe su
+# 28, meta' del costo di settlement. 0 = verifica a ogni scadenza cache
+# (comportamento pre-13/09). Override: SETTLEMENT_HEAL_INTERVAL_HOURS.
+SETTLEMENT_HEAL_INTERVAL_HOURS_DEFAULT = 36
+
+
+def _heal_interval_hours() -> float:
+    """Ore tra due verifiche di una lega senza righe aperte (0 = sempre)."""
+    try:
+        return max(0.0, float(os.getenv("SETTLEMENT_HEAL_INTERVAL_HOURS",
+                                        str(SETTLEMENT_HEAL_INTERVAL_HOURS_DEFAULT))))
+    except (TypeError, ValueError):
+        return float(SETTLEMENT_HEAL_INTERVAL_HOURS_DEFAULT)
+
+
+def _scores_cache_age_hours(sport) -> float | None:
+    """Eta' in ore della cache punteggi di uno sport (None = assente/illeggibile).
+
+    None e' trattato come "da scaricare": fail-open verso la verifica.
+    """
+    if not sport:
+        return None
+    f = DATA_DIR / f"toa_scores_{sport}.json"
+    if not f.exists():
+        return None
+    try:
+        data = json.loads(f.read_text())
+        return (time.time() - float(data.get("ts", 0))) / 3600.0
+    except Exception:
+        return None
+
+
+def _settlement_window_days() -> int:
+    """Giorni di risultati effettivamente refertabili dalla API /scores."""
+    try:
+        import odds_api
+        default = int(odds_api.SCORES_DAYS_FROM)
+    except Exception:            # dipendenza assente/errore: default prudente
+        default = SETTLEMENT_WINDOW_DAYS_DEFAULT
+    try:
+        return max(1, int(os.getenv("SETTLEMENT_WINDOW_DAYS", str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
 def get_leagues_with_open_rows(recent_settled_hours: int = 48,
-                               days_back: int = 5) -> list:
+                               days_back: int | None = None,
+                               heal_interval_hours: float | None = None) -> list:
     """Leghe con scommesse ATTIVE (o chiuse da poco) da refertare.
 
     Refertazione MIRATA del settlement (risparmio crediti the-odds-api): si
@@ -1497,16 +1555,31 @@ def get_leagues_with_open_rows(recent_settled_hours: int = 48,
       - predictions/bets chiuse da meno di `recent_settled_hours` (finestra
         di verifica: se l'API corregge un punteggio dopo la chiusura, il
         sanity check/heal del watchdog deve poterlo vedere e ri-saldare);
-      - solo partite iniziate da non piu' di `days_back` giorni (la API
-        scores the-odds-api copre ~2 giorni di risultati).
+      - solo partite iniziate da non piu' di `days_back` giorni — che di
+        default e' ESATTAMENTE la finestra `odds_api.SCORES_DAYS_FROM` (vedi
+        `_settlement_window_days`): una riga piu' vecchia della finestra non
+        e' refertabile da nessuna fonte, quindi interrogare la sua lega e'
+        una chiamata pagata che non salda nulla.
 
     Zero scommesse attive = zero chiamate fetch_scores per quella lega.
     Prima si interrogavano TUTTE le leghe con un segnale value negli ultimi
     3 giorni (get_leagues_with_signals): leghe con sole partite FUTURE o con
     righe chiuse da giorni venivano comunque interrogate ogni giorno,
     bruciando crediti senza saldare nulla.
+
+    Le leghe che entrano SOLO per la finestra di verifica/heal (nessuna riga
+    aperta) sono ri-interrogate con periodicità `heal_interval_hours`
+    (default `SETTLEMENT_HEAL_INTERVAL_HOURS`, 36h), non a ogni scadenza
+    della cache punteggi: senza quel limite erano ~metà del costo.
+
+    Misura del residuo e del costo atteso del prossimo giro:
+    `settlement_residue()`.
     """
     from datetime import timedelta, timezone
+    if days_back is None:
+        days_back = _settlement_window_days()
+    if heal_interval_hours is None:
+        heal_interval_hours = _heal_interval_hours()
     conn = _get_conn(); c = conn.cursor()
     try:
         # UNION ALL per non perdere le leghe presenti solo in uno dei ledger.
@@ -1528,12 +1601,13 @@ def get_leagues_with_open_rows(recent_settled_hours: int = 48,
     # non perdere la finestra di verifica/heal per un mero skew di fuso.
     recent = now - timedelta(hours=recent_settled_hours + 12)
     recent_max = now + timedelta(hours=36)
-    needed = set()
+    open_leagues = set()      # hanno una riga APERTA: si interrogano sempre
+    heal_leagues = set()      # entrano solo per la verifica di righe chiuse
     for league, commence, esito_finale, settled_at in rows:
         ts = _parse_ts_utc(commence)
         if ts is None:
             # Data non interpretabile: prudenza, la teniamo (come prima).
-            needed.add(league)
+            open_leagues.add(league)
             continue
         # Solo partite già iniziate di recente: quelle future non hanno
         # ancora un risultato da scaricare, quelle vecchie sono fuori dalla
@@ -1541,12 +1615,165 @@ def get_leagues_with_open_rows(recent_settled_hours: int = 48,
         if not (start <= ts <= now):
             continue
         if esito_finale is None:
-            needed.add(league)   # riga aperta da saldare
+            open_leagues.add(league)   # riga aperta da saldare
             continue
         st = _parse_ts_utc(settled_at)
         if st is not None and recent <= st <= recent_max:
-            needed.add(league)   # chiusa da poco: finestra di verifica/heal
+            heal_leagues.add(league)   # chiusa da poco: verifica/heal
+    needed = set(open_leagues)
+    for lg in heal_leagues:
+        if lg in open_leagues:
+            needed.add(lg)
+            continue
+        # Verifica periodica: solo se la cache punteggi e' piu' vecchia
+        # dell'intervallo (None = assente/illeggibile -> si scarica).
+        age = _scores_cache_age_hours(_league_to_sport(lg))
+        if age is None or age >= heal_interval_hours:
+            needed.add(lg)
     return sorted(needed)
+
+
+def _league_to_sport(league):
+    """Sport key the-odds-api per una lega del ledger, o None se non mappata.
+
+    Fail-safe: qualunque errore -> None (mai una sport key inventata).
+    `sx_signals` importa `tracker`, quindi l'import e' pigro (niente cicli).
+    """
+    if not league:
+        return None
+    try:
+        from odds_api import SPORTS_MAP
+        if league in SPORTS_MAP:
+            return SPORTS_MAP[league]
+    except Exception:
+        pass
+    try:
+        from sx_signals import league_to_sport
+        return league_to_sport(league)
+    except Exception:
+        return None
+
+
+def settlement_residue(window_days: int | None = None,
+                        stale_days: int | None = None) -> dict:
+    """PERCHE' le righe restano aperte: diagnosi del residuo di settlement.
+
+    Rompe le righe aperte (bet + previsioni) per MOTIVO, cosi' il residuo e'
+    leggibile a colpo d'occhio invece di essere un numero opaco:
+
+      no_match_row    nessuna riga in `matches`: niente kickoff ne' nomi
+                      squadra, quindi NESSUNA fonte puo' abbinarla — la
+                      chiude la scadenza come push (`overdue_orphans` conta
+                      quelle gia' oltre la soglia: DEVE restare 0);
+      league_unmapped lega senza sport key the-odds-api (fuori catalogo o
+                      etichetta ambigua): nessun download possibile;
+      out_of_window   partita iniziata da piu' di `window_days` giorni, fuori
+                      dalla finestra /scores: non piu' refertabile;
+      not_started     partita futura (il risultato non esiste ancora);
+      awaiting_result refertabile: la lega viene interrogata, il risultato
+                      non e' ancora arrivato.
+
+    `leagues_to_query`/`estimated_credits` = quello che il prossimo
+    `_update_results` interroghera' DAVVERO (stesso pianificatore
+    `get_leagues_with_open_rows`): la stima conta solo le leghe MAPPATE con
+    cache scores assente o piu' vecchia di `odds_api.ODDS_TTL` (le altre sono
+    servite dalla cache, costo 0). Il costo e' poi spaccato in
+    `cost_open_driven` (c'e' una riga da saldare) e `cost_heal_only`
+    (nessuna riga aperta: si paga solo per la verifica periodica).
+    """
+    from datetime import timedelta, timezone
+    if window_days is None:
+        window_days = _settlement_window_days()
+    if stale_days is None:
+        stale_days = _stale_days()
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT 'pred' AS kind, p.match_id, m.league, m.commence_time, "
+            "p.created_at FROM predictions p "
+            "LEFT JOIN matches m ON m.id = p.match_id "
+            "WHERE p.esito_finale IS NULL "
+            "UNION ALL "
+            "SELECT 'bet', b.match_id, m.league, m.commence_time, b.created_at "
+            "FROM bets b LEFT JOIN matches m ON m.id = b.match_id "
+            "WHERE b.esito_finale IS NULL").fetchall()
+    finally:
+        conn.close()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    window_start = now - timedelta(days=window_days)
+    stale_cutoff = now - timedelta(days=stale_days)
+    open_count = {"bets": 0, "predictions": 0}
+    reasons = {"no_match_row": 0, "league_unmapped": 0, "out_of_window": 0,
+               "not_started": 0, "awaiting_result": 0}
+    by_league: dict = {}
+    overdue = 0
+    refertabili: set = set()
+    for kind, _mid, league, commence, created in rows:
+        open_count["bets" if kind == "bet" else "predictions"] += 1
+        if league is None:
+            # Nessuna riga in `matches`: insaldabile per costruzione.
+            reasons["no_match_row"] += 1
+            ct = _parse_ts_utc(created) if created else None
+            if ct is not None and ct < stale_cutoff:
+                overdue += 1
+            continue
+        ts = _parse_ts_utc(commence) if commence else None
+        if ts is None:
+            # Data illeggibile/assente: `get_leagues_with_open_rows` tiene la
+            # lega "per prudenza", quindi la contiamo come refertabile.
+            reasons["awaiting_result"] += 1
+            refertabili.add(league)
+            by_league[league] = by_league.get(league, 0) + 1
+            continue
+        if not _league_to_sport(league):
+            reasons["league_unmapped"] += 1
+            continue
+        if ts > now:
+            reasons["not_started"] += 1
+            continue
+        if ts < window_start:
+            reasons["out_of_window"] += 1
+            continue
+        reasons["awaiting_result"] += 1
+        refertabili.add(league)
+        by_league[league] = by_league.get(league, 0) + 1
+    # Costo atteso del prossimo giro coi numeri del pianificatore vero: una
+    # lega costa 1 credito solo se la sua cache punteggi e' assente o piu'
+    # vecchia di ODDS_TTL (altrimenti la serve la cache, costo 0).
+    try:
+        planned = get_leagues_with_open_rows(recent_settled_hours=48,
+                                            days_back=window_days)
+    except Exception:
+        planned = sorted(refertabili)
+    try:
+        import odds_api
+        ttl_h = float(odds_api.ODDS_TTL) / 3600.0
+    except Exception:
+        ttl_h = 24.0
+    estimated = 0
+    for lg in planned:
+        sport = _league_to_sport(lg)
+        if not sport:
+            continue           # non mappata: saltata senza chiamata, costo 0
+        age = _scores_cache_age_hours(sport)
+        if age is None or age >= ttl_h:
+            estimated += 1
+    mapped = [lg for lg in planned if _league_to_sport(lg)]
+    open_driven = [lg for lg in mapped if lg in refertabili]
+    return {
+        "open": open_count,
+        "reasons": reasons,
+        "by_league": by_league,
+        "leagues_to_query": planned,
+        "leagues_to_query_mapped": mapped,
+        "cost_open_driven": open_driven,
+        "cost_heal_only": [lg for lg in mapped if lg not in refertabili],
+        "estimated_credits": estimated,
+        "overdue_orphans": overdue,
+        "window_days": window_days,
+        "stale_days": stale_days,
+        "heal_interval_hours": _heal_interval_hours(),
+    }
 
 def get_results_stats():
     conn = _get_conn(); _create_results_table(conn); c = conn.cursor()
