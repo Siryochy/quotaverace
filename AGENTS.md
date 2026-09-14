@@ -2400,3 +2400,104 @@ di staking tennis, `SUREBET_CRON_HOLD_SECONDS` solo sul cron) e
 Regola: dopo ogni modifica al file IaC o alle env da dashboard, girare
 `railway config plan` e pretendere **0 to destroy**.
 
+### Catena di decisione `decision/` (14/09/2026)
+
+Direttiva del proprietario: dare alla pipeline una struttura esplicita
+Signal → Risk → Stake, con kill switch come autorita' superiore e un feedback
+engine che registra tutto. **Decisioni prese**: (1) nuovo pacchetto `decision/`
+SOPRA i moduli esistenti (niente riscrittura di `auto_bet`); (2) il verdetto
+`review` = coda + approvazione umana su Telegram; (3) precedenza blocchi:
+**kill switch manuale > stop-loss giornaliero > pausa settlement**.
+
+**Perche' un orchestratore e non un motore in piu'**: la catena riprende
+moduli che esistono gia' (Signal = `sx_signals`/`fixture_engine` + `value_filter`
+e `market_calib`; Risk = i gate + i cap di `auto_bet`; Stake =
+`adaptive_staking`; Kill switch = `auto_bet_mode.json`/`daily_stop.json`/
+`settlement_paused`; Feedback = ledger `tracker` + `ml_ensemble` + `drift_monitor`),
+ma **ogni stadio ha un contratto** e le soglie vivono in un solo posto.
+
+**File**:
+- `decision/models.py` — contratti Pydantic: `Signal` (con `DataQuality`),
+  `RiskDecision`, `StakeDecision`, `KillSwitchStatus`, `DecisionRecord`
+  (`as_row()` = riga piatta per il feedback engine) e `ReasonCode`
+  (motivi machine-readable, mai prosa). `KILL_SWITCH_PRECEDENCE` e' la
+  precedenza decisa dal proprietario.
+- `decision/limits.py` — `RiskLimits.from_env()`: **nessun default copiato a
+  mano**, i valori si LEGGONO da `value_filter`/`market_calib`/
+  `adaptive_staking` (e dagli stessi env di produzione). `required_depth()`
+  riproduce max(stake x 2.0, 25 USDC).
+- `decision/kill_switch.py` — istantanea dei blocchi con sonde iniettabili.
+  Fail-safe in direzioni OPPOSTE e volute: modalita' illeggibile -> `off`
+  (fail-closed), stop-loss illeggibile -> non attivo (fail-open). La pausa
+  settlement NON blocca la bet: e' un `advisory` (blocca il referto/feedback).
+- `decision/risk_engine.py` — i gate in ordine (`kill_switch` per PRIMO) con
+  verdetto `approve`/`review`/`reject`; `tighten()` puo' solo ridurre un cap.
+  Include il gate di **qualita' dei dati**: copertura del modello sotto
+  `min_model_coverage` (default 0.5, env `DECISION_MIN_MODEL_COVERAGE`) ->
+  `review` con `DATA_QUALITY_LOW`. Un modello cieco (nessun rating, profilo
+  NEUTRO di lega) oggi arriverebbe a un ordine automatico; nella catena decide
+  un umano. ⚠️ Trovato scrivendo i test: la sola confidenza NON bastava
+  (copertura 0 + calibrato + edge forte = 0.60, sopra la soglia di review).
+- `decision/stake_engine.py` — Kelly frazionato scalato **UNA VOLTA** (blinda
+  il bug del 13/09 del doppio scaling), tre cap (tier/lega/risk: vince il piu'
+  stretto), cap severo fail-closed sotto il floor, controllo di liquidita'
+  relativo allo stake (max(stake x 2, 25 USDC)).
+- `decision/review_queue.py` — coda persistente su volume
+  (`DATA_DIR/decision/reviews.json`, env `DECISION_REVIEW_QUEUE`), scrittura
+  atomica, scadenza automatica al KICKOFF (mai approvare a partita iniziata),
+  idempotenza, lettura fail-safe (file corrotto -> coda vuota, non sovrascritto).
+- `decision/pipeline.py` — ordine fisso: kill switch -> risk -> [revisione] ->
+  stake; nessuno stake senza `approve`; `resolve_review()` chiude le revisioni
+  umane (approva+dimensiona, oppure rifiuta, oppure `REVIEW_EXPIRED`).
+- `decision/adapters.py` — **Signal Engine sui dati reali**: legge il ledger
+  (`matches` JOIN `predictions` LEFT JOIN `match_analysis`) con la STESSA
+  selezione di `auto_bet._today_value_picks` (status value/strong_value/
+  moderate, mercato 1X2, `esito_finale IS NULL`, finestra mobile 24h, ORDER BY
+  ev DESC) e produce i `Signal`. `model_prob` da `match_analysis.prob_1/X/2`
+  (pre-blend; se assente -> blend + warning `model_prob_assente`), `tier` dallo
+  `status` del ledger, copertura da `team_ratings` (`n_home`+`n_away`,
+  `model_coverage()` lineare con campione pieno a 8 partite), `confidence` da
+  `compute_confidence()` (pesi ESPLICITI in testa al file: gate superato 0.35,
+  copertura 0.30, calibrato 0.15, edge forte 0.10, libro profondo 0.10, CLV
+  ±0.05 — euristica dichiarata, da ricalibrare sul ledger).
+  **Sola lettura** (tripwire: nessun INSERT/UPDATE/DELETE nel sorgente) e
+  NIENTE rifiltro delle quote: la difesa in profondita' che in `auto_bet`
+  scartava in silenzio qui diventa un `ReasonCode` contabilizzabile
+  (`ODDS_TOO_HIGH`, `NOT_FAVOURITE`...). `conn`, `resolve` (nomi squadra) e
+  `depth_lookup` sono iniettabili: i test girano su un SQLite temporaneo con lo
+  schema di produzione. CLI: `venv/bin/python -m decision queue`.
+- CLI: `venv/bin/python -m decision demo [--bankroll N] [--mode live|sim|off]`
+  (tre scenari approva/review/reject, offline) e `... -m decision queue [--json]`.
+
+**Regole garantite da tripwire**: il `Signal` non contiene stakeholder ne'
+bankroll; il Risk Engine puo' solo stringere; il kill switch risponde prima di
+qualunque calcolo; `import decision` non carica `auto_bet`/`bot`/`tracker`.
+
+**Parita' con la produzione**: `test_decision_pipeline.py` confronta su una
+GRIGLIA di 54 casi il set dei `reject` del Risk Engine con i rifiuti di
+`value_filter.is_sane` — devono coincidere esattamente, cosi' il nuovo percorso
+non puo' divergere dal vecchio senza che un test lo dica.
+
+**Drift resa VISIBILE (non corretta)**: `adaptive_staking.MAX_STAKE_PCT` (env
+`STAKE_CAP_PCT`, **1%**) e' il cap che il BOT applica, mentre
+`value_filter.MAX_STAKE_PCT` (**2%**, commento "era 1%") e' quello mostrato dai
+tool schedina/`/value`. `RiskLimits` tiene entrambi (`cap_value`/`cap_display`)
+e `test_decision_limits.py` verifica che ciascuno segua la PROPRIA fonte: la
+divergenza resta visibile invece di nascondersi dietro un numero solo. Da
+decidere se allineare (e' una scelta di strategia, non un bug tecnico).
+
+**Test**: `test_decision_pipeline.py` (49), `test_decision_adapters.py` (20),
+`test_decision_review.py` (18), `test_decision_limits.py` (18) — **105 verdi,
+tutti OFFLINE** (nessun DB di produzione, nessuna rete, nessun provider: DB
+SQLite temporaneo e sonde/engine iniettati). Il test e2e
+`TestCatenaSuDatiReali` porta un ledger temporaneo da riga a `Signal` a
+verdetto: approve (rating pieni) / review (modello cieco) / reject (quota
+fuori fascia).
+
+⚠️ **NON e' collegato alla produzione**: `auto_bet` continua a usare il
+percorso attuale, quindi nessun ordine cambia finche' non si decide di
+sostituirlo. Prossimi passi: (1) persistenza del `DecisionRecord` per il
+feedback engine (tabella `decisions` in `tracker.py`, migrazione idempotente);
+(2) approvazione Telegram sulla coda (bottoni sulla voce di `ReviewQueue`);
+(3) collegamento in `auto_bet` con la parita' dei gate come rete di sicurezza.
+
