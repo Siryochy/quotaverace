@@ -2212,3 +2212,191 @@ distinte, tutte "non saldabili con le regole attuali", nessuna silenziosa:
   righe aperte sempre interrogata, classificazione dei motivi, costo atteso
   con cache fresca/scaduta, residuo vuoto).
 
+### Workflow agentico di ricerca su grafo (14/09/2026, `research_graph/`)
+
+Modulo NUOVO e INDIPENDENTE (non tocca tracker/bot/produzione, zero rete):
+workflow di ricerca a grafo con validazione IBRIDA (deterministica + semantica)
+e ciclo di retry con feedback strutturato, cap a **3 attempt**. Nasce come
+infrastruttura riutilizzabile per la ricerca (strategie 2026, CLV, devigging).
+
+- **Struttura**: `models.py` (schema Pydantic + stato), `providers.py`
+  (contratti `SearchTool`/`Validator` + Mock), `nodes.py` (i 4 nodi + terminali),
+  `graph.py` (mini StateGraph + wiring), `__main__.py` (demo con i mock).
+  Dipendenza nuova: **pydantic >= 2.0** (aggiunta a requirements.txt).
+- **Stato centrale** (`ResearchState`): `findings` (validati, cumulativi),
+  `raw_findings` (buffer del SOLO attempt corrente), `validation_feedback`,
+  `attempt`, piu' `attempts_log`, `node_trace`, `rejected`.
+- **Research Agent**: 1o giro = query generale; sui retry legge il
+  `validation_feedback` e genera query MIRATE (`queries_for_retry`: query
+  suggerite -> lacune -> problemi -> fallback deterministico), mai duplicati
+  (`state.add_query`). Errori del search tool catturati (fail-safe).
+- **Controlli deterministici (Pydantic)**: valida il buffer dell'attempt con
+  `Finding.model_validate` (campi obbligatori, confidence in [0,1], evidenza
+  >= 20 char), dedup su (claim, fonte) e minimo `MIN_FINDINGS` (2). Un payload
+  non conforme NON arriva mai all'LLM e produce un fail con indici/campi
+  respinti. I respinti non vengono ri-validati (un finding malformato non
+  avvelena i retry) e un retry senza query nuove non azzera il materiale gia'
+  raccolto.
+- **LLM Validator (semantico)**: riceve `ValidationRequest` (query, claim
+  richiesti, findings validati, attempt) e risponde `pass`/`fail` + feedback;
+  le uscite `dict`/stringa sono normalizzate con Pydantic (`coerce_verdict`),
+  un errore dell'adapter diventa un fail con feedback (fail-closed).
+- **Decision node**: `pass` -> finalize, `fail` -> retry, `fail` con
+  `attempt >= max_attempts` -> **hard_stop** (il cap sta nel router, non nei
+  nodi). Il verdetto `fail` SENZA feedback e' rifiutato alla costruzione:
+  il retry non puo' restare senza istruzioni.
+- **Engine**: `StateGraph` con edge semplici/condizionali, validazione del
+  wiring in `compile()` (nodo senza uscite, target inesistente, uscita
+  doppia) e tetto di nodi eseguiti (`max_steps`): un ciclo non protetto
+  SOLLEVA `GraphError` invece di girare. `run_research` e' fail-safe (errori
+  imprevisti -> `status="error"`, mai eccezioni al chiamante).
+- **Mock-first**: `MockSearchTool` (dict/callable/batch a copione, registra
+  `calls`) e `MockLLMValidator` (copione di verdetti, `requests`, default per
+  i casi ripetuti). Gli adapter reali si sostituiscono in
+  `build_research_graph(search=..., validator=...)` **senza toccare nodi ed
+  edge** (verificato da un test con adapter custom).
+- **Test** (`test_research_graph.py`, 40 verdi): i tre scenari richiesti
+  (stop immediato al 1o attempt; retry con feedback che guida query mirate e
+  passa al 2o; hard stop a 3 attempt con validator chiamato esattamente 3
+  volte) + schema Pydantic, dedup, retry senza query nuove, agnosticismo
+  provider, guardie dell'engine e fail-safe.
+- Demo: `venv/bin/python -m research_graph [retry|hard-stop|schema|all]`
+  (tutto sui mock: nessuna rete, nessun credito, nessun ordine).
+
+**Passo 1 — adapter di ricerca REALE (Exa)** (default `type: "neural"` dal
+14/09: e' l'unico tipo che restituisce `score`, vedi sotto) (`research_graph/exa_search.py`).
+Il contratto `SearchTool` implementato con ricerca web vera, zero dipendenze
+nuove (`requests` e' gia' nel progetto): `POST https://api.exa.ai/search`,
+auth `Bearer` con `EXA_API_KEY`, `contents: {highlights, text}`. Scelto con la
+Gravity Index perche' e' un motore pensato per agenti (risultati citabili;
+`highlights` = estratti dei soli token rilevanti, il materiale ideale per
+`Finding.evidence`). Mapping: `claim <- title`, `evidence <- highlights`
+(fallback testo troncato), `source <- url`, `confidence <- score` se in [0,1]
+altrimenti 0.5. FAIL-CLOSED senza chiave (`ExaSearchError`, nessuna ricerca
+inventata), errori HTTP/JSON -> eccezione (il nodo la registra, il cap degli
+attempt fa da rete), risposta senza `results` -> lista vuota (nessuna evidenza:
+fail deterministico -> retry mirato). I risultati senza titolo ne' url vengono
+scartati. Chiave SOLO da env o iniettata; `http_post` iniettabile -> test
+OFFLINE (trasporto finto). Verifica manuale reale:
+`venv/bin/python -m research_graph live "<query>"` (richiede `EXA_API_KEY`).
+
+**Passo 2 — persistenza del trace** (`research_graph/trace_store.py`).
+Ogni run (passato, hard stop o errore) lascia una riga JSONL append-only sul
+volume (`RESEARCH_TRACE_DIR`, default `DATA_DIR/research`): query, claim
+richiesti, status, attempt, findings/respinti, query usate, feedback di ogni
+giro, node_trace. `run_research(..., trace_store=TraceStore(path))` — la
+persistenza sta FUORI dal grafo (il workflow non cambia) ed e' FAIL-SAFE: una
+scrittura fallita finisce in `record["error"]` e non rompe mai la ricerca.
+Lettura/riepilogo: `iter_traces` (piu' recenti prima, righe corrotte ignorate,
+limite/finestra), `summary` (run, pass rate, attempt medi, tipi di feedback,
+top blocker), `format_report` (Telegram-friendly). CLI:
+`venv/bin/python -m research_graph.trace_store [--limit N] [--days N] [--json]`.
+La demo supporta `--trace [--trace-path PATH]`.
+
+**Passo 3 — adapter LLM REALE (Gemini)** (`research_graph/gemini_validator.py`).
+Il contratto `Validator` implementato con `google-genai` (gia' nel progetto,
+pattern di `ai_commander.py`), JSON mode e `GOOGLE_API_KEY` SOLO da env.
+`build_prompt` e' deterministico (query, claim numerati, ogni evidenza con
+fonte e confidenza) cosi' e' ispezionabile e testabile senza rete; il parsing
+(`extract_json` + `verdict_from_data`) e' difensivo: accetta code fence e testo
+attorno, schema piatto o annidato, normalizza i campi; una risposta
+ILLEGGIBILE non diventa mai un pass ma un fail con feedback (fail-closed),
+mentre un errore di trasporto solleva e il nodo lo converte in fail. Client
+iniettabile -> test offline con client finto; chiave mai nel prompt (tripwire
+dedicato). `RESEARCH_LLM_MODEL` per cambiare modello (default
+`gemini-3.6-flash`, come `ai_commander`).
+
+**Test**: `test_research_graph.py` (42), `test_research_exa.py` (22),
+`test_research_trace.py` (17), `test_research_gemini.py` (26) — **107 verdi
+offline** (`-m "not integration"`) e **109 verdi** con i due `integration`
+attivi (rete + quota, si accendono da soli quando `EXA_API_KEY` e
+`GOOGLE_API_KEY` sono configurate). Nessuna chiave in chiaro nei sorgenti
+(il tripwire `test_secret_hygiene.py` resta verde: le credenziali finte dei
+test sono marcate `fake/`).
+
+**Chiavi reali in esercizio (14/09/2026)** — gli adapter vedono davvero
+`EXA_API_KEY` e `GOOGLE_API_KEY`: verifica LIVE end-to-end
+`venv/bin/python -m research_graph live "<query>"` -> 5 pagine Exa, Gemini
+reale, verdetto `pass` al 1o attempt, `pagine raccolte: 5`; i due test
+`integration` passano (`pytest -m integration`: 2 verdi).
+⚠️ Due trappole verificate sul campo (da non ripetere):
+1) il progetto legge SOLO il `.env` nella ROOT del progetto
+   (`config.load_dotenv` usa il path del modulo, NON `find_dotenv`): una
+   chiave scritta in `$HOME/.env` NON viene mai letta — la variabile risulta
+   assente e l'adapter resta fail-closed. Verifica rapida senza stampare
+   valori: `exa_configured()` / `gemini_configured()`.
+2) `secrets_store.py vault --commit` NON fa merge: ricostruisce `vault.bin`
+   dai SOLI file plaintext presenti in `secrets/`, quindi CANCELLA i segreti
+   gia' cifrati (qui ne avrebbe distrutti 3 su 4). Per aggiungere un segreto:
+   merge esplicito (`load_vault()` -> aggiungi la voce -> risecrittura atomica
+   con `_fernet_from_master(_master_key())`, chmod 600) oppure mettere in
+   `secrets/` i file plaintext di TUTTE le voci prima del commit. `EXA_API_KEY`
+   e' entrata con il merge: il vault ora ha 5 segreti (API_FOOTBALL_KEY,
+   EXA_API_KEY, GITHUB_TOKEN, GOOGLE_API_KEY, QUOTAVERACE_BOT_TOKEN).
+   Backup del vault pre-modifica lasciato in `/tmp` (mai in `secrets/`: i
+   file non in `_SKIP_NAMES` verrebbero letti come plaintext e finirebbero in
+   `os.environ`).
+Con le chiavi presenti i due `integration` NON si saltano piu' nella suite
+completa (usano rete e quota): per un giro offline `-m "not integration"`.
+
+**Exa: default `neural` per avere confidence reali (14/09).** Il campo `score`
+(mappato su `Finding.confidence`) arriva SOLO con `type: "neural"`: col tipo
+`auto` il payload non lo contiene (verificato chiamando l'API: i campi del
+risultato sono favicon/highlights/id/image/publishedDate/text/title/url) e la
+confidence restava sempre `DEFAULT_CONFIDENCE` (0.5). Ora il default e'
+`neural` (`DEFAULT_SEARCH_TYPE`, override con l'env `EXA_SEARCH_TYPE`; nuovo
+`ExaSearchTool.resolved_search_type()`), e nella verifica live le confidence
+sono reali: 1.00 / 0.75 / 0.50 / 0.25 / 0.00 (Exa normalizza lo score sul set
+di risultati: l'ultimo puo' valere 0.0, ed e' accettato da `Finding`, che
+richiede solo 0 <= confidence <= 1). Per tornare al vecchio comportamento
+senza score: `search_type="auto"` (o `EXA_SEARCH_TYPE=auto`); con
+`search_type=""` il campo `type` viene omesso. Test: classe
+`TestTipoDiRicerca` in `test_research_exa.py` (default neural, env che cambia
+il default, esplicito che vince sull'env, tipo vuoto, score -> confidence).
+
+**Chiavi in produzione su Railway (14/09).** `EXA_API_KEY` e `GOOGLE_API_KEY`
+sono state impostate sul servizio `api` (ambiente production), lette dal VAULT
+e passate via stdin (`venv/bin/python secrets_store.py get NOME | railway
+variable set NOME --stdin --service api`): il valore non e' mai transitato in
+chat. Verificato SUL CONTAINER (dopo redeploy SUCCESS): `EXA_API_KEY` len 36
+sha12 `77620c539824`, `GOOGLE_API_KEY` len 53 sha12 `23099b012e46` (le stesse
+impronte di vault e locale), `/api/health` 200. Le due voci sono dichiarate in
+`.railway/railway.ts` (`researchEnv`, SOLO sul servizio `api`: il cron surebet
+non ne ha bisogno) insieme a `EXA_SEARCH_TYPE`, `RESEARCH_LLM_MODEL`,
+`RESEARCH_TRACE_DIR`, cosi' `railway config apply` non le distrugge.
+⚠️ Da sapere:
+- `research_graph/` NON e' ancora deployato (i moduli sono uncommitted):
+  sul container le env ci sono ma `import research_graph` da'
+  `ModuleNotFoundError` finche' il codice non viene push-ato su `main`.
+- C'erano DUE chiavi Google diverse (len 53 entrambe): la shell/`~/.env`
+  (`23099b012e46`) vinceva sulla vault (`f03990738182`) perche' `config` usa
+  `os.environ.setdefault`. Entrambe valide (verificate con una chiamata
+  Gemini reale), ma la doppia fonte era ambigua: il vault e' stato allineato
+  a `~/.env` e Railway usa ora quella, quindi vault = `~/.env` = Railway.
+- La riga `EXA_API_KEY` duplicata in `$HOME/.env` e' stata rimossa (backup in
+  `/tmp/home-env.bak-*`): il progetto la legge dal vault.
+- `railway config plan` FUNZIONA: la CLI 5.54.1 valuta il `.railway/railway.ts`
+  con l'SDK `railway@3.11.0` di `/home/siryo/node_modules`, che e' esattamente
+  l'ultima versione pubblicata (`npm view railway version` → 3.11.0). Nessun
+  pacchetto obsoleto da sistemare.
+  ⚠️ NON avvolgere il comando in un wrapper (`timeout 120 railway config plan`):
+  il check di compatibilita' dell'SDK (`assertMinimumIacCliVersion`) esegue
+  `$process.env._ --version` e pretende una terna x.y.z ≥ 5.42.1. Con `$_` =
+  `timeout` (`timeout (GNU coreutils) 8.32`) il check fallisce con
+  "This version of railway/iac requires Railway CLI 5.42.1 or newer": e' un
+  FALSO allarme, non c'entra col file IaC. Lanciare il comando nudo.
+
+**Drift IaC chiusa (14/09).** `railway config plan` segnalava 2 variabili
+DISTRUTTIVE (presenti su Railway ma non dichiarate nel file):
+`api.TENNIS_SANDBOX_ENABLED` — un `config apply` avrebbe SPENTO il sandbox
+tennis (scan+settle) — e `surebet.SUREBET_CRON_HOLD_SECONDS`; in piu'
+`surebet deploy.restartPolicyType` ("NEVER" → null: un apply avrebbe rimesso il
+restart su errore su un container-cron che DEVE uscire a fine scan). Corretto
+dichiarando con `preserve()` le variabili (`TENNIS_SANDBOX_ENABLED` piu' i limiti
+di staking tennis, `SUREBET_CRON_HOLD_SECONDS` solo sul cron) e
+`restartPolicyType: "NEVER"` nel blocco `deploy` del cron. Ora il piano e'
+**"0 to add, 1 to change, 0 to destroy"** (l'unico cambio e' il flag
+`config.isCreated` di api-volume, non distruttivo e gia' dichiarato nel file).
+Regola: dopo ogni modifica al file IaC o alle env da dashboard, girare
+`railway config plan` e pretendere **0 to destroy**.
+

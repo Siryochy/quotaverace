@@ -77,8 +77,34 @@ export default defineRailway(() => {
     // data/execution/liquidity_skips.jsonl) e finestra di allerta delle
     // soglie usate dal report.
     LIQUIDITY_SKIP_LOG: preserve(),
+    // Sandbox tennis (14/09): TENNIS_SANDBOX_ENABLED=1 è impostata a mano su
+    // Railway e NON era dichiarata qui → un `railway config apply` l'avrebbe
+    // CANCELLATA (spegnendo scan+settle del tennis). Dichiarata con preserve()
+    // come le altre; i limiti di staking (default di codice 0.10 / 0.02 / 25)
+    // sono elencati per lo stesso motivo, cosi' non spariscono se un giorno
+    // vengono tarati dall'esterno.
+    TENNIS_SANDBOX_ENABLED: preserve(),
+    TENNIS_KELLY_FRACTION: preserve(),
+    TENNIS_MAX_STAKE_PCT: preserve(),
+    TENNIS_MAX_STAKE_ABS: preserve(),
     // BETFAIR_* rimosse il 04/09: Betfair è fuori dall'architettura
     // (refertazione = API-Football, quote/CLV = the-odds-api, auto_bet SIM).
+  };
+
+  // Workflow di ricerca agentico (research_graph/, 14/09): adapter reali Exa
+  // (ricerca web) + Gemini (validazione semantica). Le credenziali stanno SOLO
+  // sul servizio `api` (il cron surebet non ne ha bisogno: privilegio minimo).
+  // preserve() come per le altre: senza dichiarazione un `railway config apply`
+  // le distruggerebbe. Manopole: EXA_SEARCH_TYPE (default `neural`, l'unico
+  // tipo Exa che restituisce `score` => confidence reale dei finding),
+  // RESEARCH_LLM_MODEL (default gemini-3.6-flash) e RESEARCH_TRACE_DIR
+  // (default DATA_DIR/research).
+  const researchEnv = {
+    EXA_API_KEY: preserve(),
+    GOOGLE_API_KEY: preserve(),
+    EXA_SEARCH_TYPE: preserve(),
+    RESEARCH_LLM_MODEL: preserve(),
+    RESEARCH_TRACE_DIR: preserve(),
   };
 
   const api = service("api", {
@@ -86,7 +112,7 @@ export default defineRailway(() => {
     build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" },
     replicas: { "ams": 1 },
     volumeMounts: { ["/app/data"]: { type: "volume", name: data.name, address: data.address } },
-    env: { ...sharedEnv, RAILWAY_DOCKERFILE_PATH: preserve() },
+    env: { ...sharedEnv, ...researchEnv, RAILWAY_DOCKERFILE_PATH: preserve() },
   });
 
   // Servizio CRON dedicato allo scanner surebet (surebet_engine.py).
@@ -100,7 +126,11 @@ export default defineRailway(() => {
   const surebet = fn("surebet", {
     source: github("Siryochy/quotaverace", { checkSuites: false }),
     build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile.surebet" },
-    deploy: { cronSchedule: "*/15 * * * *" },
+    // restartPolicyType NEVER: il container del cron ESEGUE e DEVE uscire a fine
+    // scan (vedi sopra). Era impostato solo sul servizio live, non nel file:
+    // senza questa riga un `config apply` lo avrebbe riportato al default
+    // (restart su errore = possibile loop di un scan che fallisce).
+    deploy: { cronSchedule: "*/15 * * * *", restartPolicyType: "NEVER" },
     volumeMounts: { ["/app/data"]: { type: "volume", name: surebetData.name, address: surebetData.address } },
     env: {
       ...sharedEnv,
@@ -113,6 +143,10 @@ export default defineRailway(() => {
       SUREBET_ODDS_TTL: "21600",
       SUREBET_MIN_REMAINING: "50",
       SUREBET_MIN_MARGIN: "0.005",
+      // Hold diagnostico del cron (default 0 = spento): presente su Railway
+      // ma non dichiarato → un `config apply` l'avrebbe cancellato. Solo qui,
+      // non nel servizio api (privilegio minimo).
+      SUREBET_CRON_HOLD_SECONDS: preserve(),
     },
   });
 
