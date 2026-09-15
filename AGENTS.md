@@ -2501,3 +2501,551 @@ feedback engine (tabella `decisions` in `tracker.py`, migrazione idempotente);
 (2) approvazione Telegram sulla coda (bottoni sulla voce di `ReviewQueue`);
 (3) collegamento in `auto_bet` con la parita' dei gate come rete di sicurezza.
 
+#### Passo 1 FATTO — persistenza del `DecisionRecord` + feedback engine (14/09/2026)
+
+La catena ora **lascia una traccia**: ogni `DecisionRecord` si scrive sul
+ledger `decisions` e la telemetria e' leggibile.
+
+- **`tracker.decisions`** (nuova tabella, migrazione idempotente
+  `_ensure_decisions_table`): una riga per decisione con input (mercato,
+  quota, prob modello/blend, copertura, calibrazione), verdetto + motivo
+  (`ReasonCode`), stake/cap applicati, revisione umana e poi ordine ed esito.
+  Colonne "late" (`order_id`, `order_status`, `esito_finale`, `profit`,
+  `settled_at`) in UPDATE usano `COALESCE`: ripersistere lo stesso record
+  **non cancella** ordine ed esito.
+  ⚠️ **L'ordine di `_ensure_decisions_table` conta** (tabella -> colonne ->
+  indici): creando gli indici prima della migrazione delle colonne,
+  `_get_conn` falliva all'avvio su un `decisions` vecchio/parziale — cioe'
+  avrebbe messo giu' il BOT al primo deploy su un DB gia' migrato. Trovato
+  dai test (`test_migrazione_idempotente_su_tabella_vecchia`).
+- **API tracker**: `save_decision(record)` (idempotente su `record_id`),
+  `get_decisions(closed/verdict/limit)`, `update_decision_order(record_id,
+  order)`, `settle_decisions()` (chiude **anche** `review`/`reject`: senza
+  l'esito degli scartati non si misura il gate; `profit` = P/L **per unita'
+  di stake**, il peso lo da' la colonna `stake`; rispetto di pausa settlement
+  e sanity check come gli altri ledger), `decision_stats()`.
+- **`decision/feedback.py`** (nuovo): il lato PERSISTENZA, **fuori** dalla
+  pipeline (che resta orchestratore puro, senza DB — stesso schema di
+  `TraceStore` in `research_graph`). `persist()`, `persist_many()`,
+  `attach_order()`, `settle()`, `stats()`, `snapshot()`, `format_report()`.
+  **Scritture fail-safe** (mai un'eccezione: la telemetria non deve fermare
+  una puntata, ritorna `{saved, error}` e logga) e **letture read-only**.
+  `store` iniettabile → i test girano su un ledger finto. Import di `tracker`
+  PIGRO dentro le funzioni: il tripwire "`import decision` non carica la
+  produzione" resta verde (`test_import_feedback_non_carica_tracker`).
+- **`DecisionRecord.as_row()`** esteso con `selection_label`, `provider`,
+  `approved_by`, `review_note` (era l'unico punto mancante per una riga
+  completa).
+- **CLI**: `venv/bin/python -m decision feedback [--json] [--settle]`
+  (`--settle` e' l'unica scrittura, opt-in).
+- **Metrica nuova per il feedback**: `decision_stats()["shadow"]` raggruppa
+  per verdetto le decisioni NON giocate e chiuse — cosa sarebbe successo:
+  e' il costo (o il risparmio) dei gate. Il `settled` delle giocate riporta
+  hit rate, ROI flat, **ROI pesato per stake** e `gap_pp` = pnl realizzato -
+  EV atteso (stessa convenzione di `predictions_summary`).
+
+**Test**: `test_decision_feedback.py` (28 verdi, offline, DB temporaneo) +
+105 dei quattro file `test_decision_*` e i focus `test_settlement_watchdog`,
+`test_sx_native_settlement`, `test_bets`, `test_predictions`, `test_dedup_ml`,
+`test_auto_bet*`, `test_web_api`, `test_secret_hygiene` — tutti verdi. Effetto
+in produzione: al prossimo deploy nasce la tabella `decisions` (vuota finche'
+la catena non viene collegata ad `auto_bet`: passo 3).
+
+### Command pattern + Fail Fast + Observability + shadow mode (15/09/2026)
+
+Quattro direttive del proprietario, una rifattorizzazione: **il motore di
+decisione non tocca piu' nulla** — emette comandi leggeri, li fa eseguire a
+gateway dedicati, si ferma al primo blocco di sicurezza e racconta tutto in log
+JSON strutturati. E' collegata alla produzione in **shadow mode** (nessun
+ordine reale cambia).
+
+**Decisioni prese dall'agente su indicazione del proprietario** (chieste prima
+di implementare): 1) la **pausa settlement NON blocca la puntata** (ferma
+referto e feedback engine, come deciso il 14/09); 2) il collegamento e' in
+**shadow mode**, non esecuzione reale (passo 3 completo solo dopo il confronto
+misurato); 3) **nessuna fixture di sviluppo**: i dati finti restano confinati
+nei test, la CLI continua a leggere il ledger vero.
+
+**1) COMMAND PATTERN** — nuovi moduli, tutti puri (nessun import di
+`tracker`/`auto_bet`/`bot` a livello di modulo):
+- `decision/commands.py`: `CommandKind` (`persist_decision` | `place_order` |
+  `notify_operators`), `Command` (dato serializzabile con `command_id`,
+  **`dedup_key` stabile** e `order` = posizione nell'ordine dichiarato
+  `COMMAND_ORDER`), payload **tipizzati** (`PlaceOrderPayload`,
+  `PersistDecisionPayload`, `NotifyPayload`) validati all'EMISSIONE, e
+  `CommandPlan` (record + comandi + eventuale blocco).
+- `decision/engine.py`: `build_plan()`/`emit_many()` → **solo comandi**. Ordine
+  non negoziabile: fail fast → risk → comandi. Tabella dei comandi per
+  verdetto: bloccato → persist+notify (1/giorno); reject → solo persist; review
+  → persist+notify; approve → persist (+ place_order SOLO se eseguibile e modo
+  `live`). In `sim` NIENTE `place_order`: il ledger delle puntate simulate
+  resta di `auto_bet`.
+- `decision/gateways.py`: `BaseGateway` (template: tempi + cattura eccezioni,
+  `_run()` da implementare), `LedgerGateway` (scrive su `decisions`),
+  `PlaceOrderGateway` (DELEGA ad `auto_bet._live_fill`: non reimplementare
+  l'esecuzione e' l'unico modo per non farla divergere dalla produzione;
+  `dry_run=True` per ispezionare), `NotifyGateway` (POST Telegram diretto,
+  `sender` iniettabile), `ShadowGateway` (vedi sotto). Nessun gateway solleva:
+  un errore diventa `CommandResult(ok=False)`.
+- `decision/dispatcher.py`: UNICO punto di esecuzione. Instrada ogni comando al
+  primo gateway che lo gestisce, apre uno **span per comando**, aggrega
+  `DispatchReport` (`executed/skipped/duplicated/errors/shadow`). `fail-soft`
+  per default (un comando fallito non blocca gli altri: l'audit precede
+  l'ordine), `raise_on_error=True` per la semantica fail-fast opposta.
+
+**2) FAIL FAST (`decision/guards.py`)** — catena unica e dichiarata:
+`SAFETY_CHAIN` = **manual (kill switch) > daily_stop > settlement_pause**, con
+`require_clear(kills, stage=...)` che **solleva `SafetyBlockError`** al primo
+blocco attivo (porta il `SafetyBlock` dentro: il chiamante non ricostruisce il
+motivo). Gli **stadi** rendono onesta la semantica: `betting` (kill switch,
+stop-loss) e `settlement` (pausa). Per lo stadio `betting` la pausa e' un
+**avviso** (`advisories()`), non un blocco. Nel motore il fail-fast e' reale:
+con un blocco attivo il record esce con **`stake is None`** (nessun calcolo a
+valle) e i comandi sono solo persist+notify. Direzioni fail-safe invariate:
+modalita' illeggibile → `off` (fail-closed), stop-loss illeggibile → non
+attivo (fail-open).
+
+**3) OBSERVABILITY (`decision/middleware.py`)** — eventi JSON con
+`request_id` (un giro), `trace_id` (un piano), `span_id` + `parent_span_id`
+(ogni passo), **`config_hash`** (impronta sha256 dei `RiskLimits` efficaci: le
+soglie cambiano da env, senza impronta due decisioni diverse sembrano uguali).
+`Observability.span()` emette `span.start`/`span.end` con `duration_ms` e
+`span.error` che **ri-solleva** (il fail-fast non si perde nel logging). Sink
+**configurabile** con `DECISION_LOG_SINK`: default JSONL sul volume
+(`data/decision/events.jsonl`), `stdout`, `off`, oppure un path. Un sink
+iniettato vince sull'env. **Rotazione automatica** oltre `DECISION_LOG_MAX_MB`
+(default 5 MB, 2 generazioni) — il job gira ogni 60s e un log senza limite sul
+volume non serve a nessuno. `redact()` maschera i campi sensibili. **Mai
+un'eccezione**: un sink rotto logga un warning (una volta) e la catena va
+avanti.
+
+**4) SHADOW MODE (`decision/shadow.py` + `auto_bet._shadow_run`)** — a ogni
+giro `auto_bet` valuta i segnali aperti anche con la catena nuova e **registra
+i comandi che emetterebbe**, senza eseguire nulla (`Dispatcher([ShadowGateway])`,
+`report.shadow=True`). Tre garanzie: (a) nessun effetto reale — niente ordini,
+niente Telegram, e **nessuna riga sul ledger `decisions`** (il job gira ogni
+60s: il ledger reale si riempirebbe di duplicati; il registro e' il JSONL
+`data/decision/shadow_commands.jsonl`, deduplicato per `dedup_key`, con dedup
+che sopravvive al riavvio leggendo la coda del file); (b) **zero crediti API**
+(legge solo il ledger locale, `depth_usdc=None` → nessuna lettura di libro;
+tripwire nei test che avvelena rete e socket); (c) **fail-safe totale** (una
+eccezione torna come `{"error": ...}`, mai verso `auto_bet`). Fail fast anche
+qui: con un blocco attivo esce **prima** di interrogare il ledger. Se non c'e'
+nessun segnale aperto esce **senza emettere eventi** (1440 giri/giorno di
+"nessun segnale" sarebbero solo rumore). Interruttore `DECISION_SHADOW`
+(default **attiva**: non esegue nulla). Lettura/report: `decision.shadow_summary()`
++ `venv/bin/python -m decision shadow`.
+
+**5) DATI MOCK NELLO SVILUPPO** — scelta "solo gateway di test": i finti
+vivono DENTRO i test (gateway in memoria, `fill`/`sender`/`persist` iniettati),
+nessuna fixture su disco, la CLI legge sempre il ledger reale. Nuovo
+**`conftest.py`** (autouse): `DECISION_LOG_SINK=off` e `DECISION_SHADOW_LOG`
+spostato nella `tmp_path` del test — senza isolamento una sessione di test
+lasciava **1051 eventi** in `data/decision/` (osservato durante il lavoro).
+Verifica end-to-end manuale (isolata con `QUOTAVERACE_DATA_DIR`, attenzione:
+NON e' `DATA_DIR`): 1 segnale → approve, comandi `persist_decision` +
+`place_order` (`would_order: true`, stake 20.0), ledger `decisions` **vuoto**.
+
+**CLI nuova**: `venv/bin/python -m decision status [--json]` (istantanea del
+fail-fast: catena, blocchi per stadio, avvisi, ripresa) e `... shadow [--json]
+[--limit N]` (registro shadow).
+
+**Bug reali trovati scrivendo i test** (tutti fixati): 1) `Observability.span`
+passava `name=` a `event()`, che ha gia' un parametro `name` → `TypeError` su
+OGNI span (il campo ora e' `span_name`); 2) `ShadowGateway` non dichiarava
+`dry_run`, quindi `DispatchReport.shadow` era sempre `False` (bug silenzioso:
+la shadow non si sarebbe distinta dall'esecuzione); 3) `GatewayError`
+costruito dai soli `CommandResult` perdeva i motivi senza risultato (comando
+senza gateway) → ora porta le stringhe d'errore; 4) `record_id` ha granularita'
+al SECONDO, quindi la `dedup_key` dell'ordine deve dipendere dalla partita, non
+dal record (un job ogni 60s avrebbe generato ordini duplicati) — test dedicato.
+
+**Test**: `test_decision_commands.py` (23), `test_decision_guards.py` (19),
+`test_decision_observability.py` (41), `test_decision_shadow.py` (22) — **105
+nuovi, tutti OFFLINE**; l'intero pacchetto `decision` = **236 verdi** (92s).
+Focus regressioni verdi:
+`test_auto_bet*`, `test_bot`, `test_settlement_pause`, `test_secret_hygiene`,
+`test_web_api`, `test_reports`.
+
+### Contratto di mercato `decision/market.py` (15/09/2026)
+
+**Perche'**: finora una quota entrava nel sistema come **dict anonimo** —
+chiavi diverse per provider, tipi non controllati, timestamp a volte senza
+fuso orario (la classe di bug che a valle costa: CLV su un istante ambiguo, il
+punteggio di una partita in corso usato come finale). Ora la quota e' un TIPO:
+`MarketQuote`.
+
+**Campi obbligatori (tutti richiesti, nessun default silenzioso)**:
+`schema_version` (dichiarata DAL PRODUTTORE, deve essere in
+`SUPPORTED_SCHEMA_VERSIONS`), `event_id`, `market`, `selection`, `odds`
+(**minimo 0.1**, finita), `timestamp` (UTC), `source` (provider), `gateway_id`
+(chi l'ha ingerita). Contesto facoltativo: `event_name`, `league`, `home`,
+`away`, `kickoff`, `selection_label`, `depth_usdc`. `extra="allow"`: i campi
+sconosciuti del feed NON si perdono (restano in `extra_fields`, ispezionabili)
+ma non allargano il contratto. Derivati: `quote_id` (identita' della
+RILEVAZIONE), `identity_key` (evento+mercato+esito, stabile nel tempo),
+`age_seconds()`, `to_signal_fields()` (il ponte verso il Signal: `outcome`
+compare solo per 1X2, il contratto non inventa esiti che il Signal non accetta).
+
+**Separazione struttura/strategia**: il contratto valida la FORMA (campi,
+tipi, quota >= 0.1, timestamp con fuso, coerenza mercato/selezione, versione
+schema); la STRATEGIA (fascia 1.30-1.80, EV, edge, cap) resta nel Risk Engine.
+Se il contratto conoscesse le soglie, ogni cambio di strategia sarebbe un
+cambio di schema.
+
+**Normalizzazione deterministica** (tabelle esplicite, mai fuzzy):
+`KEY_ALIASES` (nomi di chiave dei feed: `match_id`/`eventId` → `event_id`,
+`price`/`odd` → `odds`, `provider` → `source`, `version` → `schema_version`;
+**il nome canonico vince sempre**), `MARKET_ALIASES` (`h2h`/`Match Odds`
+→ `1X2`, `totals`/`Over/Under` → `OU`) e `SELECTION_ALIASES`
+(`home`/`casa`/`1` → `1`, `draw`/`tie` → `X`, `u` → `under`). Il confronto e'
+case-insensitive e ignora i separatori (`match_odds` = `Match Odds`).
+**Validazione incrociata `MARKET_SELECTIONS`**: `1X2`+`over` e `OU`+`2` sono
+RIFIUTATI — e' la classe del 09/09 (un `over` saldato su un 1X2).
+
+**Ingresso** (`parse_quote` strict, `validate_batch` non bloccante):
+- `parse_quote(row, gateway_id=..., source=..., schema_version=..., assume_utc=...)`
+  solleva `MarketQuoteError` con **tutti** i problemi (`issues` machine-readable,
+  `QuoteErrorCode`) e **logga ognuno**: una riga `logger.error` + un evento
+  JSON `market.quote_rejected` (con `error_code`, campo, gateway, source,
+  event_id). Un timestamp senza fuso dice come rimediare
+  (`assume_utc=True` se la fonte e' UTC); l'accettazione non emette eventi
+  (niente flood: `log_accepted=True` per averli).
+- `validate_batch(rows, ...)` = ingresso a LOTTI: accettate + respinte +
+  `by_code()`, **mai un'eccezione** (nemmeno con righe ostili), riepilogo
+  `market.batch_validated` + riga di log. Anti-flood: gli eventi di rifiuto si
+  fermano a `max_events` (20) e il resto finisce in `suppressed_events`.
+- `gateway_id`/`source`/`schema_version` passati come default di feed si
+  applicano **solo se assenti** nella riga: mai una sovrascrittura silenziosa.
+- Nei log NON finisce mai il payload intero: solo nome del campo e valore
+  troncato (`TRUNCATE`, 80 char).
+
+**CLI**: `venv/bin/python -m decision market [--file F | --stdin] [--gateway ID]
+[--source NOME] [--assume-utc] [--json]` — senza input valida due esempi
+integrati (uno conforme, uno respinto su 4 regole). Esce **1** se c'e' almeno
+un rifiuto (uso in script), **2** se il JSON non e' leggibile. La CLI usa un
+sink nullo: ispeziona i contratti, non scrive sul volume.
+
+**Bug reali trovati scrivendo i test**: 1) una riga ostile (un `Mapping` il cui
+`.get` solleva) faceva uscire l'eccezione dall'handler del lotto → la
+contabilita' del lotto ora non si fida del dato (`_safe_keys`/`_safe_get`);
+2) l'errore di lettura del file/stdin nella CLI era un traceback → ora messaggio
+pulito + exit 2.
+
+**Test**: `test_decision_market.py` — **114 verdi, tutti OFFLINE** (dati finti
+costruiti a mano, `ListSink` in memoria: **zero crediti API**); pacchetto
+`decision` = **350 verdi**. Focus regressioni verde: `test_secret_hygiene`,
+`test_auto_bet*`, `test_bot`, `test_risk_guards`, `test_web_api`.
+⚠️ Il contratto **non e' ancora usato da nessun feed**: e' il confine pronto per
+l'adapter SX/the-odds-api, da collegare quando si sostituira' l'esecuzione.
+
+### Gateway di mercato: SX Bet sorgente PRIMARIA + stop fino alla validazione (15/09/2026)
+
+**Direttiva del proprietario**: SX Bet come sorgente primaria dei dati di
+mercato, **refresh forzato del gateway PRIMA del Risk Engine**, blocco del
+sistema in caso di fallimento, tracciabilita' di `request_id`, `trace_id`,
+`gateway_id`, `schema_version` e `config_hash`, e **stop delle puntate
+automatiche mantenuto fino alla validazione** del feed.
+
+**`decision/feeds.py` (nuovo)** — chi porta dentro le quote:
+- `SxBetSource` (PRIMARIA): riusa la discovery di `sx_signals`
+  (`_discover` + `_books_parallel`: stessa pagina `/markets/active`, stesso
+  raggruppamento dei 3 mercati binari, stesso order book taker) con **import
+  pigro** — `import decision` resta leggero (tripwire). Provider iniettabile →
+  la suite e' OFFLINE. **Zero credenziali, zero crediti, zero ordini**; le
+  letture sono pubbliche.
+- `MarketFeed` (il gateway): sorgenti ordinate per priorita'
+  (`SOURCE_REGISTRY`, primaria da `DECISION_FEED_PRIMARY`, default `sxbet`;
+  **nome sconosciuto = nessuna fonte**, mai un ripiego silenzioso), contratto
+  validato all'ingresso con `validate_batch` (un'unica porta: nessuna sorgente
+  puo' aggirarlo), **refresh forzato** (`refresh(force=True)`; `--force` dalla
+  CLI), finestra di riuso `DECISION_FEED_REFRESH_MIN_SEC` (default 600s: il job
+gira ogni 60s e l'exchange va rispettato — "forzato" = *non usare una cache
+vecchia*, non *martellare*), stato su volume
+  (`DATA_DIR/decision/feed_state.json`, scrittura atomica).
+- `verify_feed()` (gate, puro): **fail-closed** in quest'ordine —
+  `FEED_MISSING` (nessun refresh) → `FEED_UNAVAILABLE` (nessuna sorgente ha
+  risposto, o quote non conformi al contratto) → `FEED_STALE` (oltre
+  `DECISION_FEED_MAX_AGE_MIN`, default 20) → `FEED_NOT_VALIDATED` (serie
+  incompleta) → `ok`. Il blocco e' una regola della stessa catena
+  (`SafetyBlock`, stage `market`, **precedenza 4**: dopo kill switch, stop-loss e
+  pausa settlement — un problema tecnico non scavalca mai un'autorita' umana).
+- **VALIDAZIONE = serie, non timbro**: `DECISION_FEED_MIN_REFRESHES` (3) refresh
+  consecutivi ok — "ok" = una sorgente ha risposto E zero quote respinte dal
+  contratto — **e** almeno una quota validata in totale (un feed vuoto non prova
+  nulla). Un fallimento azzera il contatore; lo stato sopravvive ai redeploy; un
+  file di stato CORROTTO vale come **non validato** (qui l'incertezza non deve
+  aprire le puntate).
+
+**Catena** (`engine.build_plan`): il gate di mercato sta **dopo le autorita' e
+prima del Risk Engine**. Con `MarketFeed` il refresh e' forzato DENTRO il motore;
+`emit_many` fa **UN refresh per giro** (non uno per segnale). Il default di
+`feed_required` segue l'ambiente (`DECISION_FEED_ENABLED`, ON): in produzione il
+gate e' obbligatorio, un `DECISION_FEED_ENABLED=0` esplicito lo disattiva (scelta
+loggata, non silenziosa). L'identita' del feed viaggia nel piano
+(`CommandPlan.market`) e su OGNI refresh viene emesso `feed.refreshed`/
+`feed.failed` con i 5 identificatori (`config_hash` = impronta dei limiti
+`RiskLimits`, come nel middleware).
+
+**Percorso d'ORDINE (`auto_bet._market_feed_gate`)**: e' li' che oggi si ordina
+davvero, quindi il gate vale anche li' — se il feed non e' valido il giro
+**non parte** (nessun ordine, nessuna riga sul ledger; vale anche per SIM, che
+alimenta ML/CLV). Fail-closed anche sulle eccezioni impreviste. Notifica admin
+una-volta-al-giorno (chiave `FEED_BLOCKED`, inserita dopo i controlli KS e
+stop-loss nel job). Cosi' **lo stop resta finche' il feed non e' validato**: non
+serve armare a mano, si riapre da solo alla validazione (o prima con la CLI).
+
+**CLI**: `venv/bin/python -m decision feed [--json] [--refresh] [--force]` —
+stato, validazione, freschezza e identificatori; `--refresh` esegue UN refresh
+reale (lettura pubblica SX). Exit 1 se il gate bloccherebbe le puntate. La CLI
+usa un sink nullo: ispeziona, non scrive eventi sul volume.
+
+**Verifica REALE dell'adapter (15/09, 12:37 UTC)**: `--refresh --force` → **81
+quote** conformi al contratto, 0 respinte, 27 eventi 1X2 in finestra (Coppa
+Italia, La Liga, Superettan...), `inv_sum` riportato come dato (1.0188),
+`market_hash` e `sport_x_event_id` nei campi extra; validato al 3° refresh
+consecutivo, gate `ok`. Esempio di quota: Genoa–Südtirol `2` @ 6.8966, depth
+279 USDC, kickoff UTC.
+
+**2 BUG REALI trovati scrivendo/verificando** (entrambi fixati):
+1) **Chiave del book SX**: l'order book espone il lato scommesso con la chiave
+   INTERA `1` (la `2` e' il complementare "Not X"), non con la stringa
+   dell'esito → il feed risultava **vuoto** col refresh vero (0 quote su 27
+   eventi). Ora legge `book.get(1)` come `sx_signals.scan`; se NESSUN book e'
+   leggibile la sorgente e' dichiarata **giu'** (`SourceUnavailable`) invece di
+   sembrare un mercato vuoto.
+2) **`secure_logging` corrompeva gli argomenti con un dict** (BUG DI
+   PRODUZIONE, pre-esistente): `logger.warning("... %s", dati)` con un dict fa
+   mettere il DICT in `record.args`; il filtro lo iterava come sequenza →
+   `TypeError: not all arguments converted during string formatting` alla
+   scrittura, cioe' un log che rompe l'handler (emerso da
+   `test_bot.py + test_decision_adapters.py` nello stesso processo). Ora i
+   mapping sono mascherati MANTENENDO il mapping (test dedicato in
+   `test_secure_logging.py`).
+
+**Test**: `test_decision_feed.py` (55, tutti OFFLINE con provider SX finto) +
+`test_auto_bet.py::TestGateDiMercato` (6: feed non validato/refresh
+fallito/nessuna sorgente → 0 puntate, `market_gate_status()`, errore imprevisto
+fail-closed, feed disattivato non blocca). Pacchetto `decision` = **405 verdi**;
+focus regressioni verde: `test_auto_bet*`, `test_bot`, `test_secure_logging`,
+`test_risk_guards`, `test_settlement_pause`, `test_web_api`.
+`verify_guardrails.py` resta offline (`DECISION_FEED_ENABLED=0`: la diagnostica
+non tocca la rete) e i 5 guardrail A-E continuano a bloccare.
+
+**Env dichiarate** in `.railway/railway.ts` (blocco `decisionEnv`, solo servizio
+`api`: il cron surebet non usa il pacchetto): `DECISION_FEED_ENABLED`,
+`DECISION_FEED_PRIMARY`, `DECISION_FEED_MAX_AGE_MIN`,
+`DECISION_FEED_MIN_REFRESHES`, `DECISION_FEED_REFRESH_MIN_SEC`,
+`DECISION_FEED_STATE`, `DECISION_SHADOW`, `DECISION_LOG_SINK`,
+`DECISION_LOG_MAX_MB`, `DECISION_SHADOW_LOG`, `DECISION_OBSERVABILITY`,
+`DECISION_MIN_MODEL_COVERAGE`, `DECISION_REVIEW_*`. `railway config plan` dopo
+la modifica: **0 to add, 1 to change, 0 to destroy** (l'unico cambio e' il flag
+non distruttivo di api-volume). ⚠️ Le env NON sono ancora su Railway: valgono i
+default di codice (feed ON, primaria sxbet, 3 refresh, 20 min, 600s).
+
+**⚠️ STATO OPERATIVO (verificato sul container il 15/09)**: `auto_bet_mode.json`
+= **`{"mode": "live"}`** (armato dal 12/09) e `settlement_paused.json` =
+`{"paused": false}`, `STAKE_CAP_HARD=1`, `DECISION_FEED_ENABLED` assente →
+feed ON di default. Con il codice attuale **il gate di mercato terra' ferme le
+puntate finche' il feed non e' validato** (3 refresh conformi consecutivi): la
+validazione si accumula da sola quando il percorso ordini gira, oppure a
+richiesta con `python -m decision feed --refresh --force` (lettura pubblica SX,
+**zero crediti** e nessun ordine) — utile per non aspettare i giri del job.
+Il kill switch resta un'autorita' superiore: `/autobet off` ferma tutto a
+prescindere dal feed.
+
+**⚠️ Stato**: in produzione la catena resta **shadow** (nessun ordine cambia).
+Restano da fare, in ordine: (a) ✅ coda revisioni su Telegram con bottoni
+approva/rifiuta e callback idempotenti (15/09, `decision/review_telegram.py`:
+vedi l'ultima sezione); (b) leggere il registro
+shadow dopo qualche giorno e confrontarlo con le puntate reali; (c) ✅ adapter
+di feed reale (`decision/feeds.py`, SX primaria) collegato al gate della catena
+E al percorso d'ordine; (d) **lasciar girare il feed fino alla validazione**
+(3 refresh conformi consecutivi) e poi leggere il registro shadow; (e) solo
+dopo, sostituire l'esecuzione di `auto_bet` col percorso Command (passo 3).
+Env nuove da dichiarare in `preserve()` di `.railway/railway.ts` prima di un
+`config apply`: `DECISION_SHADOW`, `DECISION_LOG_SINK`, `DECISION_LOG_MAX_MB`,
+`DECISION_SHADOW_LOG`, `DECISION_OBSERVABILITY`, `DECISION_MIN_MODEL_COVERAGE`,
+`DECISION_REVIEW_ENABLED`, `DECISION_REVIEW_QUEUE`, `DECISION_REVIEW_CONFIDENCE`.
+
+
+### Revisioni umane su Telegram: callback idempotenti (15/09/2026)
+
+Chiude il punto (a) dei prossimi passi della catena `decision/`: la coda delle
+revisioni (`reviews.json`) non era piu' un file che nessuno guardava — ora il
+verdetto `review` diventa un **messaggio con due bottoni** e il click e'
+idempotente.
+
+**Nuovo modulo `decision/review_telegram.py`** (nessun import di produzione a
+livello di modulo: `import decision` resta leggero, tripwire in
+`test_decision_review_telegram.py`):
+
+| pezzo | cosa fa |
+|---|---|
+| `callback_id(record_id, action)` | chiave `rv:<a\|r>:<token10>` **stabile** (funzione pura): lo stesso bottone ha sempre la stessa chiave, prima e dopo un redeploy. Il `record_id` NON viaggia nel callback (e' un digest): un payload manomesso non puo' puntare a una revisione arbitraria. |
+| `parse_callback(data)` | STRETTO: prefisso + azione + token validati; tutto il resto e' `CallbackError`. `is_ours()` distingue "non nostro" (silenzio) da "nostro malformato" (errore loggato). |
+| `CallbackStore` | store sul volume (`DATA_DIR/decision/review_callbacks.json`, env `DECISION_CALLBACK_STORE`), scrittura atomica: `resolved` (idempotenza) + `prompts` (anti-spam). Fail-safe: file corrotto = store vuoto e **non** sovrascritto; scrittura impossibile = `False`, mai un'eccezione. |
+| `build_prompt(entry)` | testo + tastiera inline (✅ Approva / ❌ Rifiuta). Pura: si ispeziona in un test senza Telegram. Mostra quota, mercato, blend, edge, EV, confidenza, **copertura ratings**, motivo, kickoff e modalita'. |
+| `send_prompts(...)` | invia i prompt agli admin (`ADMIN_CHAT_ID`), marca il prompt sullo store (idempotente): il job gira spesso e non ripete. Invio fallito → marker NON scritto (si ritenta). |
+| `handle_callback(data, ...)` | chiude la revisione: `pipeline.resolve_review` + `engine.plan_for_resolved` + `Dispatcher`. Ritorna SEMPRE un `ReviewOutcome` (mai un'eccezione). |
+| `answer_callback(query, ...)` | risponde alla callback query E modifica il messaggio (esito + bottoni rimossi). La risposta viene inviata anche sui duplicati: e' cio' che ferma i redelivery di Telegram. |
+
+**Idempotenza a tre livelli** (due click, un redelivery, un riavvio a meta'
+lavoro = UNA decisione, UN dispatch):
+1. la chiave e' stabile per costruzione;
+2. lo store ritrova la chiave risolta e restituisce l'esito invariato (nessuna
+   risoluzione, nessun dispatch);
+3. la coda e' idempotente per conto suo (`_decide` su una voce gia' decisa).
+
+In piu' il **claim prima, completamento dopo**: se il processo muore fra la
+decisione e il dispatch, al retry si trova un claim senza esito e NON si
+ri-dispatcha (meglio una revisione a meta', visibile, che due ordini). Un
+callback in `error` si sblocca SOLO a mano (`store.release`): l'idempotenza non
+si rompe da sola.
+
+**Nessuna esecuzione**: il set di gateway di default e' lo `ShadowGateway`.
+Il click attraversa tutta la catena (decisione, stake, comando d'ordine) ma
+*registra*: l'ordine che sarebbe partito finisce nel registro shadow, non
+sull'exchange. Per eseguire davvero servono gateway espliciti — oggi nessun
+chiamante di produzione li passa (e c'e' un test che lo verifica).
+
+**La coda non si allaga**: `ReviewQueue.add` ora deduplica anche per
+`signal_id`, non solo per `record_id` (che porta i secondi e quindi cambia a
+ogni giro del job): **una revisione per opportunita'**, e una voce gia' decisa
+(approvata o rifiutata) non torna a chiedere. Senza questo, il job ogni 60s
+avrebbe prodotto centinaia di copie dello stesso segnale.
+
+**Motore**: nuova `engine.plan_for_resolved(record)` — la mappa
+record → comandi scritta UNA volta (persist sempre; `place_order` solo se
+`approve` + eseguibile + `mode == live`). `build_plan` ora la usa per il
+percorso approve, cosi' il callback non puo' divergere dal motore.
+
+**bot.py**: `CallbackQueryHandler(review_callback_handler, pattern=r"^rv:")`
+(solo i nostri callback; solo admin), job `decision_review_job` ogni 5 min
+(`run_repeating`, `max_instances=1`) che invia i prompt, comando admin
+**`/revisioni`** (stato + chiavi per la CLI). `auto_bet._shadow_run` non cambia
+niente di operativo: la coda viene riempita dalla catena shadow (disattivabile
+con `DECISION_REVIEWS=0`), quindi l'approvazione di un verdetto shadow resta
+shadow.
+
+**CLI**: `venv/bin/python -m decision review [--json] [--all] [--limit N]`
+mostra i prompt in attesa con le chiavi; `--callback rv:a:<token>
+[--reviewer N --bankroll N --mode live]` SIMULA il click percorrendo la catena
+completa coi gateway shadow (idempotenza e mappa dei comandi verificabili senza
+Telegram); `--send` invia davvero (rete, scelta esplicita).
+
+**Verifica**: `test_decision_review_telegram.py` (**59 verdi, tutti OFFLINE**:
+client Telegram finto, store su tmp, nessuna rete/credenziale/ordine) +
+regressioni. Pacchetto `decision` = **462 verdi**. Smoke isolato end-to-end:
+segnale → `review` in coda → prompt con chiave `rv:a:...` → click →
+`stake 1.00`, comandi `persist_decision` + `place_order` **registrati** nel
+registro shadow; **secondo click → duplicato, un solo `place_order` nel
+registro**.
+
+**Bug trovati dai test (prima del deploy)**:
+1. `CallbackStore.load()` restituiva `{}` senza `resolved`/`prompts` → il primo
+   giro su un volume nuovo (o con file corrotto) andava in `KeyError`: ora la
+   struttura e' sempre ben formata (`_empty()`);
+2. **due test trappola sulla data** (non miei, pre-esistenti): `test_sx_signals`
+   (bet aperta con kickoff fisso 09/09 che, superati i 5 giorni di
+   `SX_STALE_DAYS`, veniva scaduta come push) e `test_settlement_sanity`
+   (partita "corrente" 31/08 fuori dalla finestra cassa di 14 giorni). Ora usano
+   date RELATIVE a `now`: un test che scadeva col calendario e' un falso allarme
+   che arriva sempre nel momento peggiore.
+
+**Env dichiarate** in `.railway/railway.ts` (`decisionEnv`, solo `api`):
+`DECISION_REVIEWS` (interruttore della coda) e `DECISION_CALLBACK_STORE`.
+`railway config plan`: **0 to add, 1 to change, 0 to destroy**.
+
+**⚠️ Resta shadow**: in produzione nessun ordine cambia. Il percorso ordini di
+`auto_bet` continua a girare e il gate di mercato (feed SX, 3 refresh conformi)
+resta l'autorita' sull'esecuzione. Prossimo passo: leggere il registro shadow
+dopo qualche giorno e decidere il passo 3 (sostituire l'esecuzione col percorso
+Command), con i bottoni Telegram gia' pronti a governare le revisioni.
+
+### Fix stop-loss sull'EQUITY + monitor del ritmo crediti (15/09/2026, sera)
+
+**1) BUG STOP-LOSS: scattava sull'ESCROW, non sulle perdite (fixato).**
+`auto_bet` leggeva `availableBalance` e lo usava come bankroll, poi
+`check_daily_stop()` misurava la perdita su quello. Ma `availableBalance`
+**esclude i fondi in escrow delle bet aperte**: piazzare una bet abbassa il
+disponibile e sembra una perdita. Prova sul volume: `start_bankroll 35.9779`,
+disponibile `33.9779`, exposure `2.0` → il -5.6% era **esattamente l'escrow**
+(equity reale 35.98, zero denaro perso). Timing: bet piazzate alle
+`18:59:15`/`18:59:16`, stop armato alle **`18:59:25`** — 9 secondi dopo, per
+24h: con ~34 USDC nel wallet bastavano **2 bet aperte** per bloccare il bot.
+- `_live_wallet_balance()` → **`_live_wallet_snapshot()`**: ritorna
+  `{"available", "exposure", "equity"}` (None se non leggibile/dry-run).
+  `equity = available + exposure` (l'esposizione arriva da
+  `get_balance()["exposure"]` = escrow + pending).
+- In LIVE il **bankroll del Kelly, la drawdown protection e lo stop-loss**
+  usano l'EQUITY; il **DISPONIBILE** resta il vincolo di cassa del singolo
+  ordine (`_spendable`): l'equity non si spende due volte.
+- `check_daily_stop(bankroll, basis=...)`: il motivo/log dichiara su quale
+  valore e' misurata la perdita ("equity wallet" in LIVE, "cassa" in SIM).
+- Se il provider non espone `exposure` la stima e' PRUDENTE (equity = solo
+  disponibile): lo stop puo' scattare prima, mai dopo (fail-closed).
+- `/autobet` mostra ora `equity (liberi + in gioco)` e il cap severo si
+  misura sull'equity (prima l'operatore leggeva un bankroll diverso da quello
+  usato dallo staking).
+- **`verify_guardrails.py` scenario C** aggiornato (36 liberi + 2 in gioco =
+  38 equity): i 5 guardrail A-E continuano a bloccare.
+- Tripwire: `TestBankrollEquity` in `test_auto_bet_live.py` (bet piazzata NON
+  arma lo stop — regressione del bug; perdita vera sull'equity arma ancora;
+  lo stake non supera i fondi liberi; snapshot da provider finto, senza
+  `exposure`, dry-run/errore → None) + `test_basis_dichiarato_nel_messaggio`
+  in `test_risk_guards.py`.
+
+**2) MONITOR DEL RITMO CREDITI (`odds_api.credit_burn_rate` +
+`credit_budget_status`).** Le soglie fisse (50/20/10/5) tacciono sopra 50 e
+avvisano quando il budget e' gia' compromesso; la media lunga mente (il 15/09
+la finestra a 340h diceva **15.5 crediti/giorno**, le ultime 24h ne dicevano
+**57.8**: la media includeva la pausa del settlement e il cambio di chiave).
+- `credit_burn_rate(window_hours=48)`: consumo MISURATO fra la lettura piu'
+  vecchia e la piu' recente della finestra (`remaining_ts`), con fallback
+  dichiarato sulla storia disponibile; None se i crediti risalgono (chiave
+  cambiata) o non c'e' niente da misurare.
+- `credit_budget_status()`: residuo, ritmo, `days_left`, `exhaustion_date`,
+  `sustainable_per_day` e **`alert`** = il ritmo esaurisce i crediti PRIMA del
+  reset. `CREDITS_RESET` (01/10) e `days_to_reset()` ora vivono QUI (prima la
+  data era duplicata in `web_api`).
+- **`credit_watchdog_job`** (ogni 6h): logga SEMPRE il ritmo e allerta
+  admin+iscritti con anti-spam 1/giorno (chiave `CREDIT_BURN`) quando il
+  budget non arriva al reset, elencando i costi da tagliare.
+- **`GET /api/credits`**: `remaining` = lettura AUTOREVOLE (l'ultima, la
+  stessa di `get_remaining`), `remaining_min` = diagnostica; `status` e
+  `sustainable_daily` seguono il valore vero (prima il MINIMO fra le cache
+  inchiodava il numero: 12/09 reale 452, mostrato 58). `estimated_daily_consumption`
+  e' il ritmo MISURATO (`consumption_source` = measured|heuristic),
+  `days_left_at_current_rate` la proiezione. Fix collaterale: la chiave sport
+  dei nomi cache lasciava il `.json` attaccato e non trovava il titolo lega
+  (`toa_scores_soccer_italy_serie_a.json` → 'Serie A').
+- Test: 7 nuovi in `test_odds_api.py` (ritmo recente, finestra vera nel
+  fallback, None se risalgono, nessun alert inventato, alert/non-alert con
+  `now` FISSO per non scadere col calendario) + `TestCredits` in
+  `test_web_api.py` (lettura autorevole, stato coerente, consumo misurato,
+  titolo lega, nessuna telemetria).
+
+**3) MISURA REALE SUL CONTAINER (15/09, sera) — dove vanno i crediti.**
+273 crediti residui, **27 chiamate `scores` in 24h (56 crediti = ~2.07 a
+chiamata), ZERO chiamate di rotazione quote**: il consumo e' **tutto
+settlement**, ~15-21 leghe con righe aperte riscaricate a OGNI giro del
+watchdog (ogni 4h, "le leghe con righe aperte si interrogano sempre"). A
+57.8/giorno i 273 crediti finiscono il **~20/09**, prima del reset (01/10,
+18.2/giorno sostenibili).
+⚠️ **`should_query_sport()` NON copre il settlement** (e' usato solo in
+`_get_odds`): sotto la soglia 50 la rotazione si riduce ma il costo dominante
+no. Leva proposta (decisione del proprietario, non applicata): dare alle
+leghe con righe aperte un intervallo minimo di refetch (es. 6-12h) o saltare
+le heur-only sotto soglia — il risultato di una partita non cambia fra un
+giro e l'altro, quindi la chiusura ritarda di ore senza costi aggiuntivi.
+
+**4) DEPLOY del lavoro del 15/09.** La catena `decision/` (command pattern,
+fail-fast, observability, shadow mode, contratto di mercato, feed SX, coda
+revisioni Telegram) era **installata ma inerte**: `origin/main` era fermo a
+`90a988a` (14/09) e 36 file erano non committati. Prima del push: 0 marker di
+conflitto, **1688 test offline verdi** (4 lotti, `-m "not integration"`),
+`compileall` OK. Dopo il deploy in produzione nascono `data/decision/` (eventi,
+registro shadow, coda revisioni) e la tabella `decisions`; il **gate di
+mercato** (feed SX, 3 refresh conformi) diventa l'autorita' sull'esecuzione e
+le revisioni si governano dai bottoni Telegram.

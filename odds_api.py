@@ -1,5 +1,5 @@
 import json, os, time, logging, requests
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from config import DATA_DIR, load_dotenv
 
@@ -553,3 +553,97 @@ def get_quota():
     if rem is None:
         return None
     return rem, n
+
+
+# --- BUDGET CREDITI: ritmo e proiezione (15/09/2026) ------------------------
+# Il rischio a meta' mese NON e' il livello dei crediti ma il RITMO: con 273
+# crediti e 15 giorni al reset si e' tranquilli solo se il consumo sta sotto
+# ~18/giorno. Le soglie fisse (50/20/10/5) avvisano quando e' tardi, e le
+# medie lunghe mentono (il 15/09 la finestra a 340h diceva 15.5/giorno mentre
+# le ultime 24h ne dicevano 58, perche' il cambio di chiave e la pausa del
+# settlement azzerano periodi interi). Qui si misura il consumo dalla
+# telemetria delle cache e si proietta la data di esaurimento.
+CREDITS_RESET = datetime(2026, 10, 1, tzinfo=timezone.utc)
+CREDIT_BURN_WINDOW_HOURS = 48.0
+
+
+def days_to_reset(now=None) -> int:
+    """Giorni (interi) al reset mensile del piano."""
+    now = now or datetime.now(timezone.utc)
+    return max(0, (CREDITS_RESET - now).days)
+
+
+def credit_burn_rate(window_hours: float = CREDIT_BURN_WINDOW_HOURS,
+                     min_window_hours: float = 1.0, cache_dir=None):
+    """Consumo MISURATO in crediti/giorno dalla telemetria delle cache.
+
+    Prende la lettura piu' vecchia e la piu' recente DENTRO la finestra e
+    divide il delta per il tempo che le separa. La finestra corta e' voluta
+    (vedi commento sopra).
+
+    Ritorna None quando non c'e' niente da misurare: meno di due letture,
+    finestra sotto `min_window_hours`, oppure crediti che RISALGONO (chiave
+    cambiata/reset) — mai un numero finto.
+    """
+    directory = cache_dir or CACHE_DIR
+    rows = []
+    if directory.exists():
+        for f in directory.glob("toa_*.json"):
+            try:
+                d = json.loads(f.read_text())
+                if d.get("remaining") is None:
+                    continue
+                ts = d.get("remaining_ts", d.get("ts"))
+                if isinstance(ts, (int, float)):
+                    rows.append((float(ts), int(d["remaining"])))
+            except Exception:
+                continue
+    cut = time.time() - window_hours * 3600
+    win = sorted(r for r in rows if r[0] >= cut)
+    if len(win) < 2:
+        # La finestra non basta: si allarga a tutta la storia disponibile,
+        # dichiarando la finestra VERA (mai spacciare 340h per 48h).
+        win = sorted(rows)
+    if len(win) < 2:
+        return None
+    oldest, newest = win[0], win[-1]
+    hours = (newest[0] - oldest[0]) / 3600.0
+    if hours < min_window_hours or oldest[1] < newest[1]:
+        return None
+    return {"rate_per_day": round((oldest[1] - newest[1]) / (hours / 24.0), 1),
+            "window_hours": round(hours, 1), "samples": len(win),
+            "remaining": newest[1]}
+
+
+def credit_budget_status(now=None, cache_dir=None) -> dict:
+    """Stato del budget: residuo, ritmo misurato e data di esaurimento.
+
+    `alert` = True quando il ritmo misurato esaurisce i crediti PRIMA del
+    reset del piano: e' il campanello che le soglie fisse non danno (il
+    15/09: 273 crediti residui sembravano tanti, ma a 58/giorno finivano in
+    ~5 giorni, tre settimane prima del reset).
+    """
+    now = now or datetime.now(timezone.utc)
+    remaining = get_remaining()
+    burn = credit_burn_rate(cache_dir=cache_dir)
+    left = days_to_reset(now)
+    out = {"remaining": remaining, "days_to_reset": left,
+           "sustainable_per_day": (round(remaining / left, 1)
+                                   if remaining is not None and left > 0
+                                   else None),
+           "rate_per_day": None, "window_hours": None, "samples": 0,
+           "days_left": None, "exhaustion_date": None, "alert": False}
+    if burn:
+        out["rate_per_day"] = burn["rate_per_day"]
+        out["window_hours"] = burn["window_hours"]
+        out["samples"] = burn["samples"]
+        rate = burn["rate_per_day"]
+        if rate > 0 and remaining is not None:
+            days_left = remaining / rate
+            out["days_left"] = round(days_left, 1)
+            # Proiezione sullo STESSO istante di `days_left` (cosi' il calcolo
+            # e' riproducibile e testabile senza dipendere dall'orologio).
+            out["exhaustion_date"] = (now + timedelta(days=days_left)
+                                      ).date().isoformat()
+            out["alert"] = days_left < left
+    return out

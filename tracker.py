@@ -149,6 +149,12 @@ def _get_conn():
     _bet_cols = [r[1] for r in c.execute("PRAGMA table_info(bets)")]
     if "settled_at" not in _bet_cols:
         c.execute("ALTER TABLE bets ADD COLUMN settled_at TEXT")
+    # Ledger delle DECISIONI (decision/, 14/09/2026): una riga per ogni
+    # segnale passato nella catena Signal -> Risk -> Stake, col verdetto e il
+    # motivo (machine-readable). E' la base del feedback engine: lega input,
+    # decisione, stake e (dopo) ordine ed esito, cosi' si puo' misurare se i
+    # gate avevano ragione ANCHE sulle righe non giocate (shadow).
+    _ensure_decisions_table(c)
     # Migrazione: colonna surface nella tabella signals (09/09)
     # per supportare il tracking delle superfici nel modulo tennis.
     sig_cols = [r[1] for r in c.execute("PRAGMA table_info(signals)")]
@@ -225,6 +231,342 @@ def _create_ledger_table(c, table: str) -> None:
             esito_finale TEXT, profit REAL,
             created_at TEXT, settled_at TEXT,
             UNIQUE(match_id, esito))''')
+
+
+# --- Ledger decisioni (decision/) -------------------------------------------
+# Colonne del ledger `decisions`, nell'ordine in cui vengono scritte: unica
+# fonte di verita' per CREATE TABLE, migrazione e INSERT.
+DECISION_FIELDS = (
+    "record_id", "signal_id", "match_id", "league", "market", "outcome",
+    "selection_label", "kickoff", "price", "price_source", "market_prob",
+    "model_prob", "blended_prob", "edge", "ev", "tier", "confidence",
+    "model_coverage", "calibrated", "verdict", "reason", "mode", "provider",
+    "stake", "stake_executable", "kelly_fraction", "cap_pct", "cap_source",
+    "approved_by", "review_note", "created_at",
+)
+# Colonne riempite DOPO la decisione (esecuzione e referto): un secondo
+# salvataggio dello stesso record non deve mai cancellarle.
+DECISION_LATE_FIELDS = ("order_id", "order_status", "esito_finale", "profit",
+                        "settled_at")
+_DECISION_INT_FIELDS = ("calibrated", "stake_executable")
+
+
+def _ensure_decisions_table(c) -> None:
+    """Ledger decisioni pronto all'uso: tabella -> colonne -> indici.
+
+    L'ORDINE conta: un `decisions` creato da un deploy precedente puo' avere
+    meno colonne, quindi gli indici (e le colonne mancanti) vanno gestiti
+    DOPO la CREATE TABLE — altrimenti `_get_conn` fallisce all'avvio e con
+    lui l'intero bot (bug trovato dai test il 14/09).
+    """
+    _create_decisions_table(c)
+    _migrate_decisions(c)
+
+
+def _create_decisions_table(c) -> None:
+    """Crea il ledger delle decisioni (idempotente)."""
+    c.execute('''CREATE TABLE IF NOT EXISTS decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        record_id TEXT UNIQUE,
+        signal_id TEXT, match_id TEXT, league TEXT, market TEXT, outcome TEXT,
+        selection_label TEXT, kickoff TEXT, price REAL, price_source TEXT,
+        market_prob REAL, model_prob REAL, blended_prob REAL,
+        edge REAL, ev REAL, tier TEXT, confidence REAL,
+        model_coverage REAL, calibrated INTEGER,
+        verdict TEXT, reason TEXT, mode TEXT, provider TEXT,
+        stake REAL, stake_executable INTEGER, kelly_fraction REAL,
+        cap_pct REAL, cap_source TEXT,
+        approved_by TEXT, review_note TEXT,
+        order_id TEXT, order_status TEXT,
+        esito_finale TEXT, profit REAL,
+        created_at TEXT, settled_at TEXT)''')
+
+
+def _migrate_decisions(c) -> None:
+    """Colonne mancanti + indici di un `decisions` creato da un deploy
+    precedente (ALTER TABLE idempotente, stessa convenzione di predictions/
+    bets/cassa). Nessun default copiato a mano: i tipi si leggono da
+    DECISION_FIELDS + DECISION_LATE_FIELDS."""
+    try:
+        cols = [r[1] for r in c.execute("PRAGMA table_info(decisions)")]
+    except sqlite3.OperationalError:
+        return
+    numeric = ("price", "market_prob", "model_prob", "blended_prob", "edge",
+               "ev", "confidence", "model_coverage", "stake", "kelly_fraction",
+               "cap_pct", "profit")
+    integer = _DECISION_INT_FIELDS
+    for name in DECISION_FIELDS + DECISION_LATE_FIELDS:
+        if name in cols:
+            continue
+        kind = "REAL" if name in numeric else ("INTEGER" if name in integer else "TEXT")
+        c.execute(f"ALTER TABLE decisions ADD COLUMN {name} {kind}")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_match ON decisions(match_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_open "
+              "ON decisions(esito_finale)")
+
+
+def _decision_flat_row(record) -> dict:
+    """Riga piatta da un `DecisionRecord` (o da un dict gia' piatto).
+
+    Import PIGRO di `decision.models`: `tracker` e' il ledger, non deve
+    dipendere dal pacchetto di decisione all'import (il tripwire in
+    test_decision_pipeline.py verifica che `import decision` non carichi
+    tracker, e questa e' l'altra meta' della stessa regola).
+    """
+    if hasattr(record, "as_row"):
+        return dict(record.as_row())
+    return dict(record)
+
+
+def _decision_values(row: dict) -> list:
+    """Valori nell'ordine di DECISION_FIELDS (bool -> int, None -> NULL)."""
+    values = []
+    for name in DECISION_FIELDS:
+        value = row.get(name)
+        if name in _DECISION_INT_FIELDS and value is not None:
+            value = 1 if value else 0
+        values.append(value)
+    return values
+
+
+def save_decision(record, conn=None) -> str:
+    """Registra (o aggiorna) una decisione della catena. Ritorna il record_id.
+
+    IDEMPOTENTE su `record_id` (id stabile del segnale + timestamp): ripersistere
+    lo stesso record aggiorna verdetto/stake ma NON cancella ordine ed esito —
+    sono le colonne "late", riempite dopo la decisione. Il chiamante di
+    produzione e' `decision.feedback.persist`, che rende la scrittura
+    fail-safe: un ledger non scrivibile non deve mai fermare una puntata.
+    """
+    row = _decision_flat_row(record)
+    record_id = str(row.get("record_id") or "")
+    if not record_id:
+        raise ValueError("decisione senza record_id")
+    late = {
+        "order_id": row.get("order_id"),
+        "order_status": row.get("order_status"),
+        "esito_finale": row.get("outcome_final", row.get("esito_finale")),
+        "profit": row.get("profit"),
+        "settled_at": row.get("settled_at"),
+    }
+    own_conn = conn is None
+    if own_conn:
+        conn = _get_conn()
+    c = conn.cursor()
+    try:
+        _ensure_decisions_table(c)
+        cols = ", ".join(DECISION_FIELDS + DECISION_LATE_FIELDS)
+        marks = ", ".join("?" * (len(DECISION_FIELDS) + len(DECISION_LATE_FIELDS)))
+        # Le colonne "late" in update usano COALESCE: un None non sovrascrive
+        # un ordine o un esito gia' registrati.
+        updates = ", ".join(
+            [f"{name}=excluded.{name}" for name in DECISION_FIELDS] +
+            [f"{name}=COALESCE(excluded.{name}, decisions.{name})"
+             for name in DECISION_LATE_FIELDS])
+        c.execute(f'''INSERT INTO decisions ({cols}) VALUES ({marks})
+                      ON CONFLICT(record_id) DO UPDATE SET {updates}''',
+                  _decision_values(row) + [late[name] for name in DECISION_LATE_FIELDS])
+        if own_conn:
+            conn.commit()
+    finally:
+        if own_conn:
+            conn.close()
+    return record_id
+
+
+def get_decisions(closed=None, verdict=None, limit=500) -> list[dict]:
+    """Righe del ledger decisioni (piu' recenti prima)."""
+    conn = _get_conn(); c = conn.cursor()
+    q = f"SELECT {', '.join(DECISION_FIELDS + DECISION_LATE_FIELDS)} FROM decisions"
+    conds, args = [], []
+    if verdict:
+        conds.append("verdict=?"); args.append(verdict)
+    if closed is True:
+        conds.append("esito_finale IS NOT NULL")
+    elif closed is False:
+        conds.append("esito_finale IS NULL")
+    if conds:
+        q += " WHERE " + " AND ".join(conds)
+    q += " ORDER BY id DESC LIMIT ?"; args.append(limit)
+    rows = c.execute(q, args).fetchall()
+    conn.close()
+    return [dict(zip(DECISION_FIELDS + DECISION_LATE_FIELDS, r)) for r in rows]
+
+
+def update_decision_order(record_id, order: dict, conn=None) -> bool:
+    """Aggancia l'ordine eseguito (bet_id/status) alla decisione.
+
+    Ritorna True se una riga e' stata aggiornata. Non solleva mai su un
+    `order` malformato: il ledger non deve rompere l'esecuzione.
+    """
+    order = order or {}
+    order_id = order.get("bet_id") or order.get("order_id")
+    status = order.get("status")
+    own_conn = conn is None
+    if own_conn:
+        conn = _get_conn()
+    try:
+        cur = conn.cursor()
+        _ensure_decisions_table(cur)
+        cur.execute("UPDATE decisions SET order_id=COALESCE(?, order_id), "
+                    "order_status=COALESCE(?, order_status) WHERE record_id=?",
+                    (order_id, status, record_id))
+        changed = cur.rowcount > 0
+        if own_conn:
+            conn.commit()
+    finally:
+        if own_conn:
+            conn.close()
+    return changed
+
+
+def settle_decisions() -> tuple:
+    """Salda le decisioni aperte coi risultati reali (idempotente).
+
+    Chiude OGNI riga con un risultato in `match_results`, anche i `reject` e
+    le `review`: senza l'esito dei segnali scartati non si puo' misurare se il
+    gate aveva ragione (metrica "shadow" di `decision_stats`).
+
+    `profit` e' il P/L PER UNITA' di stake (stessa semantica di predictions):
+    il peso monetario lo da' la colonna `stake` (0 sui segnali non giocati).
+    Sanity check e pausa settlement: identici agli altri ledger.
+
+    Ritorna (saldate, push).
+    """
+    if settlement_paused():
+        logger.info("settle_decisions: settlement in PAUSA, nessuna riga chiusa")
+        return 0, 0
+    conn = _get_conn()
+    _create_results_table(conn)
+    c = conn.cursor()
+    try:
+        open_rows = c.execute("SELECT id, match_id, market, outcome, price "
+                              "FROM decisions WHERE esito_finale IS NULL").fetchall()
+        results = c.execute("SELECT match_id, home_team, away_team, score_home, score_away "
+                            "FROM match_results").fetchall()
+    finally:
+        conn.close()
+    res_map = {r[0]: r[1:] for r in results}
+
+    conn = _get_conn(); c = conn.cursor()
+    now = datetime.now().isoformat()
+    settled = pushes = blocked = 0
+    for did, match_id, market, outcome_sel, price in open_rows:
+        r = res_map.get(match_id)
+        if not r:
+            continue
+        home, away, sh, sa = r
+        if not _goals_sane(sh, sa):
+            logger.warning("settle_decisions: gol non validi (%r-%r) su match %s: "
+                           "settlement BLOCCATO (decisione #%d)", sh, sa, match_id, did)
+            blocked += 1
+            continue
+        outcome, unit_profit = _prediction_outcome(market or "1X2", outcome_sel,
+                                                   price or 0.0, sh, sa, home, away)
+        if outcome is None:
+            continue
+        if outcome == "won" and _esito_possible(market or "1X2", outcome_sel, sh, sa,
+                                                home, away) is False:
+            logger.warning("settle_decisions: esito '%s' VINTO in contraddizione "
+                           "coi gol %s-%s (%s vs %s): settlement BLOCCATO "
+                           "(decisione #%d)", outcome_sel, sh, sa, home, away, did)
+            blocked += 1
+            continue
+        if outcome == "push":
+            pushes += 1
+        c.execute("UPDATE decisions SET esito_finale=?, profit=?, settled_at=? "
+                  "WHERE id=?", (outcome, unit_profit, now, did))
+        settled += 1
+    conn.commit(); conn.close()
+    if blocked:
+        logger.warning("settle_decisions: %d righe BLOCCATE dal sanity check", blocked)
+    return settled, pushes
+
+
+def decision_stats() -> dict:
+    """Telemetria del feedback engine sul ledger decisioni.
+
+    Tre letture, in ordine di importanza:
+
+    1. `by_verdict` / `by_reason`: cosa ha deciso la catena e PERCHE' (i
+       motivi non sono prosa, sono `ReasonCode` contabili);
+    2. `settled`: le decisioni GIOCATE e chiuse — hit rate, ROI flat, ROI
+       pesato per stake e `gap` = pnl realizzato - EV atteso (il numero che
+       dice se il modello batte davvero il mercato, stessa convenzione di
+       `predictions_summary`);
+    3. `shadow`: le decisioni NON giocate (review/reject) e chiuse — cosa
+       sarebbe successo: e' il costo (o il risparmio) dei gate.
+    """
+    rows = get_decisions(limit=100000)
+    out = {
+        "n": len(rows),
+        "by_verdict": {}, "by_reason": {},
+        "executable": 0, "with_order": 0, "stake_total": 0.0,
+        "open": 0,
+        "settled": _decision_bucket(),
+        "shadow": {},
+    }
+    played, shadow = [], {}
+    for row in rows:
+        verdict = row.get("verdict") or "?"
+        reason = row.get("reason") or "?"
+        out["by_verdict"][verdict] = out["by_verdict"].get(verdict, 0) + 1
+        out["by_reason"][reason] = out["by_reason"].get(reason, 0) + 1
+        if row.get("order_id"):
+            out["with_order"] += 1
+        if row.get("esito_finale"):
+            if row.get("stake_executable"):
+                played.append(row)
+            elif verdict != "approve":
+                shadow.setdefault(verdict, []).append(row)
+        else:
+            out["open"] += 1
+        if row.get("stake_executable"):
+            out["executable"] += 1
+            out["stake_total"] = round(out["stake_total"] + (row.get("stake") or 0.0), 2)
+
+    out["settled"] = _decision_bucket(played)
+    for verdict, group in shadow.items():
+        out["shadow"][verdict] = _decision_bucket(group)
+    return out
+
+
+def _decision_bucket(rows: list = ()) -> dict:
+    """Aggregato di un gruppo di decisioni chiuse (giocate o shadow)."""
+    bucket = {"n": 0, "won": 0, "lost": 0, "push": 0, "hit_rate": 0.0,
+              "pnl_units": 0.0, "roi_flat": 0.0, "stake": 0.0,
+              "pnl_staked": 0.0, "roi_staked": 0.0,
+              "avg_ev": 0.0, "gap_pp": 0.0}
+    if not rows:
+        return bucket
+    ev_sum = 0.0
+    for row in rows:
+        bucket["n"] += 1
+        outcome = row.get("esito_finale")
+        if outcome == "won":
+            bucket["won"] += 1
+        elif outcome == "lost":
+            bucket["lost"] += 1
+        else:
+            bucket["push"] += 1
+        profit = row.get("profit") or 0.0
+        stake = row.get("stake") or 0.0
+        bucket["pnl_units"] += profit
+        bucket["stake"] += stake
+        bucket["pnl_staked"] += profit * stake
+        ev_sum += row.get("ev") or 0.0
+    n = bucket["n"]
+    bucket["pnl_units"] = round(bucket["pnl_units"], 4)
+    bucket["roi_flat"] = round(bucket["pnl_units"] / n * 100, 2)
+    bucket["stake"] = round(bucket["stake"], 2)
+    bucket["pnl_staked"] = round(bucket["pnl_staked"], 4)
+    bucket["roi_staked"] = (round(bucket["pnl_staked"] / bucket["stake"] * 100, 2)
+                             if bucket["stake"] else 0.0)
+    bucket["avg_ev"] = round(ev_sum / n * 100, 2)
+    bucket["gap_pp"] = round((bucket["pnl_units"] - ev_sum) / n * 100, 2)
+    decided = n - bucket["push"]
+    bucket["hit_rate"] = round(bucket["won"] / decided * 100, 2) if decided else 0.0
+    return bucket
 
 
 def _ensure_unique_constraints(c) -> None:

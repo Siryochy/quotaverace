@@ -1,6 +1,8 @@
 """Test SPORTS_MAP: le coppe devono avere la chiave ufficiale the-odds-api
 e i dati squadre in ALL_LEAGUES (senza, il matching squadre salta)."""
 
+import pytest
+
 from odds_api import SPORTS_MAP
 from leagues_data import ALL_LEAGUES
 
@@ -332,6 +334,121 @@ def test_get_remaining_usa_la_lettura_piu_recente(monkeypatch, tmp_path):
     assert odds_api.get_remaining() == 452
     # anche get_quota (usato da /api/health) deve riportare la lettura fresca
     assert odds_api.get_quota() == (452, 2)
+
+
+def _credit_cache(tmp_path, name, remaining, ts, remaining_ts=None):
+    """Telemetria crediti di una lega: quante richieste restavano e QUANDO
+    e' stata letta quella risposta dell'API."""
+    import json
+    (tmp_path / f"toa_{name}.json").write_text(json.dumps(
+        {"ts": ts, "payload": [], "remaining": remaining,
+         "remaining_ts": ts if remaining_ts is None else remaining_ts}))
+
+
+def _credit_env(monkeypatch, tmp_path):
+    """Isola la telemetria crediti e ritorna il modulo odds_api."""
+    import odds_api
+    monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+    return odds_api
+
+
+def test_burn_rate_misura_il_consumo_recente(monkeypatch, tmp_path):
+    """Il RITMO di consumo, non il livello, e' il rischio a meta' mese.
+
+    329 -> 273 crediti in 24h = ~56/giorno: e' il numero che il 15/09 ha
+    rivelato che il budget non arrivava al reset, mentre la media a 340h
+    diceva 15/giorno (includeva giorni di settlement in pausa e il cambio
+    di chiave). La finestra del misuratore e' corta di proposito.
+    """
+    import time
+    oa = _credit_env(monkeypatch, tmp_path)
+    now = time.time()
+    _credit_cache(tmp_path, "soccer_epl", 329, now - 86400)
+    _credit_cache(tmp_path, "soccer_italy_serie_a", 273, now)
+    b = oa.credit_burn_rate()
+    assert b["rate_per_day"] == pytest.approx(56.0, abs=0.5)
+    assert b["window_hours"] == pytest.approx(24.0, abs=0.1)
+    assert b["samples"] == 2 and b["remaining"] == 273
+
+
+def test_burn_rate_fallback_dichiara_la_finestra_vera(monkeypatch, tmp_path):
+    """Una sola lettura DENTRO la finestra: si allarga alla storia
+    disponibile, ma `window_hours` dice la finestra VERA (mai spacciare
+    240h per 48h, altrimenti il ritmo sembra 5 volte piu' alto)."""
+    import time
+    oa = _credit_env(monkeypatch, tmp_path)
+    now = time.time()
+    _credit_cache(tmp_path, "soccer_epl", 500, now - 10 * 86400)
+    _credit_cache(tmp_path, "soccer_italy_serie_a", 300, now)
+    b = oa.credit_burn_rate()
+    assert b["window_hours"] == pytest.approx(240.0, abs=1.0)
+    assert b["rate_per_day"] == pytest.approx(20.0, abs=0.5)
+
+
+def test_burn_rate_none_se_i_crediti_risalgono(monkeypatch, tmp_path):
+    """Chiave cambiata o reset del piano: il delta positivo non e' consumo.
+    Meglio None di un ritmo negativo (che farebbe proiezioni assurde)."""
+    import time
+    oa = _credit_env(monkeypatch, tmp_path)
+    now = time.time()
+    _credit_cache(tmp_path, "soccer_epl", 58, now - 86400)
+    _credit_cache(tmp_path, "soccer_italy_serie_a", 500, now)
+    assert oa.credit_burn_rate() is None
+
+
+def test_burn_rate_none_con_una_sola_lettura(monkeypatch, tmp_path):
+    import time
+    oa = _credit_env(monkeypatch, tmp_path)
+    _credit_cache(tmp_path, "soccer_epl", 300, time.time())
+    assert oa.credit_burn_rate() is None
+
+
+def test_budget_alert_quando_il_ritmo_non_arriva_al_reset(monkeypatch,
+                                                          tmp_path):
+    """273 crediti a 58/giorno finiscono il 19/09, con il reset il 01/10:
+    il residuo sembra alto ma il budget NON arriva -> alert (e' il campanello
+    che le soglie fisse 50/20/10/5 non danno, perche' tacciono sopra 50).
+
+    `now` e' FISSO: il test non deve scadere col calendario."""
+    import time
+    from datetime import datetime, timezone
+    oa = _credit_env(monkeypatch, tmp_path)
+    now = time.time()
+    _credit_cache(tmp_path, "soccer_epl", 331, now - 86400)
+    _credit_cache(tmp_path, "soccer_italy_serie_a", 273, now)
+    st = oa.credit_budget_status(
+        now=datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc))
+    assert st["remaining"] == 273
+    assert st["rate_per_day"] == pytest.approx(58.0, abs=0.5)
+    assert st["days_to_reset"] == 15
+    assert st["days_left"] == pytest.approx(4.7, abs=0.1)
+    assert st["exhaustion_date"] == "2026-09-20"   # 273 / 58 = ~4.7 giorni
+    assert st["alert"] is True
+
+
+def test_budget_senza_alert_se_il_ritmo_regge(monkeypatch, tmp_path):
+    """Ritmo 5/giorno con lo stesso residuo: il budget arriva al reset."""
+    import time
+    from datetime import datetime, timezone
+    oa = _credit_env(monkeypatch, tmp_path)
+    now = time.time()
+    _credit_cache(tmp_path, "soccer_epl", 278, now - 86400)
+    _credit_cache(tmp_path, "soccer_italy_serie_a", 273, now)
+    st = oa.credit_budget_status(
+        now=datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc))
+    assert st["rate_per_day"] == pytest.approx(5.0, abs=0.5)
+    assert st["alert"] is False
+
+
+def test_budget_senza_consumo_misurabile_non_allerta(monkeypatch, tmp_path):
+    """Nessuna telemetria (o una sola lettura): nessuna proiezione, nessun
+    alert inventato — resta solo il residuo."""
+    import time
+    oa = _credit_env(monkeypatch, tmp_path)
+    _credit_cache(tmp_path, "soccer_epl", 300, time.time())
+    st = oa.credit_budget_status()
+    assert st["remaining"] == 300 and st["rate_per_day"] is None
+    assert st["alert"] is False and st["exhaustion_date"] is None
 
 
 def test_get_remaining_senza_remaining_ts_usa_ts(monkeypatch, tmp_path):

@@ -4,7 +4,7 @@ Tutti i test sono OFFLINE: il provider SX viene sostituito da un fake con
 risposte canned (nessuna rete, nessun ordine, nessun credito).
 """
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -203,9 +203,16 @@ def test_scan_requires_all_three_legs(temp_db, monkeypatch):
 
 
 def test_settle_sx_bets_fail_closed(temp_db, no_settlement_sources):
-    """Senza fonti risultati le bet SX restano aperte (nessun verdetto)."""
-    tracker.save_match(SX, "Serie A", "Alpha", "Beta",
-                       "2026-09-09T19:00:00Z")
+    """Senza fonti risultati le bet SX restano aperte (nessun verdetto).
+
+    Il kickoff e' relativo a ORA (una giornata fa) e non una data fissa: la
+    scadenza delle righe insaldabili (`SX_STALE_DAYS`, 5 giorni) si basa
+    sull'orologio, quindi una data scritta a mano trasforma questo test in un
+    falso allarme col passare dei giorni (osservato il 15/09 con il 09/09
+    scritto fisso: la riga veniva scaduta come push invece di restare aperta).
+    """
+    kickoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    tracker.save_match(SX, "Serie A", "Alpha", "Beta", kickoff)
     tracker.save_bet(SX, "1X2", "1", "0xabc", 1, 2.5, 1.0)
     res = sx_signals.settle_sx_bets()
     assert res["open"] == 1 and res["settled"] == 0
@@ -220,7 +227,7 @@ def test_settle_sx_bets_fail_closed(temp_db, no_settlement_sources):
 def test_settle_sx_bets_with_result(temp_db, no_settlement_sources):
     """Con il punteggio gia' in match_results la bet viene saldata."""
     tracker.save_match(SX, "Serie A", "Alpha", "Beta",
-                       "2026-09-09T19:00:00Z")
+                       (datetime.now(timezone.utc) - timedelta(days=1)).isoformat())
     tracker.save_bet(SX, "1X2", "1", "0xabc", 1, 2.5, 1.0)
     tracker.save_result(SX, "Serie A", "Alpha", "Beta", 2, 0,
                         datetime.now(timezone.utc).isoformat())

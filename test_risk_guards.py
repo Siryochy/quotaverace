@@ -110,6 +110,15 @@ class TestStopLossGiornaliero:
         auto_bet.clear_daily_stop()
         assert auto_bet.daily_stop_status()["stopped"] is False
 
+    def test_basis_dichiarato_nel_messaggio(self):
+        """Il messaggio dice su QUALE valore e' misurata la perdita: in LIVE
+        e' l'equity del wallet (disponibile + in gioco), non la cassa libera
+        (fix del 15/09, `basis` passato dal chiamante)."""
+        auto_bet.check_daily_stop(35.98, basis="equity wallet")
+        r = auto_bet.check_daily_stop(32.0, basis="equity wallet")
+        assert r["stopped"] is True
+        assert "equity wallet" in auto_bet.daily_stop_status()["reason"]
+
     def test_fail_open_su_errore_di_scrittura(self, tmp_path, monkeypatch):
         """Un errore I/O non deve mai bloccare le puntate (fail-open)."""
         blocker = tmp_path / "not_a_dir"

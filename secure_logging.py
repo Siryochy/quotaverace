@@ -18,6 +18,7 @@ Idempotente: aggiunge il filtro una sola volta.
 import logging
 import os
 import re
+from typing import Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -86,10 +87,25 @@ class SensitiveDataFilter(logging.Filter):
         # gli args (es. logger.info("%s", url)).
         if record.args:
             try:
-                record.args = tuple(
-                    self.scrub(a, self._secrets) if isinstance(a, str) else a
-                    for a in record.args
-                )
+                # ATTENZIONE ai MAPPING: `logger.warning("... %s", dati)` con un
+                # dict come unico argomento fa si' che logging metta il DICT in
+                # `record.args` (non una tupla). Iterarlo direttamente produceva
+                # una tupla di CHIAVI e il record non era piu' formattabile:
+                # `TypeError: not all arguments converted during string
+                # formatting` alla scrittura (trovato il 15/09: bastava un log
+                # con un dict per rompere l'handler). I valori vanno mascherati
+                # MANTENENDO il mapping.
+                if isinstance(record.args, Mapping):
+                    record.args = {
+                        key: (self.scrub(val, self._secrets)
+                              if isinstance(val, str) else val)
+                        for key, val in record.args.items()
+                    }
+                else:
+                    record.args = tuple(
+                        self.scrub(a, self._secrets) if isinstance(a, str) else a
+                        for a in record.args
+                    )
             except Exception:
                 pass
         return True

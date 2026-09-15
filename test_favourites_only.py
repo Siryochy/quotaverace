@@ -176,7 +176,9 @@ class TestStakeCapSevero:
                                 status="value")
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
-        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 38.0)
+        monkeypatch.setattr(
+            auto_bet, "_live_wallet_snapshot",
+            lambda: {"available": 38.0, "exposure": 0.0, "equity": 38.0})
         monkeypatch.setattr(
             adaptive_staking, "adaptive_stake",
             lambda **kw: {"stake": round(kw["bankroll"] * 0.01, 2),

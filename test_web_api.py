@@ -3,6 +3,7 @@ Test unitari per l'API JSON backend (web_api.py).
 """
 
 import json
+import time
 
 import pytest
 
@@ -123,6 +124,76 @@ class TestCalibration:
         d = web_api._calibration_json()
         assert "drift_history" in d
         assert isinstance(d["drift_history"], list)
+
+
+class TestCredits:
+    """Crediti the-odds-api: lettura AUTOREVOLE + consumo misurato.
+
+    La telemetria e' per-sport (una cache per lega) e si rinnova a rotazione:
+    il valore mostrato deve essere l'ULTIMA lettura, mai il minimo fra file
+    vecchi (12/09: reale 452, mostrato 58 -> la guardia proattiva non riduceva
+    le leghe e nessun alert scattava).
+    """
+
+    def _cache(self, tmp_path, monkeypatch, name, remaining, ts,
+               payload=None):
+        monkeypatch.setattr(web_api, "DATA_DIR", tmp_path)
+        (tmp_path / f"toa_{name}.json").write_text(json.dumps({
+            "ts": ts, "remaining": remaining, "remaining_ts": ts,
+            "payload": payload or []}))
+
+    def test_usa_la_lettura_piu_recente(self, tmp_path, monkeypatch):
+        now = time.time()
+        self._cache(tmp_path, monkeypatch, "italy_serie_a", 58, now - 86400)
+        self._cache(tmp_path, monkeypatch, "soccer_epl", 275, now)
+        d = web_api._credits_json()
+        assert d["remaining"] == 275          # autorevole (ultima lettura)
+        assert d["remaining_min"] == 58       # diagnostica (file vecchio)
+        assert d["status"] == "ok"            # stato sul valore vero
+
+    def test_status_segue_il_valore_autorevole(self, tmp_path, monkeypatch):
+        """Una cache vecchia a 5 crediti non deve far dichiarare 'critical'
+        un piano che ne ha 30 (era il comportamento del minimo)."""
+        now = time.time()
+        self._cache(tmp_path, monkeypatch, "italy_serie_a", 5, now - 86400)
+        self._cache(tmp_path, monkeypatch, "soccer_epl", 30, now)
+        d = web_api._credits_json()
+        assert d["remaining"] == 30 and d["status"] == "low"
+
+    def test_nome_cache_scores_e_titolo_lega(self, tmp_path, monkeypatch):
+        """`toa_scores_soccer_italy_serie_a.json` -> 'Serie A' (la vecchia
+        estrazione lasciava il suffisso '.json' e non trovava il titolo)."""
+        self._cache(tmp_path, monkeypatch, "scores_soccer_italy_serie_a",
+                    100, time.time())
+        d = web_api._credits_json()
+        assert d["sports"][0]["sport"] == "Serie A"
+        assert d["sports"][0]["sport_key"] == "soccer_italy_serie_a"
+
+    def test_consumo_misurato_dalla_telemetria(self, tmp_path, monkeypatch):
+        """400 -> 300 in 24h: 100/giorno MISURATI, non una stima a mano."""
+        now = time.time()
+        self._cache(tmp_path, monkeypatch, "italy_serie_a", 400, now - 86400)
+        self._cache(tmp_path, monkeypatch, "soccer_epl", 300, now)
+        d = web_api._credits_json()
+        assert d["consumption_source"] == "measured"
+        assert d["estimated_daily_consumption"] == pytest.approx(100.0, abs=0.5)
+        assert d["observed_window_hours"] == pytest.approx(24.0, abs=0.1)
+        # 300 crediti / giorni al reset: il sostenibile segue il valore vero
+        assert d["sustainable_daily"] > 0
+
+    def test_senza_finestra_utile_resta_stima(self, tmp_path, monkeypatch):
+        """Una sola lettura (o tutte nello stesso minuto) non misura il
+        ritmo: si dichiara 'heuristic', mai un numero finto."""
+        self._cache(tmp_path, monkeypatch, "italy_serie_a", 400, time.time())
+        d = web_api._credits_json()
+        assert d["consumption_source"] == "heuristic"
+        assert d["observed_window_hours"] is None
+
+    def test_senza_telemetria_non_crasha(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(web_api, "DATA_DIR", tmp_path)
+        d = web_api._credits_json()
+        assert d["remaining"] is None and d["sports_cached"] == 0
+        assert d["status"] == "ok"
 
 
 class TestRoutes:

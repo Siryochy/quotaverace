@@ -44,6 +44,39 @@ def test_collect_secrets_legge_env(monkeypatch):
     assert "abcdefgh12345678" in s
 
 
+def test_filtro_non_rompe_i_log_con_mapping():
+    """Un dict come argomento non deve corrompere il record (bug del 15/09).
+
+    `logger.warning("... %s", dati)` con un dict fa mettere il DICT (non una
+    tupla) in `record.args`: il filtro lo iterava come una sequenza, producendo
+    una tupla di chiavi e un `TypeError: not all arguments converted during
+    string formatting` al momento della scrittura — cioe' un log che rompe
+    l'handler invece di essere scritto.
+    """
+    import io
+    import logging as _logging
+
+    stream = io.StringIO()
+    handler = _logging.StreamHandler(stream)
+    handler.addFilter(SensitiveDataFilter())
+    log = _logging.getLogger("test.mapping")
+    log.handlers = [handler]
+    log.propagate = False
+    log.setLevel(_logging.DEBUG)
+    log.warning("riga rifiutata: %s", {"event_id": "sx-1", "odds": 0.05})
+    scritto = stream.getvalue()
+    assert "sx-1" in scritto and "0.05" in scritto
+    # La chiave del mapping non e' un segreto: il valore si'. Il valore e'
+    # marcato `fake/` perche' e' un finto di test (la guardia
+    # `test_secret_hygiene.py` cerca credenziali VERE nei sorgenti).
+    fake_secret = "fake/supersegreto-1234567890"
+    monkeypatch_set = SensitiveDataFilter()
+    monkeypatch_set._secrets = {fake_secret}
+    handler.filters = [monkeypatch_set]
+    log.warning("credenziale: %s", {"token": fake_secret})
+    assert fake_secret not in stream.getvalue()
+
+
 def test_setup_httpx_a_warning():
     setup()
     assert logging.getLogger("httpx").level == logging.WARNING

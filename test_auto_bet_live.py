@@ -67,6 +67,23 @@ def _filled():
             "price": 1.65, "stake": 5.0}
 
 
+def _wallet(available, exposure=0.0):
+    """Istantanea del wallet reale: disponibile + in gioco = EQUITY."""
+    return {"available": available, "exposure": exposure,
+            "equity": available + exposure}
+
+
+def _stub_wallet(monkeypatch, available, exposure=0.0):
+    """Sostituisce la lettura del wallet con un'istantanea fissa.
+
+    Dal 15/09 il modulo legge `_live_wallet_snapshot` (non piu' il solo
+    disponibile): il test controlla ESPLICITAMENTE anche l'esposizione, che e'
+    la grandezza che il fix dello stop-loss deve tenere in conto.
+    """
+    monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
+                        lambda: _wallet(available, exposure))
+
+
 def _sx_catalogue(home="Osasuna", away="Getafe", ts=None):
     """Tre mercati binari 'X vs Not X' di un evento SX Bet (1X2)."""
     if ts is None:
@@ -142,18 +159,18 @@ class TestLiveMode:
         assert tracker.get_bets() == []
 
 class TestLiveBankroll:
-    """Staking dinamico sul saldo REALE del wallet (dal 08/09): il Kelly
-    usa come bankroll il saldo disponibile del proxy wallet SX, mai la
-    cassa simulata. Floor ordine 1 USDC, cap sul saldo disponibile."""
+    """Staking dinamico sul wallet REALE (dal 08/09): il Kelly usa come
+    bankroll l'EQUITY del proxy wallet SX (disponibile + in gioco), mai la
+    cassa simulata. Floor ordine 1 USDC, cap di cassa sul disponibile."""
 
     def test_bankroll_dal_wallet(self, monkeypatch, temp_db):
-        """In LIVE il bankroll del Kelly e' il saldo del wallet (12.28
+        """In LIVE il bankroll del Kelly e' il valore del wallet (12.28
         USDC nell'esempio), non la cassa."""
         import adaptive_staking
         _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
-        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 12.28)
+        _stub_wallet(monkeypatch, 12.28)
         calls = {}
 
         def _fake(**kw):
@@ -174,7 +191,7 @@ class TestLiveBankroll:
         _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
-        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 0.5)
+        _stub_wallet(monkeypatch, 0.5)
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert placed == []
         assert tracker.get_bets() == []
@@ -185,7 +202,7 @@ class TestLiveBankroll:
         _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
-        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 12.28)
+        _stub_wallet(monkeypatch, 12.28)
         monkeypatch.setattr(
             adaptive_staking, "adaptive_stake",
             lambda **kw: {"stake": 0.6, "reason": "micro", "capped": True})
@@ -225,7 +242,7 @@ class TestLiveBankroll:
         _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
-        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 3.0)
+        _stub_wallet(monkeypatch, 3.0)
         monkeypatch.setattr(
             adaptive_staking, "adaptive_stake",
             lambda **kw: {"stake": 5.0, "reason": "test"})
@@ -248,7 +265,7 @@ class TestLiveBankroll:
         _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
-        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: None)
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda: None)
         calls = {}
 
         def _fake(**kw):
@@ -273,7 +290,7 @@ class TestLiveBankroll:
         _seed_value_match(mid="e2", home="Bari", away="Crotone", quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
-        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: 12.28)
+        _stub_wallet(monkeypatch, 12.28)
         monkeypatch.setattr(
             adaptive_staking, "adaptive_stake",
             lambda **kw: {"stake": 2.0, "reason": "test"})
@@ -302,6 +319,112 @@ class TestLiveBankroll:
         assert b["stake"] == 3.0 and b["price"] == 1.70
 
 
+class TestBankrollEquity:
+    """Fix 15/09/2026: in LIVE il valore di RISCHIO e' l'EQUITY del wallet.
+
+    Prima lo stop-loss leggeva il solo `availableBalance`: piazzare una bet
+    sposta i fondi da "libero" a "in escrow" e il calo del disponibile veniva
+    letto come una perdita -> stop armato pochi secondi dopo l'ordine, per 24h
+    (in produzione: 35.98 -> 33.98 con 2.0 in gioco, bot muto per un giorno).
+    Ora bankroll, drawdown e stop-loss usano disponibile + in gioco; il
+    DISPONIBILE resta il vincolo di cassa del singolo ordine.
+    """
+
+    def _live(self, monkeypatch):
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+
+    def test_bet_piazzata_non_arma_lo_stop(self, monkeypatch, temp_db):
+        """Disponibile 35.98 -> 33.98 con 2.0 in escrow: l'equity resta
+        35.98, quindi nessuno stop (regressione del bug)."""
+        _fixed_stake(monkeypatch)
+        _seed_value_match(quota=1.65)
+        self._live(monkeypatch)
+        _stub_wallet(monkeypatch, 35.98)
+        monkeypatch.setattr(auto_bet, "_live_fill",
+                            lambda pick, stake, floor: None)
+        assert auto_bet.run_today_bets(stake_eur=5.0) == []
+        st = auto_bet.daily_stop_status()
+        assert st["start_bankroll"] == pytest.approx(35.98)
+        # la bet e' passata in escrow: 2 USDC in meno liberi, 2 in gioco
+        _stub_wallet(monkeypatch, 33.98, exposure=2.0)
+        auto_bet.run_today_bets(stake_eur=5.0)
+        st = auto_bet.daily_stop_status()
+        assert st["stopped"] is False
+        assert st["start_bankroll"] == pytest.approx(35.98)
+
+    def test_perdita_vera_sull_equity_arma_lo_stop(self, monkeypatch, temp_db):
+        """Equity 35.98 -> 32.0 (-11%): lo stop scatta ancora, e il motivo
+        dichiara su QUALE valore e' stata misurata la perdita."""
+        _fixed_stake(monkeypatch)
+        _seed_value_match(quota=1.65)
+        self._live(monkeypatch)
+        _stub_wallet(monkeypatch, 35.98)
+        auto_bet.run_today_bets(stake_eur=5.0)
+        _stub_wallet(monkeypatch, 30.0, exposure=2.0)      # equity 32.0
+        assert auto_bet.run_today_bets(stake_eur=5.0) == []
+        st = auto_bet.daily_stop_status()
+        assert st["stopped"] is True
+        assert "equity wallet" in st["reason"]
+
+    def test_stake_non_oltre_i_fondi_liberi(self, monkeypatch, temp_db):
+        """L'equity (35.98) dimensiona il Kelly, ma un singolo ordine non puo'
+        spendere piu' dei fondi LIBERI (3.98 su 32.0 in gioco)."""
+        _fixed_stake(monkeypatch)
+        _seed_value_match(quota=1.65)
+        self._live(monkeypatch)
+        _stub_wallet(monkeypatch, 3.98, exposure=32.0)
+        sent = {}
+        monkeypatch.setattr(auto_bet, "_live_fill",
+                            lambda pick, stake, floor: sent.update(stake=stake)
+                            or _filled())
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert len(placed) == 1
+        assert sent["stake"] == pytest.approx(3.98)
+
+    class _Prov:
+        name = "sxbet"
+
+        def __init__(self, bal):
+            self._bal = bal
+
+        def get_balance(self):
+            return self._bal
+
+    def _engine(self, monkeypatch, provider):
+        import execution_engine as ee
+        engine = type("_Eng", (), {"provider": provider})()
+        monkeypatch.setattr(ee, "ExecutionEngine", lambda *a, **k: engine)
+        return ee
+
+    def test_snapshot_legge_disponibile_e_esposizione(self, monkeypatch):
+        self._engine(monkeypatch, self._Prov({"availableBalance": 33.98,
+                                              "exposure": 2.0}))
+        assert auto_bet._live_wallet_snapshot() == {
+            "available": 33.98, "exposure": 2.0, "equity": 35.98}
+
+    def test_snapshot_senza_exposure_e_prudente(self, monkeypatch):
+        """Provider che non espone l'esposizione: equity = solo disponibile.
+        La stima puo' far scattare lo stop PRIMA, mai dopo (fail-closed)."""
+        self._engine(monkeypatch, self._Prov({"availableBalance": 10.0}))
+        snap = auto_bet._live_wallet_snapshot()
+        assert snap["exposure"] == 0.0 and snap["equity"] == 10.0
+
+    def test_snapshot_dry_run_e_errore_danno_none(self, monkeypatch):
+        import execution_engine as ee
+        self._engine(monkeypatch, ee.DryRunProvider())
+        assert auto_bet._live_wallet_snapshot() is None
+
+        class _Boom:
+            name = "sxbet"
+
+            def get_balance(self):
+                raise RuntimeError("rete giu")
+
+        self._engine(monkeypatch, _Boom())
+        assert auto_bet._live_wallet_snapshot() is None
+
+
 class TestFlatLive:
     """Flat-stake LIVE (09/09): 1 USDC fisso per ogni segnale +EV del
     Calcio 1X2, con risk cap a unita' intere sul saldo REALE del wallet.
@@ -325,7 +448,7 @@ class TestFlatLive:
         monkeypatch.setattr(auto_bet, "STAKE_MODE", "flat")
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
-        monkeypatch.setattr(auto_bet, "_live_wallet_balance", lambda: wallet)
+        _stub_wallet(monkeypatch, wallet)
         sent = []
 
         def fake_fill(pick, stake, floor):

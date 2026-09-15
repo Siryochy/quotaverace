@@ -134,10 +134,24 @@ class ReviewQueue:
 
     # -- operazioni -------------------------------------------------------
     def add(self, record: DecisionRecord) -> dict:
+        """Accoda una revisione. Idempotente per RECORD e per SEGNALE.
+
+        La deduplicazione sul `signal_id` (15/09/2026) serve al caso reale: la
+        catena valuta gli stessi segnali a ogni giro (il job gira ogni 60s),
+        quindi il `record_id` — che porta i secondi — cambia ogni volta. Senza
+        questo controllo la coda si riempirebbe di centinaia di copie dello
+        stesso segnale e Telegram riceverebbe altrettanti prompt.
+
+        La voce gia' decisa (approvata o rifiutata) viene RESTITUITA invariata:
+        una revisione e' una per opportunita'. Se un umano ha detto no, quel
+        segnale non torna a chiedere.
+        """
         entries = self.load()
         for existing in entries:
             if existing.get("record_id") == record.record_id:
                 return existing                       # idempotente
+            if existing.get("signal_id") and existing.get("signal_id") == record.signal.signal_id:
+                return existing                       # stessa opportunita'
         item = self.entry(record)
         entries.append(item)
         self.save(entries)

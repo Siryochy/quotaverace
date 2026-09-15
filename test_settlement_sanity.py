@@ -201,11 +201,15 @@ class TestSettleBlocked:
                            "2025-03-16T17:30:00+00:00")
         tracker.save_result("old", "La Liga", "Osasuna", "Getafe",
                             1, 2, "2025-03-16T17:30:00+00:00")
-        # Partita CORRENTE: CA Osasuna 1-0 Getafe (1 gol → Over perso)
+        # Partita CORRENTE: CA Osasuna 1-0 Getafe (1 gol → Over perso).
+        # La data e' relativa a ORA: la cassa ha una finestra temporale
+        # (`CASSA_MATCH_WINDOW_DAYS`, 14 giorni) e una data fissa esce dalla
+        # finestra col passare dei giorni (osservato il 15/09 col 31/08).
+        recent = datetime.now(timezone.utc) - timedelta(days=1)
         tracker.save_match("new", "La Liga", "CA Osasuna", "Getafe",
-                           "2026-08-31T19:00:00Z")
+                           recent.isoformat())
         tracker.save_result("new", "La Liga", "CA Osasuna", "Getafe",
-                            1, 0, "2026-08-31T19:59:59Z")
+                            1, 0, (recent + timedelta(minutes=59)).isoformat())
         tracker.save_cassa_entry("Osasuna vs Getafe", "Over 2.5", 3.05, 20.0)
         tracker.settle_cassa()
         conn = tracker._get_conn()

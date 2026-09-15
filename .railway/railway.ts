@@ -107,12 +107,49 @@ export default defineRailway(() => {
     RESEARCH_TRACE_DIR: preserve(),
   };
 
+  // Catena di decisione (decision/, 14-15/09) e GATEWAY DI MERCATO
+  // (decision/feeds.py): la sorgente primaria e' SX Bet (letture PUBBLICHE:
+  // nessuna credenziale, zero crediti the-odds-api). Solo sul servizio `api`
+  // (il cron surebet non usa il pacchetto: privilegio minimo).
+  // Manopole: DECISION_FEED_ENABLED (default ON: il gate di mercato e'
+  // fail-closed e tiene ferme le puntate finche' il feed non e' validato),
+  // DECISION_FEED_PRIMARY (default sxbet), DECISION_FEED_MAX_AGE_MIN (20),
+  // DECISION_FEED_MIN_REFRESHES (3), DECISION_FEED_REFRESH_MIN_SEC (600,
+  // finestra di riuso: il job gira ogni 60s e l'exchange va rispettato),
+  // DECISION_FEED_STATE (default DATA_DIR/decision/feed_state.json).
+  // preserve(): una variabile non dichiarata sarebbe distrutta da un
+  // `railway config apply`. Tutte le letture trattano la stringa vuota come
+  // "default di codice", quindi dichiararle non cambia il comportamento.
+  const decisionEnv = {
+    DECISION_FEED_ENABLED: preserve(),
+    DECISION_FEED_PRIMARY: preserve(),
+    DECISION_FEED_MAX_AGE_MIN: preserve(),
+    DECISION_FEED_MIN_REFRESHES: preserve(),
+    DECISION_FEED_REFRESH_MIN_SEC: preserve(),
+    DECISION_FEED_STATE: preserve(),
+    DECISION_SHADOW: preserve(),
+    DECISION_LOG_SINK: preserve(),
+    DECISION_LOG_MAX_MB: preserve(),
+    DECISION_SHADOW_LOG: preserve(),
+    DECISION_OBSERVABILITY: preserve(),
+    DECISION_MIN_MODEL_COVERAGE: preserve(),
+    DECISION_REVIEW_ENABLED: preserve(),
+    DECISION_REVIEW_QUEUE: preserve(),
+    DECISION_REVIEW_CONFIDENCE: preserve(),
+    // Revisioni su Telegram (15/09/2026): coda dei verdetti `review`, store dei
+    // callback idempotenti e spegnitore della coda stessa. `DECISION_REVIEWS=0`
+    // disattiva il riempimento della coda (nessun prompt), senza toccare la
+    // catena: e' l'unico interruttore che serve per silenziare gli operatori.
+    DECISION_REVIEWS: preserve(),
+    DECISION_CALLBACK_STORE: preserve(),
+  };
+
   const api = service("api", {
     source: github("Siryochy/quotaverace", { checkSuites: false }),
     build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" },
     replicas: { "ams": 1 },
     volumeMounts: { ["/app/data"]: { type: "volume", name: data.name, address: data.address } },
-    env: { ...sharedEnv, ...researchEnv, RAILWAY_DOCKERFILE_PATH: preserve() },
+    env: { ...sharedEnv, ...researchEnv, ...decisionEnv, RAILWAY_DOCKERFILE_PATH: preserve() },
   });
 
   // Servizio CRON dedicato allo scanner surebet (surebet_engine.py).

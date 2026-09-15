@@ -78,8 +78,13 @@ KILL_SWITCH_VALUES = ("off", "sim", "live")
 # giornata, le puntate vengono BLOCCATE per DAILY_STOP_HOURS (default 24h).
 # Lo stato vive sul volume (data/execution/daily_stop.json) e sopravvive ai
 # redeploy; si ri-arma al primo giro del giorno successivo.
-# In LIVE il bankroll e' il saldo REALE del wallet (il rischio e' denaro
-# vero), in SIM la cassa. Env: DAILY_STOP_LOSS_PCT, DAILY_STOP_HOURS.
+# In LIVE il valore di riferimento e' l'EQUITY del wallet — disponibile PIU'
+# fondi in gioco (escrow) — non il solo `availableBalance`: piazzare una bet
+# sposta i fondi da "disponibile" a "in gioco" senza che nulla sia stato
+# perso, e misurare il rischio sul solo disponibile faceva scattare lo stop
+# per un -5% che era aritmetica, non denaro (bug fixato il 15/09/2026:
+# l'equity di un wallet 35.98 con 2.0 in gioco e 33.98 liberi resta 35.98).
+# In SIM resta la cassa. Env: DAILY_STOP_LOSS_PCT, DAILY_STOP_HOURS.
 DAILY_STOP_LOSS_PCT = float(os.getenv("DAILY_STOP_LOSS_PCT", "0.05"))
 DAILY_STOP_HOURS = float(os.getenv("DAILY_STOP_HOURS", "24"))
 DAILY_STOP_FILE = DATA_DIR / "execution" / "daily_stop.json"
@@ -692,6 +697,50 @@ def _save_daily_stop(data: dict) -> None:
     os.replace(tmp, DAILY_STOP_FILE)
 
 
+# --- GATE DI MERCATO (15/09/2026) -----------------------------------------
+# Il percorso che ORDINA non deve mai partire senza dati di mercato verificati:
+# era l'anello mancante fra il contratto (`decision/market.py`) e la catena
+# (`decision/feeds.py`, sorgente PRIMARIA SX Bet). Lo stato dell'ultimo verdetto
+# resta in memoria di processo, cosi' il job del bot puo' notificarlo senza
+# rileggere il feed (stesso processo: nessuna rete aggiuntiva).
+_last_market_gate: dict = {"blocked": False, "reason": "", "detail": "",
+                           "checked_at": None}
+
+
+def _market_feed_gate(*, request_id: str = "auto_bet") -> tuple[bool, str, dict]:
+    """Verdetto del feed di mercato per il percorso d'ordine (FAIL-CLOSED).
+
+    Ritorna `(allowed, reason, identity)`. Qualunque problema — feed disattivato
+    senza sorgenti, refresh fallito, quotatura vecchia, validazione incompleta,
+    oppure un'eccezione imprevista — vale come BLOCCO: in assenza di certezza
+    sul mercato non si punta. Si disattiva solo in modo esplicito con
+    `DECISION_FEED_ENABLED=0` (scelta tracciata nei log, non silenziosa).
+    """
+    try:
+        from decision.feeds import feed_enabled, feed_from_env
+        if not feed_enabled():
+            return True, "feed di mercato disattivato (DECISION_FEED_ENABLED=0)", {}
+        feed = feed_from_env()
+        if feed is None or not feed.has_sources:
+            return False, "nessuna sorgente di mercato configurata", {}
+        snapshot = feed.refresh(request_id=request_id)
+        gate = feed.gate(snapshot)
+        identity = dict(gate.identity or {})
+        identity["validated"] = bool(snapshot.is_validated)
+        identity["accepted"] = snapshot.accepted
+        identity["age_s"] = round(snapshot.age_seconds(), 1)
+        if not gate.allowed:
+            return False, f"{gate.reason.value}: {gate.detail}", identity
+        return True, gate.detail, identity
+    except Exception as exc:                        # fail-closed anche qui
+        return False, f"gate di mercato non valutabile ({type(exc).__name__}: {exc})", {}
+
+
+def market_gate_status() -> dict:
+    """Ultimo verdetto del gate di mercato (per /autobet e per le notifiche)."""
+    return dict(_last_market_gate)
+
+
 def clear_daily_stop() -> None:
     """Azzera lo stop-loss giornaliero (riattiva le puntate)."""
     try:
@@ -718,8 +767,14 @@ def daily_stop_status() -> dict:
     }
 
 
-def check_daily_stop(bankroll: float | None) -> dict:
+def check_daily_stop(bankroll: float | None,
+                     basis: str = "bankroll") -> dict:
     """Registra il bankroll di inizio giornata e blocca se perde >= pct.
+
+    `bankroll` e' il valore di RISCHIO del giorno: in LIVE il chiamante passa
+    l'EQUITY del wallet (disponibile + in gioco), mai il solo disponibile —
+    vedi il commento del blocco DAILY_STOP. `basis` e' solo l'etichetta di
+    quel valore nei log/messaggi ("equity wallet" oppure "cassa").
 
     Ritorna {stopped, start_bankroll, loss_pct, until, just_triggered}.
     Fail-open: un errore di lettura/scrittura NON blocca le puntate (meglio
@@ -750,8 +805,8 @@ def check_daily_stop(bankroll: float | None) -> dict:
             data.update({"stopped_until": until.isoformat(),
                          "stopped_at": now.isoformat(),
                          "start_bankroll": start,
-                         "reason": f"cassa -{loss * 100:.1f}% dall'inizio "
-                                   f"giornata (bankroll {bankroll:.2f})"})
+                         "reason": f"{basis} -{loss * 100:.1f}% dall'inizio "
+                                   f"giornata (valore {bankroll:.2f})"})
             _save_daily_stop(data)
             logger.error("auto_bet: STOP-LOSS GIORNALIERO — perdita %.1f%% "
                          "(>= %.0f%%): puntate bloccate fino a %s",
@@ -785,13 +840,23 @@ def _provider_ready() -> bool:
         return False
 
 
-def _live_wallet_balance() -> float | None:
-    """Saldo DISPONIBILE del provider reale (SX Bet: proxy wallet in USDC).
+def _live_wallet_snapshot() -> "dict | None":
+    """Istantanea del wallet reale: disponibile, in gioco ed EQUITY (USDC).
 
-    None se non leggibile (dry-run, errore di rete, credenziali assenti):
-    il chiamante ripiega sul bankroll cassa. Il saldo reale diventa il
-    bankroll del Kelly in modalita' live: ogni stake e' dimensionato su
-    quanto c'e' DAVVERO nel wallet.
+    Ritorna `{"available", "exposure", "equity"}` oppure None se il wallet
+    non e' leggibile (dry-run, errore di rete, credenziali assenti): in quel
+    caso il chiamante ripiega sul bankroll cassa.
+
+    - `available` = saldo libero, spendibile per un NUOVO ordine (vincolo di
+      cassa);
+    - `exposure` = fondi in escrow (bet aperte) + prenotati;
+    - `equity` = available + exposure: il PATRIMONIO del wallet. E' l'unico
+      valore che non si muove quando una bet passa da libera a "in gioco",
+      quindi e' il riferimento per Kelly, drawdown e stop-loss.
+
+    Se il provider non espone `exposure` la stima e' PRUDENTE (equity = solo
+    disponibile): lo stop-loss puo' scattare un po' prima, mai dopo — resta
+    la direzione fail-closed.
     """
     try:
         import execution_engine as ee
@@ -799,7 +864,17 @@ def _live_wallet_balance() -> float | None:
         if isinstance(engine.provider, ee.DryRunProvider):
             return None
         bal = engine.provider.get_balance()
-        return float(bal.get("availableBalance") or 0.0)
+        available = float(bal.get("availableBalance") or 0.0)
+        raw_exposure = bal.get("exposure")
+        if raw_exposure is None:
+            logger.warning("auto_bet: wallet senza campo 'exposure' — equity "
+                           "= solo disponibile (stima PRUDENTE: lo stop-loss "
+                           "puo' scattare prima)")
+            exposure = 0.0
+        else:
+            exposure = float(raw_exposure or 0.0)
+        return {"available": available, "exposure": exposure,
+                "equity": available + exposure}
     except Exception as e:
         logger.warning("auto_bet: lettura saldo wallet fallita: %s", e)
         return None
@@ -1060,29 +1135,43 @@ def run_today_bets(stake_eur: float | None = None,
         _peak = 100.0
         logger.info("auto_bet: adaptive_staking non disponibile, uso stake fisso")
 
-    # LIVE: il bankroll del Kelly e' il saldo REALE del wallet exchange
-    # (disponibile per gli ordini), non la cassa simulata. Se il wallet e'
-    # sotto il minimo ordine non si piazza nulla (fail-closed).
+    # LIVE: il bankroll e' l'EQUITY del wallet REALE (disponibile + in gioco),
+    # non la cassa simulata: il rischio si misura sul patrimonio, non sulla
+    # cassa libera del momento. Il DISPONIBILE resta il vincolo di cassa del
+    # singolo ordine (i fondi in escrow non sono spendibili). Se il wallet non
+    # copre nemmeno il minimo ordine non si piazza nulla (fail-closed).
     _wallet_balance: float | None = None
+    _wallet_exposure: float | None = None
+    _spendable = _bankroll          # limite di cassa per singolo ordine
     if mode == "live":
-        _wallet_balance = _live_wallet_balance()
-        if _wallet_balance is None:
+        snapshot = _live_wallet_snapshot()
+        if snapshot is None:
             logger.warning("auto_bet: saldo wallet non disponibile, uso "
                            "bankroll cassa €%.2f", _bankroll)
-        elif _wallet_balance < MIN_STAKE_EUR:
+        elif snapshot["available"] < MIN_STAKE_EUR:
             logger.error("auto_bet: wallet sotto il minimo ordine "
-                         "(%.2f USDC < %.2f): nessuna puntata",
-                         _wallet_balance, MIN_STAKE_EUR)
+                         "(%.2f USDC liberi < %.2f): nessuna puntata",
+                         snapshot["available"], MIN_STAKE_EUR)
             return []
         else:
-            _bankroll = _wallet_balance
-            _peak = _wallet_balance  # drawdown vs saldo attuale (nessuno storico)
-            logger.info("auto_bet: bankroll LIVE = saldo wallet %.2f USDC",
-                        _wallet_balance)
+            _wallet_balance = snapshot["available"]
+            _wallet_exposure = snapshot["exposure"]
+            _spendable = snapshot["available"]
+            # Kelly, drawdown protection e stop-loss misurano l'EQUITY: cosi'
+            # una bet piazzata (liberi -> escrow) non e' una perdita.
+            _bankroll = snapshot["equity"]
+            _peak = snapshot["equity"]
+            logger.info("auto_bet: bankroll LIVE = equity %.2f USDC "
+                        "(disponibile %.2f + in gioco %.2f)",
+                        _bankroll, _wallet_balance, _wallet_exposure)
 
     # --- STOP-LOSS GIORNALIERO (11/09): nessuna puntata dopo un -5% dal
-    # valore di inizio giornata, per DAILY_STOP_HOURS (default 24h).
-    stop = check_daily_stop(_bankroll)
+    # valore di inizio giornata, per DAILY_STOP_HOURS (default 24h). In LIVE
+    # il riferimento e' l'EQUITY (disponibile + in gioco), non la cassa
+    # libera: vedi il commento del blocco DAILY_STOP.
+    stop = check_daily_stop(_bankroll,
+                            basis="equity wallet" if mode == "live"
+                            else "cassa")
     if stop.get("stopped"):
         logger.error("auto_bet: STOP-LOSS GIORNALIERO attivo fino a %s "
                      "(%s) — nessuna puntata", stop.get("until"),
@@ -1194,12 +1283,14 @@ def run_today_bets(stake_eur: float | None = None,
                         pick_stake, pick["match_id"])
             continue
 
-        # LIVE: mai oltre il saldo disponibile del wallet (i fondi sono li').
+        # LIVE: mai oltre i fondi LIBERI del wallet (_spendable = disponibile;
+        # l'equity usata dal Kelly include anche quelli gia' in gioco, che non
+        # si possono spendere due volte).
         # CAP SEVERO: se lo stake cappato e' sotto il minimo ordine
         # dell'exchange, il floor NON lo alza (sforerebbe il cap): l'ordine
         # viene saltato, a meno che il cap severo sia disattivato.
         if mode == "live":
-            pick_stake = min(pick_stake, _bankroll)
+            pick_stake = min(pick_stake, _spendable)
             if pick_stake < MIN_STAKE_EUR:
                 if STAKE_CAP_HARD:
                     logger.warning("auto_bet: %s (%s)",
@@ -1216,6 +1307,30 @@ def run_today_bets(stake_eur: float | None = None,
             **pick, "price": price, "stake": pick_stake,
             "odds_movement": odds_movement_val,
         })
+
+    # --- GATE DI MERCATO: refresh forzato del gateway (SX primaria) e verifica
+    # --- PRIMA di qualunque ordine. Blocco fail-closed: senza un feed fresco,
+    # --- conforme al contratto e validato il giro si ferma qui — nessun ordine,
+    # --- nessuna riga sul ledger (vale anche per SIM: le puntate simulate
+    # --- alimentano ML/CLV, un mercato non verificato le inquinerebbe).
+    # --- Ordine delle autorita': kill switch e stop-loss hanno gia' risposto
+    # --- sopra, quindi un problema tecnico di dati non li scavalca mai.
+    if candidates:
+        allowed, gate_reason, identity = _market_feed_gate(
+            request_id=f"auto_bet-{mode}-{datetime.now(timezone.utc):%Y%m%dT%H%M}")
+        _last_market_gate.update({
+            "blocked": not allowed, "reason": gate_reason.split(":", 1)[0],
+            "detail": gate_reason,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            **identity,
+        })
+        if not allowed:
+            logger.error("auto_bet: PUNTATE BLOCCATE dal gate di mercato — %s "
+                         "(gateway %s, sorgente %s, feed validato %s)",
+                         gate_reason, identity.get("gateway_id"),
+                         identity.get("source"), identity.get("validated"))
+            return []
+        logger.info("auto_bet: feed di mercato ok — %s", gate_reason)
 
     # --- FASE 2: risk capping (correlazione + esposizione totale) ---
     # Calcola esposizione corrente
@@ -1246,7 +1361,7 @@ def run_today_bets(stake_eur: float | None = None,
     if mode == "live":
         kept = []
         for c in candidates:
-            stake = min(float(c["stake"]), _bankroll)
+            stake = min(float(c["stake"]), _spendable)
             if stake < MIN_STAKE_EUR:
                 if STAKE_CAP_HARD:
                     # I risk cap (correlazione/esposizione) hanno ridotto lo
@@ -1323,8 +1438,63 @@ def run_today_bets(stake_eur: float | None = None,
         except Exception as e:
             logger.warning("auto_bet: salvataggio sim %s: %s", cand["match_id"], e)
 
+    _shadow_run(mode=mode, bankroll=_bankroll, placed=len(placed))
     logger.info("auto_bet: %d puntate piazzate (%s)", len(placed), mode)
     return placed
+
+
+def _shadow_run(*, mode: str, bankroll: float, placed: int = 0) -> dict | None:
+    """Shadow mode (15/09/2026): la catena Command valuta gli stessi segnali.
+
+    Emette e REGISTRA i comandi che la catena nuova produrrebbe, senza eseguire
+    nulla: nessun ordine, nessuna notifica, nessuna riga sul ledger `decisions`
+    (il giro gira ogni 60s: il registro shadow e' deduplicato). Serve al
+    confronto misurato prima di sostituire il percorso attuale (passo 3).
+
+    Fail-safe: qualunque errore viene loggato e non tocca il giro puntate.
+    Si spegne con `DECISION_SHADOW=0`.
+
+    **Feed di mercato (15/09/2026)**: la catena forza il refresh del gateway
+    SX (`decision/feeds.py`) prima di ogni valutazione di rischio e resta
+    ferma finche' il feed non e' fresco, conforme al contratto e validato. E'
+    una lettura PUBBLICA dell'exchange: zero crediti the-odds-api, nessun
+    ordine. Si spegne con `DECISION_FEED_ENABLED=0` (la catena valuta allora
+    senza il gate di mercato, senza toccare la rete).
+    """
+    try:
+        from decision.shadow import run_shadow, shadow_enabled
+        if not shadow_enabled():
+            return None
+        from decision.middleware import Observability
+
+        obs = Observability(component="auto_bet.shadow")
+        summary = run_shadow(bankroll=bankroll, mode=mode, observability=obs,
+                             request_id=f"auto_bet-{mode}")
+        if summary.get("blocked"):
+            logger.info("auto_bet shadow: catena ferma dal fail-fast (%s)",
+                        (summary["blocked"] or {}).get("name"))
+            return summary
+        market = summary.get("market") or {}
+        if market:
+            logger.info("auto_bet shadow: feed gateway=%s sorgente=%s schema=%s "
+                        "config=%s request=%s | %s quote (validato=%s)",
+                        market.get("gateway_id"), market.get("source"),
+                        market.get("schema_version"), market.get("config_hash"),
+                        market.get("request_id"), market.get("accepted"),
+                        market.get("verified"))
+        if summary.get("market_blocked"):
+            logger.warning("auto_bet shadow: gate di mercato -> %s "
+                           "(nessuna valutazione di rischio)", summary["market_blocked"])
+        logger.info("auto_bet shadow: %d segnali valutati %s | %d comandi "
+                    "registrati (0 ordini reali, esecuzione invariata) | %d "
+                    "revisioni in coda per l'umano",
+                    summary.get("evaluated", 0), summary.get("by_verdict") or {},
+                    sum((summary.get("by_command") or {}).values()),
+                    summary.get("reviews_queued", 0))
+        return summary
+    except Exception as exc:
+        logger.warning("auto_bet shadow: valutazione saltata (%s)", exc)
+        return None
 
 
 if __name__ == "__main__":

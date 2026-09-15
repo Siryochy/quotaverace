@@ -48,6 +48,80 @@ def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
                             market_prob=0.60, market_edge=0.07, status=status)
 
 
+class TestGateDiMercato:
+    """Lo stop del percorso d'ORDINE resta finche' il feed non e' validato.
+
+    Il gate e' fail-closed: senza un refresh fresco, conforme al contratto e
+    validato la catena si ferma qui — nessun ordine, nessuna riga sul ledger.
+    Il feed primario e' SX Bet; qui la sorgente e' finta (zero rete, zero
+    crediti) e `decision.feeds` viene iniettato.
+    """
+
+    def _feed(self, tmp_path, *, rows=True, min_refreshes=3):
+        from decision import MarketFeed, StaticSource
+        dati = [{
+            "schema_version": "1.0", "event_id": "sx-m1", "market": "1X2",
+            "selection": "1", "odds": 1.65,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "sxbet", "gateway_id": "sxbet-feed",
+        }] if rows else []
+        return MarketFeed([StaticSource(dati, name="sxbet")],
+                          min_refreshes=min_refreshes,
+                          state_path=tmp_path / "feed_state.json")
+
+    def _inietta(self, monkeypatch, feed):
+        monkeypatch.setattr("decision.feeds.feed_enabled", lambda: True)
+        monkeypatch.setattr("decision.feeds.feed_from_env", lambda *a, **k: feed)
+
+    def test_feed_non_validato_blocca_le_puntate(self, monkeypatch, temp_db, tmp_path):
+        _seed_value_match(quota=1.65)
+        self._inietta(monkeypatch, self._feed(tmp_path, min_refreshes=3))
+        assert auto_bet.run_today_bets(stake_eur=5.0) == []
+        stato = auto_bet.market_gate_status()
+        assert stato["blocked"] is True
+        assert stato["reason"] == "feed_not_validated"
+        assert stato["validated"] is False
+        assert stato["gateway_id"] == "sxbet-feed"
+
+    def test_refresh_fallito_blocca(self, monkeypatch, temp_db, tmp_path):
+        from decision import MarketFeed, StaticSource
+        _seed_value_match(quota=1.65)
+        feed = MarketFeed([StaticSource([], name="sxbet", fail="SX 503")],
+                          state_path=tmp_path / "feed_state.json")
+        self._inietta(monkeypatch, feed)
+        assert auto_bet.run_today_bets(stake_eur=5.0) == []
+        assert auto_bet.market_gate_status()["reason"] == "feed_unavailable"
+
+    def test_feed_validato_lascia_passare(self, monkeypatch, temp_db, tmp_path):
+        monkeypatch.setitem(sys.modules, "adaptive_staking", None)
+        _seed_value_match(quota=1.65)
+        self._inietta(monkeypatch, self._feed(tmp_path, min_refreshes=1))
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert placed and placed[0]["mode"] == "sim"
+        assert auto_bet.market_gate_status()["blocked"] is False
+
+    def test_nessuna_sorgente_blocca(self, monkeypatch, temp_db, tmp_path):
+        from decision import MarketFeed
+        _seed_value_match(quota=1.65)
+        self._inietta(monkeypatch, MarketFeed([], state_path=tmp_path / "s.json"))
+        assert auto_bet.run_today_bets(stake_eur=5.0) == []
+        assert auto_bet.market_gate_status()["blocked"] is True
+
+    def test_errore_imprevisto_e_fail_closed(self, monkeypatch, temp_db):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("feed esploso")
+
+        monkeypatch.setattr("decision.feeds.feed_enabled", lambda: True)
+        monkeypatch.setattr("decision.feeds.feed_from_env", boom)
+        allowed, reason, identity = auto_bet._market_feed_gate()
+        assert allowed is False and "non valutabile" in reason and identity == {}
+
+    def test_feed_disattivato_non_blocca(self, monkeypatch, temp_db):
+        monkeypatch.setattr("decision.feeds.feed_enabled", lambda: False)
+        allowed, reason, _ = auto_bet._market_feed_gate()
+        assert allowed is True and "DECISION_FEED_ENABLED" in reason
+
+
 def test_sim_piazzata_con_quota_segnale(monkeypatch, temp_db):
     """SIM-only: puntata simulata con la quota del segnale, mode='sim'."""
     monkeypatch.setitem(sys.modules, "adaptive_staking", None)

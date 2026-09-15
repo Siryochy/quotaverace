@@ -24,6 +24,7 @@ testabile offline end-to-end.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 from . import kill_switch as kill_switch_mod
@@ -68,7 +69,8 @@ def resolve_review(queue: ReviewQueue, record_id: str, *, approve: bool,
                    limits: Optional[RiskLimits] = None, mode: Mode = "live",
                    max_stake_pct: Optional[float] = None,
                    ml_confidence: Optional[float] = None,
-                   has_clv_positive: Optional[bool] = None) -> DecisionRecord:
+                   has_clv_positive: Optional[bool] = None,
+                   now: Optional[datetime] = None) -> DecisionRecord:
     """Chiude una revisione: approva (e dimensiona) o rifiuta.
 
     Un `approve` su una voce scaduta al kickoff NON produce stake: la coda marca
@@ -82,7 +84,7 @@ def resolve_review(queue: ReviewQueue, record_id: str, *, approve: bool,
     record = queue.record_for(item)
 
     if not approve:
-        item = queue.reject(record_id, reviewer=reviewer, note=note)
+        item = queue.reject(record_id, reviewer=reviewer, note=note, now=now)
         record.risk.verdict = "reject"
         record.risk.reason = ReasonCode.REVIEW_REJECTED
         record.risk.detail = f"rifiutato da {reviewer}" + (f": {note}" if note else "")
@@ -90,7 +92,7 @@ def resolve_review(queue: ReviewQueue, record_id: str, *, approve: bool,
         record.review_note = note
         return record
 
-    item = queue.approve(record_id, reviewer=reviewer, note=note)
+    item = queue.approve(record_id, reviewer=reviewer, note=note, now=now)
     if item.get("status") != "approved":
         record.risk.verdict = "reject"
         record.risk.reason = ReasonCode.REVIEW_EXPIRED

@@ -261,64 +261,102 @@ def _health_json(params=None):
 
 
 def _credits_json(params=None):
-    """Crediti the-odds-api dettaglio per sport + stato complessivo.
+    """Crediti the-odds-api: lettura AUTOREVOLE + consumo misurato.
 
     GET /api/credits
-    Ritorna: remaining_min, sport_count, dettagli per sport con cache
-    attiva, giorni al reset, stato operativita.
+
+    `remaining` e' l'ULTIMA lettura del contatore (`x-requests-remaining`, la
+    stessa fonte di `odds_api.get_remaining`): e' il valore su cui si basano
+    `status` e `sustainable_daily`. Prendere il MINIMO fra tutte le cache
+    inchiodava il numero a quello di un file vecchio e faceva sembrare il
+    piano quasi esaurito (12/09: reale 452, mostrato 58 -> la guardia
+    proattiva non riduceva le leghe e nessun alert scattava).
+    `remaining_min` resta come DIAGNOSTICA: e' il valore prudente piu' basso
+    fra le cache e serve solo a vedere quanto e' stantia la telemetria.
+
+    `estimated_daily_consumption` e' il consumo MISURATO (finestra 48h, la
+    stessa del watchdog Telegram) e `days_left_at_current_rate` la proiezione:
+    sono i numeri da guardare per capire se il budget regge fino al reset (una
+    stima scritta a mano invecchia in silenzio).
     """
-    from odds_api import get_quota, SPORTS_MAP
+    from odds_api import (CREDITS_RESET, SPORTS_MAP, credit_burn_rate,
+                          days_to_reset)
     import json, os, glob
     from pathlib import Path
     from datetime import datetime, timedelta
 
     remaining = []
     sport_details = []
+    readings = []        # (ts_lettura, crediti): base del consumo misurato
+    title_by_key = {v: k for k, v in SPORTS_MAP.items()}
     if DATA_DIR.exists():
         for f in sorted(DATA_DIR.glob("toa_*.json")):
             try:
                 d = json.loads(f.read_text())
-                if d.get("remaining") is not None:
-                    remaining.append(int(d["remaining"]))
-                    sport_key = f.name.replace("toa_scores_", "").replace("toa_soccer_", "")
-                    sport_title = SPORTS_MAP.get(sport_key, sport_key)
-                    ts = d.get("ts", 0)
-                    updated = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M UTC") if isinstance(ts, (int, float)) else str(ts)
-                    sport_details.append({
-                        "sport": sport_title,
-                        "sport_key": sport_key,
-                        "remaining": int(d["remaining"]),
-                        "updated": updated,
-                        "matches": len(d.get("payload", []))
-                    })
+                if d.get("remaining") is None:
+                    continue
+                rem = int(d["remaining"])
+                # Nome cache -> sport key: `toa_<key>.json` (quote) oppure
+                # `toa_scores_<key>.json` (punteggi). La vecchia estrazione
+                # lasciava il ".json" attaccato e cercava le chiavi sbagliate.
+                key = f.name[len("toa_"):-len(".json")]
+                if key.startswith("scores_"):
+                    key = key[len("scores_"):]
+                sport_title = title_by_key.get(key, key)
+                # `remaining_ts` e' l'istante della LETTURA del credito: in
+                # `fetch_scores` il `ts` puo' essere quello della cache
+                # precedente (payload riusato), quindi non e' affidabile.
+                ts = d.get("remaining_ts", d.get("ts"))
+                updated = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M UTC") \
+                    if isinstance(ts, (int, float)) else str(ts)
+                remaining.append(rem)
+                if isinstance(ts, (int, float)):
+                    readings.append((float(ts), rem))
+                sport_details.append({
+                    "sport": sport_title,
+                    "sport_key": key,
+                    "remaining": rem,
+                    "updated": updated,
+                    "matches": len(d.get("payload", []))
+                })
             except Exception:
                 continue
 
-    min_rem = min(remaining) if remaining else None
+    remaining_min = min(remaining) if remaining else None
+    # Lettura AUTOREVOLE: la piu' recente (stessa logica di _latest_credits).
+    latest = max(readings, key=lambda r: r[0]) if readings else None
+    rem_now = latest[1] if latest else remaining_min
     sport_count = len(remaining)
 
-    # Giorni al reset (01/10/2026)
-    reset_date = datetime(2026, 10, 1)
-    now = datetime.utcnow()
-    days_to_reset = max(0, (reset_date - now).days)
-
-    # Stima consumo giornaliero
-    daily_est = 25  # stima da AGENTS.md
-    sustainable_daily = min_rem / days_to_reset if days_to_reset > 0 and min_rem else 0
+    reset_days = days_to_reset()
+    # Consumo MISURATO e proiezione: stessa fonte del watchdog Telegram
+    # (`odds_api.credit_burn_rate`, finestra 48h) — endpoint e alert non
+    # possono raccontare due storie diverse.
+    burn = credit_burn_rate(cache_dir=DATA_DIR)
+    observed = burn["rate_per_day"] if burn else None
+    window_h = burn["window_hours"] if burn else None
+    daily_est = observed if observed is not None else 25
+    sustainable_daily = rem_now / reset_days if reset_days > 0 and rem_now else 0
+    days_left = (round(rem_now / observed, 1)
+                 if observed and observed > 0 and rem_now else None)
     status = "ok"
-    if min_rem is not None:
-        if min_rem <= 5: status = "critical"
-        elif min_rem <= 10: status = "danger"
-        elif min_rem <= 20: status = "warning"
-        elif min_rem <= 50: status = "low"
+    if rem_now is not None:
+        if rem_now <= 5: status = "critical"
+        elif rem_now <= 10: status = "danger"
+        elif rem_now <= 20: status = "warning"
+        elif rem_now <= 50: status = "low"
 
     return {
         "status": status,
-        "remaining_min": min_rem,
+        "remaining": rem_now,
+        "remaining_min": remaining_min,
         "sports_cached": sport_count,
-        "days_to_reset": days_to_reset,
-        "reset_date": reset_date.strftime("%Y-%m-%d"),
+        "days_to_reset": reset_days,
+        "reset_date": CREDITS_RESET.strftime("%Y-%m-%d"),
         "estimated_daily_consumption": daily_est,
+        "consumption_source": "measured" if observed is not None else "heuristic",
+        "observed_window_hours": window_h,
+        "days_left_at_current_rate": days_left,
         "sustainable_daily": round(sustainable_daily, 1),
         "sports": sorted(sport_details, key=lambda x: x["remaining"]),
         "thresholds": {"critical": 5, "danger": 10, "warning": 20, "low": 50}

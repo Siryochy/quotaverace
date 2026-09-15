@@ -31,6 +31,9 @@ os.environ.pop("EXECUTION_PROVIDER", None)     # nessun provider reale
 os.environ.pop("EXECUTION_APP_KEY", None)
 os.environ["STAKE_CAP_HARD"] = "1"
 os.environ.pop("SETTLEMENT_PAUSED", None)
+# Feed di mercato OFF: questa diagnostica non deve toccare la rete (il gate
+# vero e' coperto da `test_decision_feed.py` e da `python -m decision feed`).
+os.environ["DECISION_FEED_ENABLED"] = "0"
 
 # --- Cattura dei log --------------------------------------------------------
 _RECORDS: list[str] = []
@@ -177,7 +180,11 @@ def main() -> int:
     # Forza la modalita' LIVE con un wallet di 38 USDC (mai un ordine vero:
     # _live_fill e' sostituito da uno stub che conta le chiamate).
     auto_bet._execution_mode = lambda allow_sim=True: "live"
-    auto_bet._live_wallet_balance = lambda: 38.0
+    # Wallet reale: 36 USDC liberi + 2 in gioco (escrow) = 38 di EQUITY.
+    # Il cap 1% si misura sull'equity (fix stop-loss/equity del 15/09):
+    # sul solo disponibile sarebbe 0.36, non 0.38.
+    auto_bet._live_wallet_snapshot = lambda: {
+        "available": 36.0, "exposure": 2.0, "equity": 38.0}
     calls = {"fill": 0}
     _real_live_fill = auto_bet._live_fill   # ripristinata nello scenario E
 

@@ -6,7 +6,8 @@ import sqlite3
 from datetime import time, datetime
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
+                          ContextTypes)
 
 from config import DATA_DIR
 from poisson_engine import expected_goals, prob_1x2, prob_over_under, prob_btts
@@ -1122,7 +1123,7 @@ async def cmd_autobet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             # wallet e' troppo piccolo per rispettare il cap, l'admin deve
             # saperlo SUBITO (altrimenti sembra che il bot non funzioni).
             from auto_bet import (MIN_STAKE_EUR, cap_hard_active,
-                                   _live_wallet_balance, daily_stop_status)
+                                   _live_wallet_snapshot, daily_stop_status)
             cap_line = ("✅ attivo (il floor exchange non alza lo stake)"
                         if cap_hard_active() else
                         "❌ disattivato (vale il floor exchange)")
@@ -1131,16 +1132,28 @@ async def cmd_autobet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                          f"(perdita ≥ {_ds['loss_pct']:.0f}% giornaliera)"
                          if _ds.get("stopped") else
                          f"🟢 non attivo (soglia -{_ds['loss_pct']:.0f}%)")
+            # Il cap si misura sull'EQUITY (disponibile + in gioco): e' lo
+            # stesso valore che usa lo staking, cosi' l'operatore non legge
+            # due bankroll diversi (fix 15/09).
             wallet_warn = ""
             try:
-                bal = _live_wallet_balance()
-                if bal and cap_hard_active() and bal * 0.01 < MIN_STAKE_EUR:
+                snap = _live_wallet_snapshot()
+                if snap:
                     wallet_warn = (
-                        "\n⚠️ *Cap severo non sostenibile col saldo attuale:* "
-                        f"{bal:.2f} USDC → il cap 1% ({bal * 0.01:.2f}) è sotto "
-                        f"il minimo ordine ({MIN_STAKE_EUR:.2f} USDC): "
-                        "*nessun ordine verrà piazzato* finché il wallet non "
-                        "arriva a ~100 USDC (o 50 USDC per il cap 2%).\n")
+                        f"• Wallet: {snap['equity']:.2f} USDC equity "
+                        f"({snap['available']:.2f} liberi + "
+                        f"{snap['exposure']:.2f} in gioco)\n")
+                    if cap_hard_active() and \
+                            snap["equity"] * 0.01 < MIN_STAKE_EUR:
+                        wallet_warn += (
+                            "\n⚠️ *Cap severo non sostenibile col saldo "
+                            "attuale:* "
+                            f"{snap['equity']:.2f} USDC → il cap 1% "
+                            f"({snap['equity'] * 0.01:.2f}) è sotto "
+                            f"il minimo ordine ({MIN_STAKE_EUR:.2f} USDC): "
+                            "*nessun ordine verrà piazzato* finché il wallet "
+                            "non arriva a ~100 USDC (o 50 USDC per il cap "
+                            "2%).\n")
             except Exception:
                 pass
             text = (
@@ -1214,6 +1227,158 @@ async def cmd_settlement(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as e:
         logger.error("cmd_settlement: %s", e)
         await update.message.reply_text(f"❌ Errore: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Revisioni umane su Telegram (15/09/2026)
+# ---------------------------------------------------------------------------
+# La catena di decisione (`decision/`) mette in coda i verdetti `review`: qui
+# c'e' il pezzo che li rende azionabili — il prompt con i bottoni e il callback
+# IDEMPOTENTE che lo chiude. Due click, un redelivery di Telegram o un redeploy
+# a meta' lavoro producono UNA decisione (`decision/review_telegram.py`).
+# In questa fase l'approvazione NON esegue: i gateway sono shadow, quindi il
+# click attraversa la catena e REGISTRA l'ordine che sarebbe partito.
+
+REVIEW_JOB_INTERVAL_SECONDS = 300
+REVIEW_JOB_PROMPTS_PER_GIRO = 5
+
+
+def _review_queue_and_store():
+    """Coda + store dei callback (path dal volume, override da env)."""
+    from decision.review_queue import ReviewQueue
+    from decision.review_telegram import CallbackStore
+    return ReviewQueue(), CallbackStore()
+
+
+def _send_review_prompts_pass() -> dict:
+    """Bloccante: invia i prompt delle revisioni in attesa (per l'executor)."""
+    from decision.middleware import Observability
+    from decision.review_telegram import send_prompts
+    queue, store = _review_queue_and_store()
+    obs = Observability(component="bot.review")
+    return send_prompts(queue=queue, store=store,
+                        limit=REVIEW_JOB_PROMPTS_PER_GIRO, observability=obs)
+
+
+def _review_callback_pass(payload: dict) -> dict:
+    """Bloccante: chiude il callback e risponde a Telegram (per l'executor)."""
+    from decision.middleware import Observability
+    from decision.review_telegram import answer_callback
+    queue, store = _review_queue_and_store()
+    obs = Observability(component="bot.review")
+    try:
+        from auto_bet import _execution_mode
+        mode = _execution_mode()
+    except Exception:
+        mode = "sim"
+    outcome = answer_callback(payload, queue=queue, store=store, observability=obs,
+                              mode=mode if mode in ("live", "sim") else "sim")
+    return outcome.as_dict()
+
+
+async def review_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Bottone ✅ Approva / ❌ Rifiuta di un verdetto REVIEW (solo admin).
+
+    Si risponde SEMPRE alla callback query (anche sui duplicati): e' la
+    risposta che ferma i redelivery di Telegram. L'idempotenza sta nello store
+    (`decision/review_telegram.py`), non nel tempo di risposta.
+    """
+    query = update.callback_query
+    if query is None:
+        return
+    admin_ids = _admin_chat_ids()
+    if admin_ids and update.effective_chat and update.effective_chat.id not in admin_ids:
+        try:
+            await query.answer("⛔ Comando riservato agli admin.", show_alert=True)
+        except Exception:
+            pass
+        return
+    sender = getattr(query, "from_user", None)
+    message = getattr(query, "message", None)
+    payload = {
+        "id": query.id,
+        "data": query.data,
+        "from": {"id": getattr(sender, "id", None),
+                 "username": getattr(sender, "username", None),
+                 "first_name": getattr(sender, "first_name", None)},
+        "message": {
+            "message_id": getattr(message, "message_id", None),
+            "text": getattr(message, "text", "") or "",
+            "chat": {"id": getattr(getattr(message, "chat", None), "id", None)},
+        },
+    }
+    try:
+        loop = asyncio.get_running_loop()
+        outcome = await loop.run_in_executor(_scan_executor, _review_callback_pass, payload)
+    except Exception as exc:                      # mai far cadere l'handler
+        logger.error("review callback: %s", exc)
+        try:
+            await query.answer("Errore interno: riprova.", show_alert=True)
+        except Exception:
+            pass
+        return
+    logger.info("review callback: %s -> %s%s (revisione %s)",
+                outcome.get("action"), outcome.get("status"),
+                " [duplicato]" if outcome.get("duplicate") else "",
+                outcome.get("record_id") or "-")
+    if outcome.get("would_order"):
+        logger.info("review: ordine che SAREBBE partito (shadow) — stake %s, "
+                    "comandi %s", outcome.get("stake"), outcome.get("commands"))
+
+
+async def decision_review_job(context: ContextTypes.DEFAULT_TYPE = None) -> None:
+    """Invia i prompt delle revisioni in attesa (ogni 5 min, admin).
+
+    Il marker di prompt inviato sulla store rende l'invio idempotente: lo
+    stesso segnale non viene rimandato a ogni giro. Zero costi API (nessuna
+    rete oltre a Telegram).
+    """
+    try:
+        from decision.shadow import reviews_enabled
+        if not reviews_enabled():
+            return
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(_scan_executor, _send_review_prompts_pass)
+        if result.get("sent"):
+            logger.info("review: %d prompt revisioni inviati", result["sent"])
+        for error in result.get("errors") or []:
+            logger.warning("review: invio fallito (%s)", error)
+    except Exception as exc:
+        logger.warning("decision_review_job: %s", exc)
+
+
+async def cmd_revisioni(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/revisioni — stato delle revisioni umane (admin).
+
+    Mostra i verdetti `review` in attesa con le loro chiavi di callback (usabili
+    anche da CLI: `venv/bin/python -m decision review --callback <chiave>`) e il
+    riepilogo dei callback gia' gestiti.
+    """
+    admin_ids = _admin_chat_ids()
+    if admin_ids and update.effective_chat.id not in admin_ids:
+        await update.message.reply_text("⛔ Comando riservato agli admin.")
+        return
+    try:
+        from decision.review_telegram import (format_report as review_report,
+                                              pending_prompts)
+        queue, store = _review_queue_and_store()
+        prompts = pending_prompts(queue, store, include_prompted=True)
+        lines = [review_report(store=store, queue=queue)]
+        if prompts:
+            lines.append(f"\n  prompt (con chiave per la CLI):")
+            for prompt in prompts[:5]:
+                lines.append(
+                    f"    · {prompt['entry'].get('selection')} "
+                    f"@ {prompt['entry'].get('price')} → "
+                    f"`{prompt['callback_ids']['approve']}`")
+        else:
+            lines.append("\n  nessuna revisione in attesa")
+        lines.append("\n  Approva/rifiuta dai bottoni del prompt, oppure:")
+        lines.append("  `venv/bin/python -m decision review --callback <chiave>`")
+        await update.message.reply_text("\n".join(lines))
+    except Exception as exc:
+        logger.error("cmd_revisioni: %s", exc)
+        await update.message.reply_text(f"❌ Errore: {exc}")
 
 
 async def cmd_sxscan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1634,12 +1799,15 @@ async def drift_watchdog_job(context: ContextTypes.DEFAULT_TYPE = None):
         logger.warning("drift_watchdog fallito: %s", e)
 
 
-async def credit_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
+async def credit_watchdog_job(context: ContextTypes.DEFAULT_TYPE = None):
     """Monitoraggio crediti the-odds-api ogni 6h.
 
-    Legge le cache toa_*.json per trovare i crediti residui,
-    invia alert Telegram sotto le soglie (50, 20, 10, 5)
-    e avvisa se remaining < MIN_REMAINING (stop quote).
+    Due campanelli, perche' il livello da solo non basta:
+    1) soglie assolute (50/20/10/5) sul residuo — avvisano quando e' tardi;
+    2) RITMO di consumo misurato (`odds_api.credit_budget_status`, finestra
+       48h) — dice se il budget regge fino al reset. Il 15/09 il residuo di
+       273 crediti sembrava tranquillo, ma a 58/giorno finiva il 20/09 (tre
+       settimane prima del reset): il ritmo lo vede, la soglia no.
     """
     from odds_api import get_quota
     try:
@@ -1677,6 +1845,51 @@ async def credit_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
                    f"Consumo ~6/giorno. Reset 01/10.\n" \
                    f"Monitorare: {remaining} / 6 = ~{remaining//6} giorni rimasti."
             await _send_report_to_recipients(context, text)
+
+        # --- RITMO DI CONSUMO (15/09): la soglia assoluta tace sopra 50 e
+        # --- avvisa quando il budget e' gia' compromesso. Il ritmo MISURATO
+        # --- dice invece se i crediti arrivano al reset: se il consumo
+        # --- proietta l'esaurimento prima, l'admin lo scopre oggi e puo'
+        # --- ridurre rotazione/settlement (anti-spam: 1 alert/giorno).
+        try:
+            from odds_api import credit_budget_status
+            from tracker import is_notified, mark_notified
+            b = credit_budget_status()
+            logger.info("credit_watchdog: residuo %s, ritmo %s/giorno "
+                        "(finestra %sh, %s letture), esaurimento %s, "
+                        "reset tra %s giorni, sostenibile %s/giorno",
+                        b["remaining"], b["rate_per_day"], b["window_hours"],
+                        b["samples"], b["exhaustion_date"],
+                        b["days_to_reset"], b["sustainable_per_day"])
+            if b.get("alert"):
+                from datetime import timezone as _tz, timedelta as _td
+                # Ora italiana (IT_OFFSET in `main()` e' locale: qui +2).
+                day = (datetime.now(_tz.utc)
+                       + _td(hours=2)).strftime("%Y-%m-%d")
+                if not is_notified("CREDIT_BURN", day):
+                    mark_notified("CREDIT_BURN", day)
+                    text = (
+                        "\u23f3 *CREDITI the-odds-api: il BUDGET NON ARRIVA "
+                        "AL RESET*\n\n"
+                        f"• Residuo: **{b['remaining']}** crediti\n"
+                        f"• Consumo misurato: **{b['rate_per_day']}/giorno** "
+                        f"(finestra {b['window_hours']:.0f}h, "
+                        f"{b['samples']} letture)\n"
+                        f"• Esaurimento previsto: **{b['exhaustion_date']}**\n"
+                        f"• Reset del piano tra {b['days_to_reset']} giorni "
+                        f"({b['sustainable_per_day']}/giorno sostenibili)\n\n"
+                        "Da ridurre (in ordine di costo): refetch del "
+                        "settlement per le leghe con righe aperte, rotazione "
+                        "quote (`ODDS_DAILY_BUDGET`), surebet. Le soglie "
+                        "proattive di `should_query_sport` scattano solo "
+                        "sotto 50 crediti: ora sei ancora sopra.")
+                    if context is not None:
+                        await _send_report_to_recipients(context, text)
+                    else:
+                        logger.warning("credit_watchdog: %s",
+                                       text.replace("\n", " | "))
+        except Exception as e:
+            logger.warning("credit_watchdog: ritmo non valutabile (%s)", e)
     except Exception as e:
         logger.error(f"credit_watchdog_job error: {e}")
 
@@ -1798,6 +2011,28 @@ async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
                             "prima rimuovi `data/execution/daily_stop.json`.")
                     await _send_report_to_recipients(context, text)
                     mark_notified("DAILY_STOP", today)
+                return
+            # Gate di mercato: il giro non parte senza un feed fresco,
+            # conforme e VALIDATO (sorgente primaria SX Bet). Lo stop resta
+            # finche' la validazione non e' raggiunta: e' la condizione
+            # richiesta prima di riaprire le puntate automatiche.
+            from auto_bet import market_gate_status
+            _mg = market_gate_status()
+            if _mg.get("blocked"):
+                if not is_notified("FEED_BLOCKED", today):
+                    text = ("📡 *PUNTATE FERME: GATEWAY DI MERCATO*\n\n"
+                            f"Motivo: `{_mg.get('reason')}` — {_mg.get('detail')}\n"
+                            f"Gateway: {_mg.get('gateway_id') or '-'} "
+                            f"| sorgente {_mg.get('source') or '-'}\n"
+                            f"Feed validato: {'sì' if _mg.get('validated') else 'no'}"
+                            f" | quote lette: {_mg.get('accepted')}\n\n"
+                            "Le puntate automatiche restano fermi finché il feed "
+                            "non è fresco, conforme al contratto e validato.\n"
+                            "Verifica: `/autobet` oppure "
+                            "`python -m decision feed --refresh --force`")
+                    await _send_report_to_recipients(context, text)
+                    mark_notified("FEED_BLOCKED", today)
+                    return
         except Exception as e:
             logger.error("auto_bet_job (blocked notify): %s", e)
         return
@@ -2025,6 +2260,12 @@ def main() -> None:
     application.add_handler(CommandHandler("backup", cmd_backup))
     application.add_handler(CommandHandler("autobet", cmd_autobet))
     application.add_handler(CommandHandler("settlement", cmd_settlement))
+    application.add_handler(CommandHandler("revisioni", cmd_revisioni))
+    # Revisioni umane: i bottoni ✅/❌ dei verdetti REVIEW. Il pattern limita
+    # l'handler ai NOSTRI callback (`rv:`), cosi' eventuali bottoni di altri
+    # messaggi non vengono intercettati.
+    application.add_handler(CallbackQueryHandler(review_callback_handler,
+                                                pattern=r"^rv:"))
     application.add_handler(CommandHandler("sxscan", cmd_sxscan))
     application.add_handler(CommandHandler("sync", cmd_sync))
     application.add_handler(CommandHandler("quota", cmd_quota))
@@ -2087,6 +2328,13 @@ def main() -> None:
         _sx_min = max(5, int(os.getenv("SX_SCAN_INTERVAL_MIN", "15")))
         job_queue.run_repeating(sx_signals_job, interval=_sx_min * 60,
                                 first=90,
+                                job_kwargs={"max_instances": 1})
+        # Revisioni umane (15/09): i verdetti `review` della catena diventano
+        # prompt Telegram con bottoni. Frequenza 5 min (non c'e' fretta: il
+        # prompt serve prima del kickoff, e l'invio e' idempotente) e marker
+        # sullo store per non rimandare lo stesso segnale a ogni giro.
+        job_queue.run_repeating(decision_review_job,
+                                interval=REVIEW_JOB_INTERVAL_SECONDS, first=240,
                                 job_kwargs={"max_instances": 1})
         job_queue.run_daily(backup_data_job, time=time(hour=3, minute=30))
         job_queue.run_once(backup_data_job, when=10)  # snapshot di base all'avvio

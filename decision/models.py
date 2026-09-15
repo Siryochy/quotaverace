@@ -49,6 +49,11 @@ class ReasonCode(str, Enum):
     KILL_SWITCH_OFF = "kill_switch_off"          # /autobet off: stop totale
     DAILY_STOP_LOSS = "daily_stop_loss"          # -5% in 24h: puntate bloccate
     SETTLEMENT_PAUSED = "settlement_paused"      # non blocca la bet, blocca il referto
+    # --- gate di mercato (feed): fail-closed PRIMA del Risk Engine ---
+    FEED_MISSING = "feed_missing"                  # nessun refresh in questo giro
+    FEED_UNAVAILABLE = "feed_unavailable"          # refresh fallito/non conforme
+    FEED_STALE = "feed_stale"                      # quotatura troppo vecchia
+    FEED_NOT_VALIDATED = "feed_not_validated"      # serie di refresh conformi incompleta
     # --- Risk Engine ---
     LEAGUE_NOT_ALLOWED = "league_not_allowed"
     ODDS_TOO_LOW = "odds_too_low"
@@ -298,6 +303,7 @@ class DecisionRecord(BaseModel):
             "league": self.signal.league,
             "market": self.signal.market,
             "outcome": self.signal.outcome,
+            "selection_label": self.signal.selection_label,
             "kickoff": self.signal.kickoff.isoformat(),
             "price": self.signal.price,
             "price_source": self.signal.price_source,
@@ -313,6 +319,9 @@ class DecisionRecord(BaseModel):
             "verdict": self.risk.verdict,
             "reason": self.risk.reason.value,
             "mode": self.mode,
+            "provider": self.provider,
+            "approved_by": self.approved_by,
+            "review_note": self.review_note,
             "created_at": self.created_at.isoformat(),
         }
         if self.stake is not None:
