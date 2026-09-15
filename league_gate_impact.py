@@ -125,30 +125,28 @@ def _predictions_rows(conn: sqlite3.Connection, days: Optional[float]) -> List[d
             "closed": r["esito_finale"] is not None,
             "verdict": r["esito_finale"], "kickoff": r["commence_time"],
             "created_at": r["created_at"], "ev": r["ev"],
+            # Un segnale GIOCABILE e' un candidato che il filtro avrebbe potuto
+            # giocare: le righe `rejected` restano nel ledger (utile sapere
+            # cosa il gate taglierebbe) ma NON contano come segnali.
+            "playable": r["status"] in ("value", "strong_value", "moderate"),
         })
     return out
 
 
-def _bucket(rows: List[dict]) -> dict:
-    """Aggregati di un gruppo di righe.
+def _unit_bucket(rows: List[dict], source: str) -> dict:
+    """Aggregati di UNA sola fonte: qui l'unita' di misura e' coerente.
 
-    Il ROI si calcola sulla valuta delle PUNTATE (profit/stake sommati) e sulla
-    media per le PREVISIONI (profit per unita' di stake): vedi il docstring del
-    modulo. Qui si tiene conto di entrambe le fonti e si dichiara quale si sta
-    usando, cosi' un numero non viene confrontato con l'altro per errore.
+    `bets.profit` e' valuta (stake x (quota-1) / -stake) -> ROI sui soldi;
+    `predictions.profit` e' per unita' di stake -> ROI sulla media. Mescolare
+    le due fonti in un unico P/L produrrebbe un numero senza significato.
     """
     closed = [r for r in rows if r["closed"]]
     open_rows = [r for r in rows if not r["closed"]]
     won = [r for r in closed if r["verdict"] == "won"]
-    sources = {r["source"] for r in rows}
-    if sources == {"predictions"}:
-        unit_roi = True
-        staked = float(len(closed))
-        pnl = round(sum(r["profit"] for r in closed), 4)
-    else:
-        unit_roi = False
-        staked = round(sum(r["stake"] for r in closed), 4)
-        pnl = round(sum(r["profit"] for r in closed), 4)
+    unit_roi = source == "predictions"
+    staked = (float(len(closed)) if unit_roi
+              else round(sum(r["stake"] for r in closed), 4))
+    pnl = round(sum(r["profit"] for r in closed), 4)
     return {
         "n": len(rows),
         "open": len(open_rows),
@@ -161,8 +159,55 @@ def _bucket(rows: List[dict]) -> dict:
         "hit_rate": round(len(won) / len(closed), 4) if closed else None,
         "unit_roi": unit_roi,
         "open_stake": round(sum(r["stake"] for r in open_rows), 4),
-        "sources": sorted(sources),
     }
+
+
+def _bucket(rows: List[dict]) -> dict:
+    """Aggregati di un gruppo di righe, SEPARATI per fonte.
+
+    Con righe di entrambe le fonti (`--source all`) il P/L aggregato NON ha
+    unita' di misura: si azzera (`mixed=True`) e i numeri validi restano in
+    `by_source`, uno per fonte. Contare e classificare invece si puo' sempre:
+    `n`, `open`, `closed`, `won`, `lost`, `hit_rate` non dipendono dall'unita'.
+    """
+    sources = sorted({r["source"] for r in rows})
+    by_source = {src: _unit_bucket([r for r in rows if r["source"] == src], src)
+                 for src in sources}
+    closed = [r for r in rows if r["closed"]]
+    won = [r for r in closed if r["verdict"] == "won"]
+    open_rows = [r for r in rows if not r["closed"]]
+    mixed = len(sources) > 1
+    single = by_source[sources[0]] if len(sources) == 1 else {}
+    if not sources:                       # gruppo vuoto: somme a zero
+        single = {"staked": 0.0, "pnl": 0.0, "roi": None, "unit_roi": None}
+    # Segnali GIOCABILI del gruppo: le puntate (denaro vero/simulato) piu' le
+    # previsioni con status giocabile. E' il sottoinsieme su cui si decide.
+    playable_closed = len([r for r in closed if _is_playable(r)])
+    return {
+        "n": len(rows),
+        "open": len(open_rows),
+        "closed": len(closed),
+        "won": len(won),
+        "lost": len(closed) - len(won),
+        "playable": len([r for r in rows if _is_playable(r)]),
+        "playable_closed": playable_closed,
+        "staked": None if mixed else single.get("staked"),
+        "pnl": None if mixed else single.get("pnl"),
+        "roi": None if mixed else single.get("roi"),
+        "hit_rate": round(len(won) / len(closed), 4) if closed else None,
+        "unit_roi": None if mixed else single.get("unit_roi"),
+        "open_stake": round(sum(r["stake"] for r in open_rows), 4),
+        "sources": sources,
+        "mixed": mixed,
+        "by_source": by_source,
+    }
+
+
+def _is_playable(row: dict) -> bool:
+    """Le PUNTATE sono sempre giocate; le previsioni solo con status giocabile."""
+    if row["source"] == "bets":
+        return True
+    return bool(row.get("playable"))
 
 
 def _classify(row: dict) -> str:
@@ -262,12 +307,16 @@ def measure(days: Optional[float] = None, source: str = "bets",
             "kickoff": r["kickoff"],
         } for r in sorted(buckets[BLOCKED], key=lambda r: str(r["kickoff"] or ""))
               if not r["closed"]]
-        closed_blocked = out["buckets"][BLOCKED]["closed"]
-        closed_allowed = out["buckets"][ALLOWED]["closed"]
+        # L'affidabilita' si misura sui SEGNALI GIOCABILI chiusi, non su tutte
+        # le righe: le previsioni `rejected` restano nel ledger (dicono cosa il
+        # gate taglierebbe) ma gonfiare il conteggio con quelle farebbe
+        # sembrare solido un confronto basato su una manciata di giocate.
+        closed_blocked = out["buckets"][BLOCKED]["playable_closed"]
+        closed_allowed = out["buckets"][ALLOWED]["playable_closed"]
         out["reliable"] = closed_blocked >= MIN_RELIABLE_CLOSED
         out["caveat"] = (
-            f"campione: {closed_allowed} chiusure nelle leghe ammesse, "
-            f"{closed_blocked} in quelle bloccate — "
+            f"campione: {closed_allowed} segnali giocabili chiusi nelle leghe "
+            f"ammesse, {closed_blocked} in quelle bloccate — "
             + ("sotto" if closed_blocked < MIN_RELIABLE_CLOSED else "sopra")
             + f" la soglia di affidabilita' ({MIN_RELIABLE_CLOSED}): "
             + ("il P/L delle bloccate NON e' conclusivo."
@@ -297,18 +346,26 @@ def format_report(data: Optional[dict] = None) -> str:
     names = {ALLOWED: "ammesse", BLOCKED: "bloccate", UNKNOWN: "senza lega"}
     for name in (ALLOWED, BLOCKED, UNKNOWN):
         b = d["buckets"][name]
-        roi = "n/d" if b["roi"] is None else f"{b['roi']*100:+.1f}%"
-        lines.append(
-            f"  {names[name]:12} righe {b['n']:4} (in gioco {b['open']:3}, "
-            f"chiuse {b['closed']:3}) | P/L {b['pnl']:+.2f} | ROI {roi} "
-            f"| hit {'n/d' if b['hit_rate'] is None else format(b['hit_rate']*100, '.0f') + '%'}")
+        hit = "n/d" if b["hit_rate"] is None else format(b["hit_rate"] * 100, ".0f") + "%"
+        lines.append(f"  {names[name]:12} righe {b['n']:4} (in gioco {b['open']:3}, "
+                     f"chiuse {b['closed']:3}) | segnali giocabili "
+                     f"{b['playable']} (chiusi {b['playable_closed']}) | hit {hit}")
+        # Una riga per FONTE: valuta e unita' di stake non si sommano.
+        for src, sb in (b.get("by_source") or {}).items():
+            roi = "n/d" if sb["roi"] is None else f"{sb['roi']*100:+.1f}%"
+            unit = " (per unita' di stake)" if sb["unit_roi"] else ""
+            lines.append(f"      {src}: {sb['n']} righe (chiuse {sb['closed']}) "
+                         f"| P/L {sb['pnl']:+.2f} | ROI {roi}{unit}")
     blocked = d.get("blocked_by_league") or []
     if blocked:
         lines.append("  leghe che il gate vieterebbe:")
         for entry in blocked[:10]:
-            roi = "n/d" if entry["roi"] is None else f"{entry['roi']*100:+.1f}%"
-            lines.append(f"    - {entry['league']}: {entry['n']} righe "
-                         f"(chiuse {entry['closed']}), P/L {entry['pnl']:+.2f}, ROI {roi}")
+            pieces = []
+            for src, sb in (entry.get("by_source") or {}).items():
+                roi = "n/d" if sb["roi"] is None else f"{sb['roi']*100:+.1f}%"
+                pieces.append(f"{src} {sb['closed']} chiuse P/L {sb['pnl']:+.2f} ROI {roi}")
+            lines.append(f"    - {entry['league']}: {entry['n']} righe | "
+                         + " | ".join(pieces))
     cov = d.get("coverage") or {}
     if cov.get("total_rows"):
         allowed = cov["groups"][ALLOWED]

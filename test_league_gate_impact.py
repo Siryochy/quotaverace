@@ -107,7 +107,24 @@ class TestBucket:
     def test_gruppo_vuoto_non_solleva(self):
         b = lgi._bucket([])
         assert b["n"] == 0 and b["roi"] is None and b["hit_rate"] is None
-        assert b["staked"] == 0.0
+        assert b["staked"] == 0.0 and b["sources"] == []
+
+    def test_fonti_mescolate_non_producono_un_roi_senza_unita(self):
+        """Valuta (puntate) e unita' di stake (previsioni) non si sommano:
+        con entrambe le fonti il P/L aggregato si azzera, i numeri buoni
+        restano per fonte. E' il difetto che la misura in produzione ha
+        rivelato il 15/09 (`--source all`)."""
+        b = lgi._bucket([
+            {"source": "bets", "stake": 2.0, "profit": 1.4, "closed": True,
+             "verdict": "won"},
+            {"source": "predictions", "stake": 1.0, "profit": -1.0,
+             "closed": True, "verdict": "lost"},
+        ])
+        assert b["mixed"] is True
+        assert (b["pnl"], b["roi"], b["staked"]) == (None, None, None)
+        assert b["closed"] == 2 and b["hit_rate"] == 0.5
+        assert b["by_source"]["bets"]["roi"] == 0.7
+        assert b["by_source"]["predictions"]["roi"] == -1.0
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +237,41 @@ class TestMisura:
             conn.close()
         assert data["coverage"]["groups"][lgi.ALLOWED]["playable"] == 0
         assert "spegnerebbe la corsia" in lgi.format_report(data)
+
+    def test_report_con_fonti_mescolate_stampa_per_fonte(self, ledger):
+        tracker.save_match("m1", "Serie A", "Inter", "Napoli", _iso(3))
+        tracker.save_bet("m1", "1X2", "1", None, None, 1.6, 1.0)
+        _close(ledger, "bets", "m1", "lost", -1.0)
+        tracker.save_prediction("m1", "1X2", "1", 1.6, 0.6, 0.05, status="value")
+        _close(ledger, "predictions", "m1", "won", 0.6)
+        conn = _conn(ledger)
+        try:
+            report = lgi.format_report(lgi.measure(source="all", conn=conn))
+        finally:
+            conn.close()
+        assert "bets: " in report and "predictions: " in report
+        assert "per unita' di stake" in report
+
+    def test_le_righe_rejected_non_rendono_affidabile_il_campione(self, ledger):
+        """Le previsioni `rejected` restano nel ledger (dicono cosa il gate
+        taglierebbe) ma NON sono segnali giocabili: contarle farebbe sembrare
+        solido un confronto basato su una manciata di giocate."""
+        tracker.save_match("m1", "Serie A", "Inter", "Napoli", _iso(3))
+        for i, esito in enumerate(("1", "X", "2")):
+            tracker.save_prediction("m1", "1X2", esito, 1.6, 0.6, -0.1,
+                                    status="rejected")
+            _close(ledger, "predictions", "m1", "lost", -1.0)
+        tracker.save_bet("m1", "1X2", "1", None, None, 1.6, 1.0)
+        _close(ledger, "bets", "m1", "lost", -1.0)
+        conn = _conn(ledger)
+        try:
+            data = lgi.measure(source="all", conn=conn)
+        finally:
+            conn.close()
+        blocked = data["buckets"][lgi.BLOCKED]
+        assert blocked["closed"] == 4          # tutte le righe
+        assert blocked["playable_closed"] == 1  # solo la puntata
+        assert data["reliable"] is False
 
     def test_campione_piccolo_e_dichiarato_non_affidabile(self, ledger):
         """Con poche chiusure il P/L delle bloccate NON e' conclusivo: il
