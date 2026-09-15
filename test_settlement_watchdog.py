@@ -337,12 +337,128 @@ class TestRisparmioCreditiSettlement:
         assert tracker.get_leagues_with_open_rows(days_back=5) == ["Serie A"]
 
 
+class TestCoperturaSettlementSoloPuntate:
+    """15/09: il referto segue il DENARO (ledger `bets`), non la telemetria.
+
+    Misurato sul container: 27 chiamate /scores in 24h (~51-58 crediti/giorno,
+    ~2 a chiamata) contro 18/giorno sostenibili fino al reset del 01/10, e la
+    voce dominante erano le leghe con le SOLE previsioni aperte, riscaricate a
+    ogni giro del watchdog (ogni 4h). Le previsioni delle leghe senza puntate
+    restano aperte fino alla scadenza automatica (push): si perde telemetria,
+    mai il referto di una puntata.
+    """
+
+    def _recent(self):
+        return (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+
+    def test_lega_senza_puntate_non_interrogata(self, temp_db, monkeypatch):
+        monkeypatch.delenv("SETTLEMENT_BETS_ONLY", raising=False)
+        tracker.save_match("p1", "Serie A", "Inter", "Napoli", self._recent())
+        tracker.save_prediction("p1", "1X2", "1", 1.7, 0.60, 0.04)
+        tracker.save_match("b1", "Ligue 1", "Lione", "Nizza", self._recent())
+        tracker.save_bet("b1", "1X2", "1", None, None, 1.7, 5.0)
+        assert tracker.get_leagues_with_open_rows() == ["Ligue 1"]
+        # controprova: con la copertura estesa entra anche la lega di sola
+        # telemetria (comportamento pre-15/09)
+        assert tracker.get_leagues_with_open_rows(bets_only=False) == [
+            "Ligue 1", "Serie A"]
+
+    def test_env_riattiva_la_copertura_estesa(self, temp_db, monkeypatch):
+        monkeypatch.setenv("SETTLEMENT_BETS_ONLY", "0")
+        tracker.save_match("p1", "Serie A", "Inter", "Napoli", self._recent())
+        tracker.save_prediction("p1", "1X2", "1", 1.7, 0.60, 0.04)
+        assert tracker.get_leagues_with_open_rows() == ["Serie A"]
+
+    def test_verifica_periodica_saltata_sotto_soglia_crediti(self, temp_db,
+                                                             monkeypatch,
+                                                             tmp_path):
+        """Crediti sotto `CREDIT_LOW`: la verifica periodica (costo puro, non
+        salda nulla) si salta; la lega con una PUNTATA aperta resta nel piano."""
+        import json
+        import time
+        monkeypatch.setattr(tracker, "DATA_DIR", tmp_path)
+        monkeypatch.delenv("SETTLEMENT_BETS_ONLY", raising=False)
+        monkeypatch.delenv("SETTLEMENT_HEAL_INTERVAL_HOURS", raising=False)
+        # lega con bet CHIUSA da poco (solo verifica), cache punteggi vecchia
+        tracker.save_match("h1", "Serie A", "Inter", "Napoli", self._recent())
+        tracker.save_bet("h1", "1X2", "1", None, None, 2.1, 5.0)
+        conn = tracker._get_conn()
+        conn.execute("UPDATE bets SET esito_finale='won', profit=1.1, "
+                     "settled_at=? WHERE match_id='h1'",
+                     (datetime.now(timezone.utc).isoformat(),))
+        conn.commit()
+        conn.close()
+        sport = odds_api.SPORTS_MAP["Serie A"]
+        (tmp_path / f"toa_scores_{sport}.json").write_text(json.dumps(
+            {"ts": time.time() - 40 * 3600, "payload": []}))
+        # crediti abbondanti: la verifica periodica entra
+        monkeypatch.setattr(odds_api, "get_remaining", lambda: 300)
+        assert tracker.get_leagues_with_open_rows() == ["Serie A"]
+        # crediti sotto la soglia: il piano si svuota (nessuna riga da saldare)
+        monkeypatch.setattr(odds_api, "get_remaining", lambda: 40)
+        assert tracker.get_leagues_with_open_rows() == []
+        # ...ma una PUNTATA aperta si referta comunque
+        tracker.save_match("o1", "Ligue 1", "Lione", "Nizza", self._recent())
+        tracker.save_bet("o1", "1X2", "1", None, None, 1.7, 5.0)
+        assert tracker.get_leagues_with_open_rows() == ["Ligue 1"]
+
+    def test_crediti_illeggibili_non_cambiano_il_piano(self, temp_db,
+                                                       monkeypatch, tmp_path):
+        """`get_remaining()` che solleva (o None) NON deve cambiare il piano:
+        nessuna verifica silenziosamente saltata per un errore di lettura."""
+        monkeypatch.setattr(tracker, "DATA_DIR", tmp_path)
+        monkeypatch.delenv("SETTLEMENT_BETS_ONLY", raising=False)
+        tracker.save_match("h1", "Serie A", "Inter", "Napoli", self._recent())
+        tracker.save_bet("h1", "1X2", "1", None, None, 2.1, 5.0)
+        monkeypatch.setattr(odds_api, "get_remaining", lambda: None)
+        assert tracker.get_leagues_with_open_rows() == ["Serie A"]
+
+        def _boom():
+            raise RuntimeError("cache illeggibile")
+
+        monkeypatch.setattr(odds_api, "get_remaining", _boom)
+        assert tracker.get_leagues_with_open_rows() == ["Serie A"]
+
+    def test_residuo_dichiara_la_politica(self, temp_db, monkeypatch):
+        """Il residuo espone la politica attiva: senza dichiararla un residuo
+        piu' basso sembrerebbe un referto migliore invece di una scelta."""
+        monkeypatch.delenv("SETTLEMENT_BETS_ONLY", raising=False)
+        res = tracker.settlement_residue()
+        assert res["bets_only"] is True
+        monkeypatch.setenv("SETTLEMENT_BETS_ONLY", "0")
+        assert tracker.settlement_residue()["bets_only"] is False
+
+    def test_log_dichiara_la_politica(self, monkeypatch):
+        """La politica entra nella riga di log del giro (e del residuo)."""
+        monkeypatch.delenv("SETTLEMENT_BETS_ONLY", raising=False)
+        monkeypatch.setattr(odds_api, "get_remaining", lambda: 300)
+        assert tracker.settlement_coverage_policy() == "solo-puntate"
+        monkeypatch.setattr(odds_api, "get_remaining", lambda: 10)
+        assert "verifica-periodica-saltata" in tracker.settlement_coverage_policy()
+        monkeypatch.setenv("SETTLEMENT_BETS_ONLY", "0")
+        assert tracker.settlement_coverage_policy().startswith("tutte-le-righe")
+        # il log del watchdog la stampa davvero
+        src = Path("bot.py").read_text(encoding="utf-8")
+        assert "settlement_coverage_policy()" in src
+
+    def test_il_watchdog_usa_il_pianificatore(self):
+        """Tripwire: `_update_results` deve continuare a chiedere il piano a
+        `get_leagues_with_open_rows` (la politica vive in un posto solo)."""
+        src = Path("bot.py").read_text(encoding="utf-8")
+        body = src.split("def _update_results")[1].split("def _admin_chat_ids")[0]
+        assert "get_leagues_with_open_rows(" in body
+
+
 class TestResiduoSettlement:
     """Diagnosi del residuo: perche' ogni riga e' ancora aperta."""
 
     def test_classifica_i_motivi(self, temp_db, monkeypatch, tmp_path):
         monkeypatch.setenv("SETTLEMENT_WINDOW_DAYS", "3")
         monkeypatch.setenv("SX_STALE_DAYS", "2")
+        # Classificazione dei motivi con la copertura ESTESA (tutte le righe
+        # aperte): la copertura SOLO-PUNTATE del 15/09 e' coperta da
+        # TestCoperturaSettlementSoloPuntate.
+        monkeypatch.setenv("SETTLEMENT_BETS_ONLY", "0")
         monkeypatch.setattr(tracker, "DATA_DIR", tmp_path)
         recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         old = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
@@ -393,6 +509,7 @@ class TestResiduoSettlement:
     def test_residuo_vuoto_senza_righe_aperte(self, temp_db, monkeypatch,
                                                tmp_path):
         monkeypatch.setattr(tracker, "DATA_DIR", tmp_path)
+        monkeypatch.setenv("SETTLEMENT_BETS_ONLY", "0")   # copertura estesa
         tracker.save_match("m-x", "Serie A", "Inter", "Napoli",
                            (datetime.now(timezone.utc)
                             - timedelta(days=1)).isoformat())

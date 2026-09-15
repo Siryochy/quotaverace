@@ -572,7 +572,8 @@ def _update_results():
     from odds_api import (SPORTS_MAP, fetch_scores, match_scores_by_name,
                           SCORES_DAYS_FROM)
     from tracker import (save_result, get_results_stats, get_leagues_with_open_rows,
-                          settle_cassa, settle_predictions, settle_bets)
+                          settle_cassa, settle_predictions, settle_bets,
+                          settlement_coverage_policy)
     from rating_engine import compute_ratings
     # PAUSA SETTLEMENT (11/09/2026): durante il cambio di strategia nessuna
     # riga viene chiusa automaticamente. Si esce PRIMA di fetch_scores, cosi'
@@ -637,9 +638,10 @@ def _update_results():
             _cr_after = _credits_left()
             logger.info(
                 "settlement: %d leghe interrogate (%d non mappate, saltate), "
-                "%d partite aggiornate, crediti %s -> %s (%d usati)",
+                "%d partite aggiornate, crediti %s -> %s (%d usati), politica %s",
                 len(leagues) - skipped_unmapped, skipped_unmapped, updated,
-                _cr_before, _cr_after, _cr_before - _cr_after)
+                _cr_before, _cr_after, _cr_before - _cr_after,
+                settlement_coverage_policy())
         except Exception:
             pass
     if updated:

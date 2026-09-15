@@ -1885,9 +1885,47 @@ def _settlement_window_days() -> int:
         return default
 
 
+# --- COPERTURA DEL SETTLEMENT (15/09/2026) ---------------------------------
+# Direttiva del proprietario ("riduco la copertura settlement"): misurato il
+# 15/09, il referto costava **27 chiamate /scores in 24h (~51-58 crediti/giorno,
+# ~2 a chiamata)** contro 18/giorno sostenibili fino al reset del 01/10 — e la
+# voce dominante erano le leghe con le SOLE PREVISIONI aperte (telemetria di
+# calibrazione), riscaricate a ogni giro del watchdog (ogni 4h).
+# Da qui in poi una lega entra nel piano SOLO se ha una PUNTATA nel ledger
+# (reale o simulata) aperta o chiusa da poco: **il referto segue il denaro**.
+# Le previsioni delle leghe senza puntate restano aperte fino alla scadenza
+# automatica (`expire_stale_sx_rows`, chiusura come push): si perde telemetria
+# di calibrazione, MAI il referto di una puntata.
+# Env: `SETTLEMENT_BETS_ONLY=0` -> comportamento esteso (tutte le righe aperte).
+SETTLEMENT_BETS_ONLY_ENV = "SETTLEMENT_BETS_ONLY"
+
+
+def _settlement_bets_only() -> bool:
+    """True (default) se il settlement segue solo le leghe con puntate."""
+    return os.getenv(SETTLEMENT_BETS_ONLY_ENV, "1").strip().lower() not in (
+        "0", "false", "no", "off")
+
+
+def _credits_below_low_water() -> bool:
+    """True se i crediti sono sotto la soglia di risparmio (`CREDIT_LOW`).
+
+    Serve a SALTARE la sola verifica periodica (leghe senza righe aperte)
+    quando la quota scarseggia: e' costo puro che non salda nulla. Se i
+    crediti non sono leggibili si comporta come "non sotto soglia": nessun
+    cambio di comportamento silenzioso per un errore di lettura.
+    """
+    try:
+        import odds_api
+        rem = odds_api.get_remaining()
+        return rem is not None and rem < odds_api.CREDIT_LOW
+    except Exception:
+        return False
+
+
 def get_leagues_with_open_rows(recent_settled_hours: int = 48,
                                days_back: int | None = None,
-                               heal_interval_hours: float | None = None) -> list:
+                               heal_interval_hours: float | None = None,
+                               bets_only: bool | None = None) -> list:
     """Leghe con scommesse ATTIVE (o chiuse da poco) da refertare.
 
     Refertazione MIRATA del settlement (risparmio crediti the-odds-api): si
@@ -1912,7 +1950,13 @@ def get_leagues_with_open_rows(recent_settled_hours: int = 48,
     Le leghe che entrano SOLO per la finestra di verifica/heal (nessuna riga
     aperta) sono ri-interrogate con periodicità `heal_interval_hours`
     (default `SETTLEMENT_HEAL_INTERVAL_HOURS`, 36h), non a ogni scadenza
-    della cache punteggi: senza quel limite erano ~metà del costo.
+    della cache punteggi: senza quel limite erano ~metà del costo. Con i
+    crediti sotto `CREDIT_LOW` la verifica periodica viene SALTATA del tutto
+    (e' costo puro): si paga solo per saldare.
+
+    `bets_only` (default da `SETTLEMENT_BETS_ONLY`, ON): il piano segue SOLO
+    il ledger delle PUNTATE — le previsioni di leghe senza denaro non
+    generano chiamate (vedi il commento del blocco COPERTURA).
 
     Misura del residuo e del costo atteso del prossimo giro:
     `settlement_residue()`.
@@ -1922,16 +1966,25 @@ def get_leagues_with_open_rows(recent_settled_hours: int = 48,
         days_back = _settlement_window_days()
     if heal_interval_hours is None:
         heal_interval_hours = _heal_interval_hours()
+    if bets_only is None:
+        bets_only = _settlement_bets_only()
     conn = _get_conn(); c = conn.cursor()
     try:
-        # UNION ALL per non perdere le leghe presenti solo in uno dei ledger.
-        c.execute('''SELECT m.league, m.commence_time,
-                            p.esito_finale, p.settled_at
-                     FROM predictions p JOIN matches m ON m.id = p.match_id
-                     UNION ALL
-                     SELECT m.league, m.commence_time,
-                            b.esito_finale, b.settled_at
-                     FROM bets b JOIN matches m ON m.id = b.match_id''')
+        if bets_only:
+            # Solo il ledger delle puntate: il referto segue il denaro.
+            c.execute('''SELECT m.league, m.commence_time,
+                                b.esito_finale, b.settled_at
+                         FROM bets b JOIN matches m ON m.id = b.match_id''')
+        else:
+            # UNION ALL per non perdere le leghe presenti solo in uno dei due
+            # ledger (comportamento esteso, prima del 15/09).
+            c.execute('''SELECT m.league, m.commence_time,
+                                p.esito_finale, p.settled_at
+                         FROM predictions p JOIN matches m ON m.id = p.match_id
+                         UNION ALL
+                         SELECT m.league, m.commence_time,
+                                b.esito_finale, b.settled_at
+                         FROM bets b JOIN matches m ON m.id = b.match_id''')
         rows = c.fetchall()
     finally:
         conn.close()
@@ -1963,9 +2016,14 @@ def get_leagues_with_open_rows(recent_settled_hours: int = 48,
         if st is not None and recent <= st <= recent_max:
             heal_leagues.add(league)   # chiusa da poco: verifica/heal
     needed = set(open_leagues)
+    skip_heal = _credits_below_low_water()
     for lg in heal_leagues:
         if lg in open_leagues:
             needed.add(lg)
+            continue
+        if skip_heal:
+            # Crediti sotto soglia: la verifica periodica e' la prima cosa da
+            # tagliare (nessuna riga da saldare in questa lega).
             continue
         # Verifica periodica: solo se la cache punteggi e' piu' vecchia
         # dell'intervallo (None = assente/illeggibile -> si scarica).
@@ -1994,6 +2052,18 @@ def _league_to_sport(league):
         return league_to_sport(league)
     except Exception:
         return None
+
+
+def settlement_coverage_policy() -> str:
+    """Politica di copertura del settlement, in una riga (per i log).
+
+    Rende visibile nei log cio' che il referto sta facendo: senza, un residuo
+    piu' basso sembrerebbe un referto migliore invece di una scelta.
+    """
+    parts = ["solo-puntate" if _settlement_bets_only() else "tutte-le-righe"]
+    if _credits_below_low_water():
+        parts.append("verifica-periodica-saltata (crediti scarsi)")
+    return ", ".join(parts)
 
 
 def settlement_residue(window_days: int | None = None,
@@ -2115,6 +2185,10 @@ def settlement_residue(window_days: int | None = None,
         "window_days": window_days,
         "stale_days": stale_days,
         "heal_interval_hours": _heal_interval_hours(),
+        # Politica di copertura in vigore: senza dichiararla, un residuo piu'
+        # basso sembrerebbe un miglioramento del referto invece di una scelta.
+        "bets_only": _settlement_bets_only(),
+        "heal_skipped_low_credits": _credits_below_low_water(),
     }
 
 def get_results_stats():

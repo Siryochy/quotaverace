@@ -3079,3 +3079,41 @@ com'era previsto: «shadow, nessun ordine cambia»). Wallet 33.98 liberi +
 2.00 in gioco → equity 35.98. `STAKE_CAP_HARD=0` (scelta del proprietario
 del 12/09): il floor 1 USDC prevale sui cap percentuali, quindi le
 puntate riprendono a 1 USDC ciascuna.
+
+### Taglio copertura settlement: il referto segue il DENARO (15/09/2026, sera)
+
+**Direttiva del proprietario**: "riduco la copertura settlement" (l'altra
+risposta, sul gate leghe della corsia auto-bet, e' stata "prima misuro").
+
+**Misura che ha motivato il taglio** (sul container, 15/09): il settlement
+costava **27 chiamate `/scores` in 24h** (~51-58 crediti/giorno a ~2 crediti
+per chiamata) contro **18,1/giorno sostenibili** fino al reset del 01/10 —
+esaurimento previsto ~20/09. La voce DOMINANTE erano le leghe con le **sole
+previsioni aperte** (telemetria di calibrazione, nessun soldo in gioco),
+riscaricate a ogni giro del watchdog (ogni 4h).
+
+**Implementazione** (`tracker.get_leagues_with_open_rows`, `bot._update_results`):
+- **`SETTLEMENT_BETS_ONLY` (default ON)**: una lega entra nel piano solo se ha
+  una **PUNTATA** nel ledger (reale o simulata) aperta o chiusa da poco. Le
+  previsioni delle leghe senza puntate restano aperte fino alla scadenza
+  automatica (`expire_stale_sx_rows`, chiusura come push): **si perde
+  telemetria di calibrazione, MAI il referto di una puntata**. Ripristino del
+  comportamento esteso con `SETTLEMENT_BETS_ONLY=0`.
+- **Crediti sotto `CREDIT_LOW` (50)**: la **verifica periodica** (leghe senza
+  righe aperte, costo puro che non salda nulla, `SETTLEMENT_HEAL_INTERVAL_HOURS`
+  36h) viene **saltata del tutto**. Una puntata aperta si referta comunque.
+  Lettura crediti fallita/illeggibile -> comportamento invariato (nessuna
+  verifica saltata in silenzio).
+- **Politica dichiarata nei log e nel residuo**: nuova
+  `tracker.settlement_coverage_policy()` ("solo-puntate,
+  verifica-periodica-saltata (crediti scarsi)") stampata nella riga
+  `settlement: N leghe interrogate ... politica ...`; `settlement_residue()`
+  espone `bets_only` e `heal_skipped_low_credits`. Senza dichiararla, un
+  residuo piu' basso sembrerebbe un referto migliore invece di una scelta.
+- **Test**: `test_settlement_watchdog.TestCoperturaSettlementSoloPuntate`
+  (5 test: lega senza puntate non interrogata + controprova estesa, env che
+  riattiva la copertura, verifica periodica saltata sotto soglia crediti con
+  la puntata che resta nel piano, crediti illeggibili che non cambiano il
+  piano, politica dichiarata, tripwire sul pianificatore in `bot.py`).
+  `TestResiduoSettlement` ora gira esplicitamente con `SETTLEMENT_BETS_ONLY=0`
+  (la sua classificazione dei motivi e' quella a copertura estesa).
