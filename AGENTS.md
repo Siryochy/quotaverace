@@ -3049,3 +3049,33 @@ conflitto, **1688 test offline verdi** (4 lotti, `-m "not integration"`),
 registro shadow, coda revisioni) e la tabella `decisions`; il **gate di
 mercato** (feed SX, 3 refresh conformi) diventa l'autorita' sull'esecuzione e
 le revisioni si governano dai bottoni Telegram.
+
+**5) BUG trovato IN PRODUZIONE al primo giro dopo il deploy (fixato).** Il
+log del giro 17:36 UTC diceva `adapter: 3 segnali aperti su 4 righe di ledger`
+e la riga scartata era **`Atlético Madrid vs Osasuna`** con
+`esito: 'Atlético Madrid'`. Causa: il ledger `predictions` **non e' omogeneo**
+— `sx_signals` scrive `1`/`X`/`2`, `fixture_engine` scrive il **nome della
+squadra giocata** — e `signal_from_row` pretendeva `outcome in ("1","X","2")`,
+quindi scartava in silenzio proprio le righe della produzione (la catena
+misurava un insieme DIVERSO da quello su cui `auto_bet` scommette: il shadow
+perdeva il suo senso). Fix: nuova **`decision.adapters.canonical_outcome`**
+(stessa semantica di `auto_bet._canonical_esito`) — pass-through di 1/X/2,
+alias di pareggio, nome grezzo/RISOLTO (`team_names.resolve_team_name`,
+iniettabile) e `team_names.same_team` per codici di stato/sigle; se il nome
+coincide con ENTRAMBE le squadre o con nessuna → `None` (mai indovinare).
+`signal_from_row` accetta ora `resolve=` e `iter_signals` glielo passa.
+Test: `TestEsitoCanonico` in `test_decision_adapters.py` (forme canoniche,
+nome squadra → 1/2, tolleranza su codici di stato, mai indovinare, riga
+`Inter` → Signal con `prob_1`, regressione sul ledger misto a 4 righe).
+
+**Primo ordine reale dopo il fix (15/09 17:36 UTC)**: bet #41 `sx-L20021478`
+(Liverpool vs Tottenham, esito 1) **1.00 USDC @ 1.8561**, FULLY_FILLED
+(il floor EV era 1.86 → prezzo migliore). Il candidato Atlético Madrid è
+stato saltato per prezzo (`best sxbet 1.42 < floor 1.54`), esattamente il
+comportamento documentato. **Shadow**: 3 segnali valutati, verdetto
+`reject` x3, 3 comandi `persist_decision`, **0 ordini** dalla catena, 0
+revisioni in coda (la catena nuova e' piu' severa della corsia di cassa,
+com'era previsto: «shadow, nessun ordine cambia»). Wallet 33.98 liberi +
+2.00 in gioco → equity 35.98. `STAKE_CAP_HARD=0` (scelta del proprietario
+del 12/09): il floor 1 USDC prevale sui cap percentuali, quindi le
+puntate riprendono a 1 USDC ciascuna.

@@ -13,8 +13,8 @@ import pytest
 import value_filter as vf
 from decision import KillSwitchStatus, ReasonCode, RiskLimits, decide
 from decision.adapters import (
-    FULL_SAMPLE, calibration_active, compute_confidence, iter_signals,
-    model_coverage, signal_from_row,
+    FULL_SAMPLE, calibration_active, canonical_outcome, compute_confidence,
+    iter_signals, model_coverage, signal_from_row,
 )
 
 ALLOWED_LEAGUE = "Premier League"
@@ -140,6 +140,62 @@ class TestSignalDaRiga:
         assert "Pareggio" in signal_from_row(row(esito="X")).selection_label
 
 
+class TestEsitoCanonico:
+    """Il ledger NON e' omogeneo: `sx_signals` scrive '1'/'X'/'2',
+    `fixture_engine` scrive il NOME DELLA SQUADRA giocata.
+
+    Senza la normalizzazione l'adapter scartava i secondi come "esito non
+    valido" — visto in PRODUZIONE il 15/09 (Atlético Madrid vs Osasuna: la
+    riga scelta dalla catena era 'Atlético Madrid'; il vecchio codice la
+    rifiutava e il confronto shadow misurava un insieme diverso da quello su
+    cui la produzione scommette).
+    """
+
+    def test_forme_canoniche(self):
+        for esito in ("1", "X", "2"):
+            assert canonical_outcome(esito, "Inter", "Cagliari") == esito
+        assert canonical_outcome("x", "Inter", "Cagliari") == "X"
+        assert canonical_outcome("Pareggio", "Inter", "Cagliari") == "X"
+        assert canonical_outcome("draw", "Inter", "Cagliari") == "X"
+
+    def test_nome_squadra_diventa_esito(self):
+        assert canonical_outcome("Inter", "Inter", "Cagliari") == "1"
+        assert canonical_outcome("Cagliari", "Inter", "Cagliari") == "2"
+        # caso reale della produzione (15/09)
+        assert canonical_outcome("Atlético Madrid", "Atlético Madrid",
+                                 "Osasuna") == "1"
+
+    def test_nomi_risolti_e_codici_di_stato(self):
+        """Confronto sul nome RISOLTO e tollerante (codici di stato, sigle)."""
+        resolve = lambda n: {"Vila Nova": "Vila Nova GO"}.get(n, n)  # noqa: E731
+        assert canonical_outcome("Vila Nova GO", "Vila Nova", "Ponte Preta",
+                                 resolve=resolve) == "1"
+        # resolver iniettabile che normalizza l'alias societario
+        assert canonical_outcome("Spurs", "Tottenham", "Arsenal",
+                                 resolve=lambda n: {"Spurs": "Tottenham"}.get(n, n)) == "1"
+
+    def test_mai_indovinare(self):
+        """Nome di una terza squadra, dato incoerente o nome vuoto: None
+        (la riga si scarta come prima, nessun esito inventato)."""
+        assert canonical_outcome("Milan", "Inter", "Cagliari") is None
+        assert canonical_outcome("Inter", "Inter", "Inter") is None   # ambiguo
+        assert canonical_outcome("", "Inter", "Cagliari") is None
+        assert canonical_outcome("Inter", "", "") is None
+        assert canonical_outcome("1X", "Inter", "Cagliari") is None
+
+    def test_riga_con_nome_squadra_diventa_signal(self):
+        """Regressione end-to-end: la riga con esito = nome squadra produce
+        un Signal con l'esito canonico e la probabilita' del MODELLO giusta
+        (`prob_1`, non `prob_X`)."""
+        signal = signal_from_row(row(esito="Inter"), coverage=1.0,
+                                 calibrated=True)
+        assert signal is not None
+        assert signal.outcome == "1"
+        assert signal.selection_label == "Inter (1)"
+        assert signal.model_prob == pytest.approx(0.62)
+        assert signal_from_row(row(esito="Cagliari")).outcome == "2"
+
+
 # ---------------------------------------------------------------------------
 # 2. Copertura ratings e confidenza
 # ---------------------------------------------------------------------------
@@ -229,6 +285,25 @@ class TestLetturaLedger:
         # ev 0.05 (sx-2) sopra 0.04 (sx-1): ORDER BY ev DESC
         assert [s.match_id for s in signals] == ["sx-2", "sx-1"]
         assert signals[0].ev >= signals[1].ev
+
+    def test_ledger_misto_nome_squadra_e_codice(self, conn):
+        """Regressione della produzione (15/09): 4 righe aperte di cui UNA
+        con esito = nome squadra non devono piu' diventare 3 segnali —
+        quel segnale c'e' e la catena lo valuta come gli altri."""
+        add_match(conn, "sx-1", home="Atlético Madrid", away="Osasuna")
+        add_prediction(conn, "sx-1", esito="Atlético Madrid", quota=1.54,
+                       prob=0.764, ev=0.177, market_prob=0.649, market_edge=0.134,
+                       status="strong_value")
+        add_match(conn, "sx-2", home="Mainz", away="Union")
+        add_prediction(conn, "sx-2", esito="1", quota=1.70, prob=0.62, ev=0.05,
+                       market_prob=0.56, market_edge=0.06, status="value")
+        signals = iter_signals(conn=conn, calibrated=False,
+                               now=_utc(2026, 9, 14, 12), hours=72,
+                               resolve=lambda name: name)
+        assert len(signals) == 2
+        by_id = {s.match_id: s for s in signals}
+        assert by_id["sx-1"].outcome == "1"
+        assert by_id["sx-1"].tier == "strong_value"
 
     def test_copertura_dal_db(self, conn):
         add_match(conn, "sx-1")

@@ -41,6 +41,10 @@ FULL_SAMPLE = 8
 
 MODEL_PROB_BY_OUTCOME = {"1": "prob_1", "X": "prob_X", "2": "prob_2"}
 
+#: Esiti canonici del ledger e alias del pareggio.
+CANONICAL_OUTCOMES = ("1", "X", "2")
+DRAW_ALIASES = ("x", "draw", "pareggio", "tie")
+
 # Pesi di `compute_confidence` (somma massima 1.0; clamp finale 0..1).
 W_GATE_PASSED = 0.35      # il segnale ha gia' superato i gate di is_sane
 W_COVERAGE = 0.30         # ratings reali per entrambe le squadre
@@ -120,20 +124,79 @@ def calibration_active() -> bool:
         return False
 
 
+def canonical_outcome(esito: str, home: str, away: str,
+                      resolve: Optional[Callable[[str], str]] = None
+                      ) -> Optional[str]:
+    """Esito canonico 1/X/2 da un esito di ledger (None se non decidibile).
+
+    Il ledger `predictions` NON e' omogeneo: le righe scritte da `sx_signals`
+    portano gia' "1"/"X"/"2", quelle scritte da `fixture_engine` portano il
+    NOME DELLA SQUADRA giocata (stessa convenzione di
+    `auto_bet._canonical_esito`, che la normalizza a valle). Senza questa
+    normalizzazione l'adapter scartava in silenzio i segnali con il nome
+    squadra — misurato in PRODUZIONE il 15/09: 'Atlético Madrid' rifiutato
+    come "esito non valido" e il confronto shadow misurava un insieme diverso
+    da quello su cui la produzione scommette (3 segnali su 4 righe).
+
+    Deterministico e fail-closed: confronta il nome grezzo e quello RISOLTO
+    (`team_names.resolve_team_name`, iniettabile) e poi `team_names.same_team`
+    (tollerante a codici di stato e sigle societarie). Se l'esito coincide con
+    ENTRAMBE le squadre (dato incoerente) o con nessuna, ritorna None: la riga
+    viene scartata come prima, mai un esito indovinato.
+    """
+    raw = str(esito or "").strip()
+    if raw.lower() in DRAW_ALIASES:
+        return "X"
+    if raw in ("1", "2"):
+        return raw
+    home, away = str(home or "").strip(), str(away or "").strip()
+    if not raw or not (home or away):
+        return None
+    resolver = resolve or default_resolver()
+    try:
+        raw_r = resolver(raw)
+    except Exception:
+        raw_r = raw
+    candidates = {c for c in (raw, raw_r) if c}
+
+    def _matches(candidate: str, team: str) -> bool:
+        if candidate == team:
+            return True
+        try:
+            from team_names import same_team
+            return bool(same_team(candidate, team))
+        except Exception:
+            return False
+
+    hits = set()
+    for candidate in candidates:
+        for side, team in (("1", home), ("2", away)):
+            for name in {team, resolver(team)}:
+                if name and _matches(candidate, name):
+                    hits.add(side)
+    return hits.pop() if len(hits) == 1 else None
+
+
 def signal_from_row(row: Any, *, coverage: float = 0.0, calibrated: bool = False,
                     limits: Optional[RiskLimits] = None,
                     depth_usdc: Optional[float] = None,
                     has_clv_positive: Optional[bool] = None,
-                    price_source: str = "ledger") -> Optional[Signal]:
+                    price_source: str = "ledger",
+                    resolve: Optional[Callable[[str], str]] = None
+                    ) -> Optional[Signal]:
     """Un `Signal` da una riga del ledger (None se inutilizzabile)."""
     data = _row_dict(row)
     match_id = str(data.get("id") or data.get("match_id") or "").strip()
-    outcome = str(data.get("esito") or "").strip()
+    home = str(data.get("home_team") or "").strip()
+    away = str(data.get("away_team") or "").strip()
+    # Esito canonico: '1'/'X'/'2' oppure il nome della squadra giocata.
+    outcome = canonical_outcome(str(data.get("esito") or ""), home, away,
+                                resolve=resolve)
     price = _num(data.get("quota"))
     blended = _num(data.get("prob"))
     market_prob = _num(data.get("market_prob"))
 
-    if not match_id or outcome not in ("1", "X", "2"):
+    if not match_id or outcome is None:
         logger.warning("adapter: riga senza match_id/esito valido: %s", data)
         return None
     if price is None or price <= 1.0 or blended is None or market_prob is None:
@@ -340,6 +403,7 @@ def iter_signals(*, conn=None, now: Optional[datetime] = None, hours: float = 24
                 limits=limits,
                 depth_usdc=depth,
                 price_source=price_source,
+                resolve=resolver,
             )
             if signal is not None:
                 signals.append(signal)
@@ -354,7 +418,8 @@ def iter_signals(*, conn=None, now: Optional[datetime] = None, hours: float = 24
 
 
 __all__ = [
-    "FULL_SAMPLE", "MODEL_PROB_BY_OUTCOME", "QUERY_OPEN_SIGNALS",
-    "calibration_active", "compute_confidence", "default_resolver", "iter_signals",
-    "model_coverage", "signal_from_row",
+    "CANONICAL_OUTCOMES", "DRAW_ALIASES", "FULL_SAMPLE",
+    "MODEL_PROB_BY_OUTCOME", "QUERY_OPEN_SIGNALS", "calibration_active",
+    "canonical_outcome", "compute_confidence", "default_resolver",
+    "iter_signals", "model_coverage", "signal_from_row",
 ]
