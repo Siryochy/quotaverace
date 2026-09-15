@@ -3132,37 +3132,53 @@ campionati vincenti" (5 leghe ammesse) e' applicata dalla catena `decision/`
 (che infatti rifiuta con `league_not_allowed`) ma **non dalla corsia che
 piazza davvero**.
 
-**A. Il gate NON e' giudicabile sul P/L con questo ledger.**
-| gruppo | righe (bets) | chiuse | P/L | ROI |
+**A. Il gate NON e' giudicabile sul P/L con questo ledger** (tutto lo storico,
+`--source all`; le due fonti NON si sommano — il tool le separa):
+
+| gruppo | righe | segnali giocabili (chiusi) | PUNTATE | PREVISIONI (per unita') |
 |---|---|---|---|---|
-| ammesse | 1 (Premier League) | 1 | +0.99 | +99% |
-| bloccate | 4 (Serie A, EFL Champ, Scottish Prem, EFL Cup) | 1 | -1.00 | -100% |
-| senza lega | 36 | 36 | -6.36 | -11.2% |
-Sulle previsioni giocabili (1X2 value/strong/moderate): ammesse 6 chiuse
-(+80.2% unit), bloccate 7 (3 chiuse, +13.8%), senza lega 71 chiuse (-30.1%).
-**1 sola chiusura per lato e 36/41 bet senza lega in `matches`**: campione non
-conclusivo (soglia di affidabilita' 30 dichiarata dal tool). Il dato che invece
-conta: l'84% delle righe NON e' classificabile, quindi il ledger non puo'
-decidere il gate finche' la lega non viene propagata.
+| ammesse | 18 | 7 (7) | n=1, P/L +0.99, ROI +99% | 15 chiuse, ROI **+29.8%** |
+| bloccate | 78 | 11 (4) | n=1, P/L -1.00, ROI -100% | 31 chiuse, ROI **-22.8%** |
+| senza lega | 278 | 107 (107) | 36 chiuse, ROI -11.2% | 205 chiuse, ROI -13.2% |
+
+**7 segnali giocabili chiusi nelle ammesse contro 4 nelle bloccate**: sotto la
+soglia di affidabilita' (30) che il tool dichiara, quindi il P/L non decide
+nulla. Il dato che invece conta: **278 righe su 374 (74%) non hanno lega** (le
+36/41 puntate storiche senza riga in `matches`) — finche' la lega non viene
+propagata il ledger non potra' decidere il gate.
 
 **B. Il FLUSSO invece e' decisivo: il gate spegnerebbe la corsia.**
-Ultimi 3 giorni, 83 righe analizzate su **33 leghe**, di cui **5 giocabili**:
-- leghe ammesse: **11 righe (13%) ma 0 giocabili (0%)**;
-- leghe bloccate: 72 righe con **5 giocabili (100%)**.
-Le 3 bet live aperte del 15/09 sono tutte in leghe vietate (Scottish
-Premiership, EFL Championship, EFL Cup) e il registro shadow ha respinto
-**4/4** i segnali aperti con `league_not_allowed`.
-→ Applicare oggi il gate alla corsia auto-bet = **0 puntate** (con l'evidenza
-disponibile). La decisione resta del proprietario: il trade-off e'
-"prudenza (0 volume)" contro "copertura dei campionati dove la strategia e'
-stata validata" — e per il secondo serve prima la lega sui candidati.
+Ultimi 3 giorni (finestra mirata), 91 righe analizzate su **33 leghe**, di cui
+**13 giocabili**:
+- leghe ammesse: **17 righe (19%) con 6 giocabili**;
+- leghe bloccate: 74 righe con **7 giocabili (il resto sono righe rejected)**.
+Nel campione piu' stretto (83 righe, i soli segnali prodotti dai due cantieri
+nelle ultime 72h) le ammesse davano **11 righe (13%) e 0 giocabili**, mentre le
+5 giocabili erano **tutte in leghe vietate**. Le 3 bet live aperte del 15/09
+sono tutte in leghe vietate (Scottish Premiership, EFL Championship, EFL Cup) e
+il registro shadow ha respinto **4/4** i segnali aperti con
+`league_not_allowed`.
+→ Applicare oggi il gate alla corsia auto-bet = **molto vicino a zero
+puntate** (0 sui segnali giocabili delle ultime 72h). La decisione resta del
+proprietario: il trade-off e' "prudenza" contro "copertura dei campionati dove
+la strategia e' stata validata" — e per misurare il secondo serve prima la lega
+sui candidati (`fixture_engine`/`sx_signals` non la passano).
 
 **Nuovo strumento `league_gate_impact.py`** (diagnostica, NON decisionale):
 - `measure(days, source)` → bucket ammesse/bloccate/**senza lega** con righe,
-  in gioco, chiuse, staked, P/L, ROI, hit rate (valuta per le puntate, unita'
-  di stake per le previsioni: differenza dichiarata nel modulo), dettaglio per
-  lega bloccata, righe in gioco che il gate bloccherebbe subito, sezione
-  `coverage` (flusso) e `reliable` + `caveat` sul campione.
+  in gioco, chiuse, **segnali giocabili (e chiusi)**, dettaglio per lega
+  bloccata, righe in gioco che il gate bloccherebbe subito, sezione `coverage`
+  (flusso) e `reliable` + `caveat`.
+- **Le due fonti non si sommano** (difetto trovato MISURANDO in produzione il
+  15/09): `bets.profit` e' valuta, `predictions.profit` e' per unita' di stake
+  -> con `--source all` l'aggregato si azzera (`mixed: true`) e i numeri buoni
+  restano in `by_source`, uno per fonte. L'affidabilita' si conta sui **segnali
+  giocabili chiusi**, non su tutte le righe: le previsioni `rejected` dicono
+  cosa il gate taglierebbe ma non sono giocate.
+- **Assi temporali diversi e voluti**: i bucket P/L usano la **data del match**
+  (kickoff, fallback data di registrazione), la `coverage` usa la **produzione
+  del segnale** (`predictions.created_at`): le previsioni nascono 1-3 giorni
+  prima del kickoff.
 - CLI: `venv/bin/python league_gate_impact.py [--days N] [--source bets|all] [--json]`.
 - Garanzie verificate dai test: nessuna scrittura (mode=ro, nessun
   INSERT/UPDATE/DELETE nel sorgente), nessuna rete (nessun `odds_api`/
