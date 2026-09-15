@@ -3117,3 +3117,54 @@ riscaricate a ogni giro del watchdog (ogni 4h).
   piano, politica dichiarata, tripwire sul pianificatore in `bot.py`).
   `TestResiduoSettlement` ora gira esplicitamente con `SETTLEMENT_BETS_ONLY=0`
   (la sua classificazione dei motivi e' quella a copertura estesa).
+
+### Gate leghe sulla corsia auto-bet: MISURATO (15/09/2026, sera)
+
+**Direttiva del proprietario**: "prima misuro" (prima di allineare la corsia
+auto-bet a `STRATEGY_LEAGUES`). Misura fatta, in sola lettura sul ledger di
+produzione, con il nuovo `league_gate_impact.py` (zero ordini, zero crediti,
+connessione SQLite `mode=ro`).
+
+**Procedura attuale (bug di propagazione, non scelta)**: i candidati di
+`fixture_engine` e `sx_signals` NON portano la chiave `league`, quindi
+`is_sane(league="")` tratta la lega vuota come AMMESSA: la strategia "solo
+campionati vincenti" (5 leghe ammesse) e' applicata dalla catena `decision/`
+(che infatti rifiuta con `league_not_allowed`) ma **non dalla corsia che
+piazza davvero**.
+
+**A. Il gate NON e' giudicabile sul P/L con questo ledger.**
+| gruppo | righe (bets) | chiuse | P/L | ROI |
+|---|---|---|---|---|
+| ammesse | 1 (Premier League) | 1 | +0.99 | +99% |
+| bloccate | 4 (Serie A, EFL Champ, Scottish Prem, EFL Cup) | 1 | -1.00 | -100% |
+| senza lega | 36 | 36 | -6.36 | -11.2% |
+Sulle previsioni giocabili (1X2 value/strong/moderate): ammesse 6 chiuse
+(+80.2% unit), bloccate 7 (3 chiuse, +13.8%), senza lega 71 chiuse (-30.1%).
+**1 sola chiusura per lato e 36/41 bet senza lega in `matches`**: campione non
+conclusivo (soglia di affidabilita' 30 dichiarata dal tool). Il dato che invece
+conta: l'84% delle righe NON e' classificabile, quindi il ledger non puo'
+decidere il gate finche' la lega non viene propagata.
+
+**B. Il FLUSSO invece e' decisivo: il gate spegnerebbe la corsia.**
+Ultimi 3 giorni, 83 righe analizzate su **33 leghe**, di cui **5 giocabili**:
+- leghe ammesse: **11 righe (13%) ma 0 giocabili (0%)**;
+- leghe bloccate: 72 righe con **5 giocabili (100%)**.
+Le 3 bet live aperte del 15/09 sono tutte in leghe vietate (Scottish
+Premiership, EFL Championship, EFL Cup) e il registro shadow ha respinto
+**4/4** i segnali aperti con `league_not_allowed`.
+→ Applicare oggi il gate alla corsia auto-bet = **0 puntate** (con l'evidenza
+disponibile). La decisione resta del proprietario: il trade-off e'
+"prudenza (0 volume)" contro "copertura dei campionati dove la strategia e'
+stata validata" — e per il secondo serve prima la lega sui candidati.
+
+**Nuovo strumento `league_gate_impact.py`** (diagnostica, NON decisionale):
+- `measure(days, source)` → bucket ammesse/bloccate/**senza lega** con righe,
+  in gioco, chiuse, staked, P/L, ROI, hit rate (valuta per le puntate, unita'
+  di stake per le previsioni: differenza dichiarata nel modulo), dettaglio per
+  lega bloccata, righe in gioco che il gate bloccherebbe subito, sezione
+  `coverage` (flusso) e `reliable` + `caveat` sul campione.
+- CLI: `venv/bin/python league_gate_impact.py [--days N] [--source bets|all] [--json]`.
+- Garanzie verificate dai test: nessuna scrittura (mode=ro, nessun
+  INSERT/UPDATE/DELETE nel sorgente), nessuna rete (nessun `odds_api`/
+  `fetch_scores`/`sx_signals`), errori mai propagati.
+- Test: `test_league_gate_impact.py` (21 verdi, ledger temporaneo).
