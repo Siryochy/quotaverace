@@ -3417,3 +3417,49 @@ regressioni verdi (`test_decision_*` = 399, `test_bot`, `test_auto_bet*`,
 storico") e lo passava al monitor, dove una finestra a 0 taglia OGNI evento (il
 cutoff diventa `now`) — gli indizi sparivano in silenzio proprio nel caso "tutto
 lo storico". Ora `0` viene tradotto in `None` prima della chiamata.
+
+### Superfici tennis: parser Challenger/ITF/WTA + backfill (16/09, sera)
+
+Direttiva del proprietario: ridurre la percentuale di superfici sconosciute del
+sandbox tennis (era 74%: 122/164 osservazioni) aggiornando il parser dei
+metadati tornei. Due commit (`011eaa5` parser, `b5634bb` backfill), entrambi
+deployati e verificati sul container.
+
+**1) PARSER ESTESO (`tennis_sandbox.detect_surface`).** Le etichette REALI del
+ledger `data/tennis_sandbox/ledger.db` non riconosciute erano 7 tornei:
+Szczecin, Biella, Tiburon, Rennes, Guangzhou, Phan Thiet, Guadalajara.
+Superficie di OGNI torneo verificata su fonte esterna (Wikipedia, campo
+"Surface" del box) prima di aggiungerla — mai indovinata: **Szczecin e Biella =
+clay** (terra rossa outdoor; per Biella distinta la Challenger ATP 2026
+dall'omonimo ITF femminile indoor defunto), **Tiburon/Rennes/Guangzhou/Phan
+Thiet/Guadalajara WTA = hard** (Rennes indoor, il resto outdoor). Matching
+deterministico invariato (`_SURFACE_KEYWORDS`, pesi 2 torneo/1 parola,
+ambiguita' → None); la variante diacritica "Phan Thiết" e' coperta dalla
+normalizzazione esistente. Test: `test_challenger_ita_wta` in
+test_tennis_sandbox.py + verifica post-deploy sul container (11/11 etichette
+OK, incluso il fallback None).
+
+**2) BACKFILL (`tennis_sandbox.backfill_surfaces()` + CLI
+`--backfill-surfaces`).** L'ELO impara la superficie dal campo della riga AL
+MOMENTO DEL SALDO (`settle`), quindi le righe salvate col parser vecchio e
+ANCORA APERE avrebbero continuato a non insegnare nulla alle superfici. Il
+backfill riempie `surface` su signals/observations col parser corrente: SOLO
+righe vuote, mai una superficie gia' registrata, tornei non riconosciuti
+restano ''. Idempotente e fail-safe (DB assente → contatori a zero). **Esito
+sul container: 56 segnali + 133 osservazioni aggiornati, 0 sconosciuti**;
+secondo giro 0/0/0 (idempotenza verificata sul ledger reale).
+
+**3) COPERTURA DOPO IL BACKFILL (misurata sul container, 16/09 19:42 UTC).**
+Sconosciuta **74% → 0%**: clay 65 osservazioni (51 saldate), hard 117 (95
+saldate). Totali ledger: 182 osservazioni (146 saldate), 109 segnali, 82
+chiusi (29V/51P), ROI −8.83% vs avg_ev +38.47% (la sovrastima EV resta il
+problema da tarare, ora misurabile per superficie).
+
+**4) LIMITE NOTO — l'apprendimento superficie-specifico NON e' retroattivo.**
+I 146 match gia' saldati lo erano con surface vuota (aggiornavano solo
+l'overall): `ratings.json` ha 269 giocatori e **0 rating di superficie**. I
+rating per superficie cominciano ad accumularsi dai 36 match ancora aperti
+e da quelli futuri (le cui righe ora portano la superficie corretta).
+Eventuale ricostruzione storica = replay ordinato di tutte le osservazioni
+saldate con ELO da zero (deciso solo se il proprietario lo richiede: ogni
+replay sovrascrive la storia dei rating).
