@@ -734,6 +734,57 @@ def _open_ledger(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def backfill_surfaces(db_path: Optional[Path] = None) -> Dict[str, int]:
+    """Riempie la colonna `surface` delle righe gia' salvate col parser
+    corrente (16/09: estensione Challenger/ITF/WTA).
+
+    Serve per le righe scritte PRIMA dell'estensione del parser: l'ELO
+    impara la superficie dal campo della riga AL MOMENTO DEL SALDO
+    (`settle`), quindi le osservazioni ancora 'open' recuperano
+    l'apprendimento superficie-specifico appena si chiudono.
+
+    Idempotente: aggiorna SOLO le righe con surface='' (mai una
+    superficie gia' registrata) e solo quando il parser riconosce il
+    torneo (mai indovinare: le leghe sconosciute restano '').
+    Fail-safe: DB assente -> contatori a zero; errori di riga non
+    interrompono il giro.
+    """
+    path = Path(db_path) if db_path is not None else LEDGER_DB
+    out = {"updated_signals": 0, "updated_observations": 0,
+           "unknown": 0}
+    if not path.exists():
+        return out
+    conn = _open_ledger(path)
+    try:
+        for table in ("signals", "observations"):
+            key = "updated_signals" if table == "signals" \
+                else "updated_observations"
+            rows = conn.execute(
+                f"SELECT id, league FROM {table} WHERE surface = ''"
+            ).fetchall()
+            for row in rows:
+                surf = ""
+                try:
+                    surf = detect_surface(row["league"]) or ""
+                except Exception:
+                    surf = ""
+                if not surf:
+                    out["unknown"] += 1
+                    continue
+                # Guardia in WHERE: mai sovrascrivere una superficie
+                # (doppia protezione oltre al filtro surface = '').
+                cur = conn.execute(
+                    f"UPDATE {table} SET surface=? WHERE id=? AND surface=''",
+                    (surf, row["id"]))
+                out[key] += max(0, cur.rowcount)
+        conn.commit()
+    finally:
+        conn.close()
+    if out["updated_signals"] or out["updated_observations"] or out["unknown"]:
+        logger.info("tennis sandbox backfill superfici: %s", out)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Motore sandbox
 # ---------------------------------------------------------------------------
@@ -1276,12 +1327,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "0 = scan singolo)")
     ap.add_argument("--report", action="store_true",
                     help="Report aggregato del ledger")
+    ap.add_argument("--backfill-surfaces", action="store_true",
+                    help="Riempie la superficie delle righe gia' salvate "
+                         "col parser corrente (idempotente, mai "
+                         "sovrascrive)")
     ap.add_argument("--json", action="store_true",
                     help="Output JSON (per --report o --scan)")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+
+    if args.backfill_surfaces:
+        res = backfill_surfaces()
+        print(json.dumps(res, ensure_ascii=False))
+        return 0
 
     if args.report:
         sb = TennisSandbox()

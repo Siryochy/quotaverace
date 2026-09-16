@@ -480,6 +480,100 @@ class TestScan:
 
 
 # ---------------------------------------------------------------------------
+# Backfill superfici (16/09: righe salvate col parser pre-estensione)
+# ---------------------------------------------------------------------------
+class TestBackfillSurfaces:
+    def _seed_obs(self, conn, league, market_hash, surface=None):
+        conn.execute(
+            "INSERT INTO observations (ts, day, market_hash, event_id, "
+            "league, surface, player_a, player_b, price_a, price_b) "
+            "VALUES (?, '2026-09-16', ?, 'L1', ?, ?, 'A', 'B', 1.9, 2.0)",
+            ("2026-09-16T10:00:00+00:00", market_hash, league,
+             surface or ""))
+        conn.commit()
+
+    def _seed_sig(self, conn, league, market_hash):
+        conn.execute(
+            "INSERT INTO signals (ts, day, market_hash, event_id, league, "
+            "player_a, player_b, selection, price, model_prob, ev) "
+            "VALUES (?, '2026-09-16', ?, 'L1', ?, 'A', 'B', 'A', 2.0, "
+            "0.6, 0.2)",
+            ("2026-09-16T10:00:00+00:00", market_hash, league))
+        conn.commit()
+
+    def test_riempie_le_righe_vuote(self, tmp_path):
+        db = tmp_path / "ledger.db"
+        conn = ts._open_ledger(db)
+        self._seed_obs(conn, "Biella Challenger ATP", "h1")
+        self._seed_obs(conn, "Rennes Challenger ATP", "h2")
+        conn.close()
+        res = ts.backfill_surfaces(db)
+        assert res["updated_observations"] == 2
+        conn = sqlite3.connect(db)
+        surf = dict(conn.execute(
+            "SELECT market_hash, surface FROM observations").fetchall())
+        conn.close()
+        assert surf["h1"] == "clay" and surf["h2"] == "hard"
+
+    def test_signals_e_observations_entrambi(self, tmp_path):
+        db = tmp_path / "ledger.db"
+        conn = ts._open_ledger(db)
+        self._seed_obs(conn, "Szczecin Challenger ATP", "h1")
+        self._seed_sig(conn, "Tiburon Challenger ATP", "h1")
+        conn.close()
+        res = ts.backfill_surfaces(db)
+        assert res["updated_observations"] == 1
+        assert res["updated_signals"] == 1
+        conn = sqlite3.connect(db)
+        assert conn.execute(
+            "SELECT surface FROM signals").fetchone()[0] == "hard"
+        conn.close()
+
+    def test_non_sovrascrive_superficie_esistente(self, tmp_path):
+        # Gia' registrata: NON viene toccata (mai sovrascrivere) e NON
+        # finisce nel contatore degli sconosciuti.
+        db = tmp_path / "ledger.db"
+        conn = ts._open_ledger(db)
+        self._seed_obs(conn, "Biella Challenger ATP", "h1", surface="hard")
+        conn.close()
+        res = ts.backfill_surfaces(db)
+        assert res["updated_observations"] == 0 and res["unknown"] == 0
+        conn = sqlite3.connect(db)
+        assert conn.execute(
+            "SELECT surface FROM observations").fetchone()[0] == "hard"
+        conn.close()
+
+    def test_sconosciuto_resta_vuoto(self, tmp_path):
+        # Mai indovinare: il torneo non riconosciuto resta ''
+        db = tmp_path / "ledger.db"
+        conn = ts._open_ledger(db)
+        self._seed_obs(conn, "Torneo Fantasma XYZ", "h1")
+        conn.close()
+        res = ts.backfill_surfaces(db)
+        assert res["updated_observations"] == 0 and res["unknown"] == 1
+        conn = sqlite3.connect(db)
+        assert conn.execute(
+            "SELECT surface FROM observations").fetchone()[0] == ""
+        conn.close()
+
+    def test_idempotente(self, tmp_path):
+        db = tmp_path / "ledger.db"
+        conn = ts._open_ledger(db)
+        self._seed_obs(conn, "Guadalajara", "h1")
+        conn.close()
+        first = ts.backfill_surfaces(db)
+        assert first["updated_observations"] == 1
+        second = ts.backfill_surfaces(db)
+        assert second["updated_observations"] == 0
+        assert second["unknown"] == 0
+
+    def test_db_assente(self, tmp_path):
+        res = ts.backfill_surfaces(tmp_path / "inesistente.db")
+        assert res == {"updated_signals": 0, "updated_observations": 0,
+                       "unknown": 0}
+
+
+# ---------------------------------------------------------------------------
 # Settlement
 # ---------------------------------------------------------------------------
 class TestSettle:
