@@ -142,6 +142,12 @@ export default defineRailway(() => {
     // catena: e' l'unico interruttore che serve per silenziare gli operatori.
     DECISION_REVIEWS: preserve(),
     DECISION_CALLBACK_STORE: preserve(),
+    // Shadow Validation (16/09/2026): con `DECISION_SHADOW_PERSIST=1` la shadow
+    // mode PERSISTE la valutazione sul ledger `decisions` (stato `pending`), la
+    // convalida subito e blocca l'ordine a convalida non positiva. Default di
+    // codice OFF: senza dichiarazione, un `config apply` la distruggerebbe (e
+    // con essa la scelta, in entrambe le direzioni).
+    DECISION_SHADOW_PERSIST: preserve(),
   };
 
   const api = service("api", {

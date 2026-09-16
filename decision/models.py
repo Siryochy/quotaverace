@@ -75,6 +75,27 @@ class ReasonCode(str, Enum):
     REVIEW_APPROVED = "review_approved"
     REVIEW_REJECTED = "review_rejected"
     REVIEW_EXPIRED = "review_expired"
+    # --- Shadow Validation (convalida della riga PERSISTITA) ---
+    STAKE_NOT_EXECUTABLE = "stake_not_executable"   # stake assente/cappato sotto il floor
+    VALIDATION_INCOMPLETE = "validation_incomplete"  # riga incompleta/illeggibile
+
+
+# Stati del ciclo di vita di una riga del ledger `decisions`:
+#
+#   pending   -> persistita, NON ancora convalidata (nessun ordine reale)
+#   validated -> convalida POSITIVA: l'ordine puo' partire
+#   rejected  -> convalida negativa: la riga resta come audit, niente ordine
+#
+# ⚠️ Duplicati di proposito in `tracker.py`: il ledger non importa questo
+# pacchetto (e viceversa). Un tripwire in `test_decision_validation.py`
+# confronta le due tabelle di stringhe, cosi' non possono divergere.
+DECISION_STATUS_PENDING = "pending"
+DECISION_STATUS_VALIDATED = "validated"
+DECISION_STATUS_REJECTED = "rejected"
+DECISION_STATUSES = (DECISION_STATUS_PENDING, DECISION_STATUS_VALIDATED,
+                     DECISION_STATUS_REJECTED)
+
+DecisionStatus = Literal["pending", "validated", "rejected"]
 
 
 class DataQuality(BaseModel):
@@ -279,6 +300,12 @@ class DecisionRecord(BaseModel):
     kill_switch: KillSwitchStatus = Field(default_factory=KillSwitchStatus)
     risk: RiskDecision
     stake: Optional[StakeDecision] = None
+    #: Stato della Shadow Validation. Nasce `pending` (la riga va PERSISTITA
+    #: prima di qualunque convalida) e viene mosso dal solo gateway di
+    #: validazione (`decision/gateways.ValidatingLedgerGateway`): il motore di
+    #: decisione non lo tocca, cosi' "decidere" e "convalidare" restano due
+    #: atti distinti e verificabili.
+    status: DecisionStatus = DECISION_STATUS_PENDING
     mode: Mode = "sim"
     provider: str = ""
     approved_by: Optional[str] = None      # revisione umana (Telegram)
@@ -318,6 +345,7 @@ class DecisionRecord(BaseModel):
             "calibrated": self.signal.data_quality.calibrated,
             "verdict": self.risk.verdict,
             "reason": self.risk.reason.value,
+            "status": self.status,
             "mode": self.mode,
             "provider": self.provider,
             "approved_by": self.approved_by,
@@ -342,8 +370,9 @@ class DecisionRecord(BaseModel):
 
 
 __all__ = [
-    "DataQuality", "DecisionRecord", "KILL_SWITCH_PRECEDENCE", "KillSwitchStatus",
-    "Market", "Mode", "Outcome", "ReasonCode", "RiskDecision", "Signal",
-    "StakeDecision", "Tier", "Verdict", "make_signal_id", "risk_approve",
-    "risk_reject", "risk_review", "utcnow",
+    "DECISION_STATUSES", "DECISION_STATUS_PENDING", "DECISION_STATUS_REJECTED",
+    "DECISION_STATUS_VALIDATED", "DataQuality", "DecisionRecord", "DecisionStatus",
+    "KILL_SWITCH_PRECEDENCE", "KillSwitchStatus", "Market", "Mode", "Outcome",
+    "ReasonCode", "RiskDecision", "Signal", "StakeDecision", "Tier", "Verdict",
+    "make_signal_id", "risk_approve", "risk_reject", "risk_review", "utcnow",
 ]

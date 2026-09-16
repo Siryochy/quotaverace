@@ -10,7 +10,7 @@ Copre: alias deterministici, fuzzy stretto (mai indovinare), resolver
 leghe gia' salvate.
 """
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -198,7 +198,14 @@ class TestSettlementLeghe:
 
 class TestSettlementNomiTolleranti:
     def _mk(self, mid, home, away, esito="1", league="Serie A"):
-        tracker.save_match(mid, league, home, away, "2026-09-10T00:00:00Z")
+        # Kickoff RELATIVO a now (ieri: passato ma non scaduto). Una data fissa
+        # diventa una time-bomb che scatta da sola: superati i 5 giorni di
+        # `SX_STALE_DAYS` la riga viene scaduta come push e i test che si
+        # aspettano la bet ancora APERTA cadono senza che nessuno abbia toccato
+        # il codice (osservato il 16/09 con la data fissa del 10/09).
+        kickoff = (datetime.now(timezone.utc) - timedelta(days=1)) \
+            .isoformat().replace("+00:00", "Z")
+        tracker.save_match(mid, league, home, away, kickoff)
         tracker.save_bet(mid, "1X2", esito, "0xabc", 1, 2.0, 1.0)
 
     def _event(self, home, away, sh, sa, eid="m1"):

@@ -7,6 +7,7 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from config import DATA_DIR
 
@@ -240,15 +241,29 @@ DECISION_FIELDS = (
     "record_id", "signal_id", "match_id", "league", "market", "outcome",
     "selection_label", "kickoff", "price", "price_source", "market_prob",
     "model_prob", "blended_prob", "edge", "ev", "tier", "confidence",
-    "model_coverage", "calibrated", "verdict", "reason", "mode", "provider",
-    "stake", "stake_executable", "kelly_fraction", "cap_pct", "cap_source",
-    "approved_by", "review_note", "created_at",
+    "model_coverage", "calibrated", "verdict", "reason", "status",
+    "mode", "provider", "stake", "stake_executable", "kelly_fraction",
+    "cap_pct", "cap_source", "approved_by", "review_note", "created_at",
 )
 # Colonne riempite DOPO la decisione (esecuzione e referto): un secondo
 # salvataggio dello stesso record non deve mai cancellarle.
 DECISION_LATE_FIELDS = ("order_id", "order_status", "esito_finale", "profit",
                         "settled_at")
 _DECISION_INT_FIELDS = ("calibrated", "stake_executable")
+
+# Stati del ciclo di vita di una decisione (Shadow Validation, 16/09/2026): la
+# riga NASCE `pending` col salvataggio e diventa `validated`/`rejected` quando il
+# motore di convalida la esamina (`decision/validation.py`). Solo `validated`
+# autorizza l'ordine reale: "persistito" non vuol dire "approvato".
+# ⚠️ Il ledger NON importa il pacchetto `decision` (e viceversa): le stringhe
+# sono duplicate qui di proposito e un tripwire in `test_decision_validation.py`
+# verifica che le due tabelle coincidano, cosi' non possono divergere in
+# silenzio.
+DECISION_STATUS_PENDING = "pending"
+DECISION_STATUS_VALIDATED = "validated"
+DECISION_STATUS_REJECTED = "rejected"
+DECISION_STATUSES = (DECISION_STATUS_PENDING, DECISION_STATUS_VALIDATED,
+                     DECISION_STATUS_REJECTED)
 
 
 def _ensure_decisions_table(c) -> None:
@@ -276,7 +291,7 @@ def _create_decisions_table(c) -> None:
         verdict TEXT, reason TEXT, mode TEXT, provider TEXT,
         stake REAL, stake_executable INTEGER, kelly_fraction REAL,
         cap_pct REAL, cap_source TEXT,
-        approved_by TEXT, review_note TEXT,
+        approved_by TEXT, review_note TEXT, status TEXT,
         order_id TEXT, order_status TEXT,
         esito_finale TEXT, profit REAL,
         created_at TEXT, settled_at TEXT)''')
@@ -303,6 +318,9 @@ def _migrate_decisions(c) -> None:
     c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_match ON decisions(match_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_open "
               "ON decisions(esito_finale)")
+    # Indice sullo STATO della validazione: e' il filtro del lavoro in attesa
+    # (`get_decisions(status=...)`) e dell'audit "cosa non e' mai stato validato".
+    c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_status ON decisions(status)")
 
 
 def _decision_flat_row(record) -> dict:
@@ -374,13 +392,19 @@ def save_decision(record, conn=None) -> str:
     return record_id
 
 
-def get_decisions(closed=None, verdict=None, limit=500) -> list[dict]:
-    """Righe del ledger decisioni (piu' recenti prima)."""
+def get_decisions(closed=None, verdict=None, limit=500, status=None) -> list[dict]:
+    """Righe del ledger decisioni (piu' recenti prima).
+
+    `status` filtra sullo stato della Shadow Validation (`pending` =
+    persistita ma non ancora convalidata, `validated` = ordine autorizzato).
+    """
     conn = _get_conn(); c = conn.cursor()
     q = f"SELECT {', '.join(DECISION_FIELDS + DECISION_LATE_FIELDS)} FROM decisions"
     conds, args = [], []
     if verdict:
         conds.append("verdict=?"); args.append(verdict)
+    if status:
+        conds.append("status=?"); args.append(status)
     if closed is True:
         conds.append("esito_finale IS NOT NULL")
     elif closed is False:
@@ -418,6 +442,82 @@ def update_decision_order(record_id, order: dict, conn=None) -> bool:
         if own_conn:
             conn.close()
     return changed
+
+
+def get_decision(record_id, conn=None) -> Optional[dict]:
+    """Una riga del ledger decisioni per `record_id` (None se assente).
+
+    Serve al motore di convalida per esaminare cio' che e' stato DAVVERO
+    scritto, non l'oggetto in memoria: se la riga non c'e', non c'e' nulla da
+    convalidare (fail-closed, vedi `decision/validation.py`).
+    """
+    if not record_id:
+        return None
+    own_conn = conn is None
+    if own_conn:
+        conn = _get_conn()
+    c = conn.cursor()
+    try:
+        _ensure_decisions_table(c)
+        row = c.execute(
+            f"SELECT {', '.join(DECISION_FIELDS + DECISION_LATE_FIELDS)} "
+            "FROM decisions WHERE record_id=?", (str(record_id),)).fetchone()
+    finally:
+        if own_conn:
+            conn.close()
+    if not row:
+        return None
+    return dict(zip(DECISION_FIELDS + DECISION_LATE_FIELDS, row))
+
+
+def set_decision_status(record_id, status: str, conn=None) -> bool:
+    """Scrive lo stato della Shadow Validation su una decisione persistita.
+
+    Ritorna True se una riga e' stata aggiornata. NON solleva su uno stato
+    ignoto: il ledger non deve rompere l'esecuzione (il chiamante fail-safe e'
+    `decision.feedback.set_status`).
+    """
+    if not record_id:
+        return False
+    own_conn = conn is None
+    if own_conn:
+        conn = _get_conn()
+    try:
+        cur = conn.cursor()
+        _ensure_decisions_table(cur)
+        cur.execute("UPDATE decisions SET status=? WHERE record_id=?",
+                    (str(status or ""), str(record_id)))
+        changed = cur.rowcount > 0
+        if own_conn:
+            conn.commit()
+    finally:
+        if own_conn:
+            conn.close()
+    return changed
+
+
+def decision_exists_for_signal(signal_id, conn=None) -> bool:
+    """Esiste gia' una riga per questo segnale?
+
+    E' la chiave di deduplicazione della shadow persistence: `record_id` porta
+    i SECONDI e cambia a ogni giro del job (ogni 60s), quindi deduplicare su di
+    esso scriverebbe la stessa opportunita' 1440 volte al giorno. Il segnale
+    (`signal_id` = match+mercato+esito) e' invece STABILE nel tempo.
+    """
+    if not signal_id:
+        return False
+    own_conn = conn is None
+    if own_conn:
+        conn = _get_conn()
+    c = conn.cursor()
+    try:
+        _ensure_decisions_table(c)
+        row = c.execute("SELECT 1 FROM decisions WHERE signal_id=? LIMIT 1",
+                        (str(signal_id),)).fetchone()
+    finally:
+        if own_conn:
+            conn.close()
+    return row is not None
 
 
 def settle_decisions() -> tuple:
@@ -500,7 +600,7 @@ def decision_stats() -> dict:
     rows = get_decisions(limit=100000)
     out = {
         "n": len(rows),
-        "by_verdict": {}, "by_reason": {},
+        "by_verdict": {}, "by_reason": {}, "by_status": {},
         "executable": 0, "with_order": 0, "stake_total": 0.0,
         "open": 0,
         "settled": _decision_bucket(),
@@ -510,8 +610,14 @@ def decision_stats() -> dict:
     for row in rows:
         verdict = row.get("verdict") or "?"
         reason = row.get("reason") or "?"
+        status = str(row.get("status") or "")
         out["by_verdict"][verdict] = out["by_verdict"].get(verdict, 0) + 1
         out["by_reason"][reason] = out["by_reason"].get(reason, 0) + 1
+        # Stato della Shadow Validation: le righe scritte prima del 16/09 non
+        # hanno stato (NULL) e restano fuori dal conteggio invece di essere
+        # contate come `pending` (non inventiamo uno stato che non c'e').
+        if status:
+            out["by_status"][status] = out["by_status"].get(status, 0) + 1
         if row.get("order_id"):
             out["with_order"] += 1
         if row.get("esito_finale"):

@@ -14,6 +14,7 @@ Gateway di produzione:
 | gateway | comando | effetto reale |
 |---|---|---|
 | `LedgerGateway` | `persist_decision` | riga sul ledger `decisions` (tracker) |
+| `ValidatingLedgerGateway` | `persist_decision` | come sopra **+ Shadow Validation** della riga appena scritta |
 | `PlaceOrderGateway` | `place_order` | ordine su SX Bet via `auto_bet._live_fill` |
 | `NotifyGateway` | `notify_operators` | messaggio Telegram a admin |
 | `ShadowGateway` | TUTTI | scrive il comando sullo shadow ledger, non esegue |
@@ -52,6 +53,10 @@ from .middleware import Observability, TraceContext
 logger = logging.getLogger("decision.gateways")
 
 SHADOW_LOG_ENV = "DECISION_SHADOW_LOG"
+#: Attributo che marca i gateway di SOLO AUDIT (ledger/telemetria): non ordinano
+#: e non notificano, quindi il `Dispatcher` deve escluderli nel dire "questo
+#: giro non ha eseguito nulla" (`DispatchReport.shadow`).
+AUDIT_ONLY_ATTR = "audit_only"
 #: Righe lette in coda al file shadow per ricostruire le `dedup_key` gia' viste
 #: (limite: il file puo' crescere, non si rilegge tutto a ogni giro).
 SHADOW_TAIL_LINES = 5000
@@ -130,6 +135,10 @@ class LedgerGateway(BaseGateway):
 
     name = "ledger"
     kinds = (CommandKind.PERSIST_DECISION,)
+    #: Scrive solo AUDIT (il ledger), non produce effetti sul mondo: non ordina
+    #: e non notifica. Il `Dispatcher` la usa per non dichiarare "non shadow" un
+    #: giro che in realta' non ha eseguito nulla.
+    audit_only = True
 
     def __init__(self, persist: Optional[Callable[[Any], dict]] = None) -> None:
         self._persist = persist
@@ -149,6 +158,106 @@ class LedgerGateway(BaseGateway):
         return CommandResult(kind=command.kind, ok=True, status="executed",
                              detail="decisione registrata",
                              data={"record_id": out.get("record_id", "")})
+
+
+class ValidatingLedgerGateway(LedgerGateway):
+    """Gateway di storage **+ Shadow Validation subito dopo il salvataggio**.
+
+    E' lo `LedgerGateway` con un passo in piu', nell'ordine esatto richiesto:
+
+        1. SALVA       la riga sul ledger (stato `pending`: lo decide il
+                       modello della decisione, non questo gateway);
+        2. RILEGGE     cio' che e' stato scritto (non l'oggetto in memoria);
+        3. CONVALIDA   la riga (`decision/validation.py`);
+        4. SCRIVE      lo stato risultante (`validated` / `rejected` / `pending`).
+
+    L'ordine reale non parte finche' la convalida non e' positiva: il risultato
+    porta `data["validated"]`, e il `Dispatcher(require_persist=True)` lo legge
+    per saltare il `place_order` (l'audit e le notifiche restano, perche' sono
+    l'altra meta' del lavoro).
+
+    Perche' la convalida sta QUI e non in un comando separato: la riga e il suo
+    stato sono due meta' dello stesso atto di audit — una riga senza stato non
+    dice nulla, uno stato senza riga non e' verificabile. Tenerli nello stesso
+    gateway rende impossibile convalidare qualcosa che non e' stato scritto,
+    senza aggiungere un tipo di comando che ogni fabbrica del motore dovrebbe
+    emettere (e ricordarsi di non dimenticare) in coppia.
+
+    **Fail-closed su ogni passo**: riga non rileggibile, validatore che esplode o
+    stato non scritto -> `ok=False` + `data["validated"]=False`, quindi ordine
+    bloccato. `reader`, `writer` e `validator` sono iniettabili: i test girano
+    senza DB.
+    """
+
+    name = "ledger_validating"
+
+    def __init__(self, persist: Optional[Callable[[Any], dict]] = None, *,
+                 validator: Optional[Callable[[Any], Any]] = None,
+                 reader: Optional[Callable[[str], Optional[dict]]] = None,
+                 writer: Optional[Callable[[str, str], dict]] = None) -> None:
+        super().__init__(persist)
+        self._validator = validator
+        self._reader = reader
+        self._writer = writer
+
+    # -- passi iniettabili ------------------------------------------------
+    def _read(self, record_id: str) -> Optional[dict]:
+        if self._reader is not None:
+            return self._reader(record_id)
+        from .feedback import read_row                       # import pigro
+        return read_row(record_id)
+
+    def _write(self, record_id: str, status: str) -> dict:
+        if self._writer is not None:
+            return self._writer(record_id, status)
+        from .feedback import set_status                     # import pigro
+        return set_status(record_id, status)
+
+    def _validated(self, row: Any) -> Any:
+        if self._validator is not None:
+            return self._validator(row)
+        from .validation import validate_row                 # import pigro
+        return validate_row(row)
+
+    def _run(self, command: Command, *, ctx, obs) -> CommandResult:
+        # 1. SALVA (stato `pending`, deciso dal modello della decisione).
+        saved = super()._run(command, ctx=ctx, obs=obs)
+        if not saved.ok:
+            return saved
+        record_id = str(saved.data.get("record_id") or command.record_id or "")
+
+        # 2. RILEGGE la riga scritta: senza riga non c'e' niente da convalidare.
+        row = self._read(record_id)
+        if not row:
+            return CommandResult(
+                kind=command.kind, ok=False, status="error",
+                detail=f"riga {record_id or '?'} non rileggibile: convalida "
+                       f"impossibile, ordine bloccato (fail-closed)",
+                data={"record_id": record_id, "validated": False,
+                      "decision_status": "pending"})
+
+        # 3. CONVALIDA (motore puro: legge il verdetto, non interpreta prosa).
+        outcome = self._validated(row)
+
+        # 4. SCRIVE lo stato: se non si scrive, non si autorizza l'ordine.
+        written = self._write(record_id, outcome.status)
+        data = {"record_id": record_id, "validated": outcome.validated,
+                "decision_status": outcome.status,
+                "validation_reason": outcome.reason.value,
+                "validation_detail": outcome.detail}
+        if not written.get("updated"):
+            return CommandResult(
+                kind=command.kind, ok=False, status="error",
+                detail=f"stato '{outcome.status}' non scritto "
+                       f"({written.get('error') or 'nessuna riga aggiornata'}): "
+                       f"ordine bloccato (fail-closed)",
+                data=dict(data, validated=False))
+
+        return CommandResult(
+            kind=command.kind, ok=True, status="executed",
+            detail=f"decisione registrata; convalida: {outcome.status} "
+                   f"({outcome.reason.value})",
+            data=dict(data, order_allowed=outcome.order_allowed))
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +481,7 @@ class ShadowGateway(BaseGateway):
 
 
 __all__ = [
-    "BaseGateway", "CommandResult", "Gateway", "LedgerGateway", "NotifyGateway",
-    "PlaceOrderGateway", "SHADOW_LOG_ENV", "ShadowGateway", "admin_targets",
-    "shadow_log_path",
+    "AUDIT_ONLY_ATTR", "BaseGateway", "CommandResult", "Gateway", "LedgerGateway",
+    "NotifyGateway", "PlaceOrderGateway", "SHADOW_LOG_ENV", "ShadowGateway",
+    "ValidatingLedgerGateway", "admin_targets", "shadow_log_path",
 ]

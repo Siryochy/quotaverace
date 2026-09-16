@@ -46,6 +46,7 @@ from __future__ import annotations
 from . import (
     commands, dispatcher, engine, feedback, feeds, gateways, guards, kill_switch,
     market, middleware, review_telegram, risk_engine, shadow, stake_engine,
+    validation,
 )
 from .commands import Command, CommandKind, CommandPlan
 from .dispatcher import DispatchReport, Dispatcher
@@ -56,7 +57,10 @@ from .feeds import (
     SxBetSource, build_sources, feed_enabled, feed_from_env, verify_feed,
 )
 from .feedback import attach_order, persist, persist_many, snapshot
-from .gateways import LedgerGateway, NotifyGateway, PlaceOrderGateway, ShadowGateway
+from .gateways import (
+    LedgerGateway, NotifyGateway, PlaceOrderGateway, ShadowGateway,
+    ValidatingLedgerGateway,
+)
 from .guards import (
     STAGE_BETTING, STAGE_SETTLEMENT, SAFETY_CHAIN, SafetyBlock, SafetyBlockError,
     require_clear,
@@ -70,15 +74,18 @@ from .market import (
 )
 from .middleware import Observability, TraceContext, sink_from_env
 from .models import (
-    DataQuality, DecisionRecord, KILL_SWITCH_PRECEDENCE, KillSwitchStatus,
-    ReasonCode, RiskDecision, Signal, StakeDecision, make_signal_id,
-    risk_approve, risk_reject, risk_review, utcnow,
+    DECISION_STATUS_PENDING, DECISION_STATUS_REJECTED, DECISION_STATUS_VALIDATED,
+    DECISION_STATUSES, DataQuality, DecisionRecord, DecisionStatus,
+    KILL_SWITCH_PRECEDENCE, KillSwitchStatus, ReasonCode, RiskDecision, Signal,
+    StakeDecision, make_signal_id, risk_approve, risk_reject, risk_review, utcnow,
 )
+from .validation import ValidationOutcome, validate_row
 from .pipeline import decide, decide_many, pending, resolve_review, summary
 from .review_queue import (
     ReviewQueue, STATUS_APPROVED, STATUS_EXPIRED, STATUS_PENDING, STATUS_REJECTED,
     default_path, format_report,
 )
+from .shadow import shadow_persist_enabled, SHADOW_PERSIST_ENV
 from .review_telegram import (
     CallbackStore, HttpTelegramClient, ReviewCallback, ReviewOutcome,
     answer_callback, build_prompt, callback_id, callback_token, handle_callback,
@@ -103,6 +110,9 @@ __all__ = [
     "guards", "Command", "CommandKind", "CommandPlan", "build_plan",
     "emit_many", "Dispatcher", "DispatchReport", "LedgerGateway",
     "NotifyGateway", "PlaceOrderGateway", "ShadowGateway",
+    "ValidatingLedgerGateway", "validation", "ValidationOutcome", "validate_row",
+    "DECISION_STATUSES", "DECISION_STATUS_PENDING", "DECISION_STATUS_VALIDATED",
+    "DECISION_STATUS_REJECTED", "DecisionStatus",
     # fail-fast sui blocchi di sicurezza
     "SAFETY_CHAIN", "STAGE_BETTING", "STAGE_SETTLEMENT", "SafetyBlock",
     "SafetyBlockError", "require_clear",
@@ -127,4 +137,6 @@ __all__ = [
     "handle_callback", "answer_callback", "parse_callback", "callback_id",
     "callback_token", "CallbackStore", "ReviewCallback", "ReviewOutcome",
     "HttpTelegramClient", "plan_for_resolved",
+    # Shadow Validation (stato della riga persistita, opt-in nella shadow mode)
+    "shadow_persist_enabled", "SHADOW_PERSIST_ENV",
 ]

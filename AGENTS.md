@@ -3184,3 +3184,152 @@ sui candidati (`fixture_engine`/`sx_signals` non la passano).
   INSERT/UPDATE/DELETE nel sorgente), nessuna rete (nessun `odds_api`/
   `fetch_scores`/`sx_signals`), errori mai propagati.
 - Test: `test_league_gate_impact.py` (21 verdi, ledger temporaneo).
+
+### Shadow Validation: stato `pending` + convalida della riga persistita (16/09/2026)
+
+**Richiesta del proprietario**: "integra la logica di Shadow Validation subito
+dopo la funzione di salvataggio nel gateway di storage; ogni valutazione
+persista nel database prima di essere elaborata nell'engine di convalida,
+mantenendo lo stato su 'pending' e bloccando l'invio reale fino all'esito
+positivo; includi record ID e trace ID nei log del middleware".
+
+**⚠️ Nota di partenza: "Shadow Validation" NON esisteva in questo progetto.**
+Prima di scrivere codice la richiesta e' stata mappata sui componenti reali e
+le due scelte non ovvie sono state chieste al proprietario:
+
+| termine della richiesta | cosa e' stato deciso |
+|---|---|
+| "gateway di storage" + "funzione di salvataggio" | `LedgerGateway._run` → `feedback.persist(row)` |
+| "engine di convalida" | **nuovo** `decision/validation.py` (non esisteva) |
+| stato "pending" | **nuovo** stato sul ledger `decisions` (la tabella non aveva `status`) |
+| "bloccare l'invio reale fino all'esito positivo" | nuovo flag **opt-in** `Dispatcher(require_persist=True)` |
+| "Shadow Validation" | vivere **dentro** il gateway di storage + opt-in nella shadow mode |
+
+Decisioni prese: **(1)** stato `pending` sul ledger **+** persistenza delle
+valutazioni shadow (opt-in, deduplicate); **(2)** `require_persist` come flag
+**opzionale, default invariato** (fail-soft storico).
+
+**1) IL CICLO DI VITA DIVENTA A TRE STATI.** `"persistito" non e' "approvato"`:
+la riga **nasce `pending`** col salvataggio, il motore di convalida la
+**rilegge dal ledger** e solo `validated` autorizza l'ordine.
+
+- `tracker.py`: colonna `status` in `DECISION_FIELDS` (migrazione ALTER
+  idempotente, come le altre), indice `idx_decisions_status`, costanti
+  `DECISION_STATUS_PENDING/VALIDATED/REJECTED`, piu' `get_decision(record_id)`,
+  `set_decision_status(record_id, status)`, `decision_exists_for_signal(signal_id)`,
+  filtro `get_decisions(status=...)` e `decision_stats()["by_status"]`.
+  Le righe legacy (status NULL) **non** vengono contate come `pending`: non si
+  inventa uno stato che non c'e'.
+- `decision/models.py`: `DecisionStatus` + `DecisionRecord.status` (`pending` di
+  default) + i nuovi `ReasonCode` `STAKE_NOT_EXECUTABLE` e `VALIDATION_INCOMPLETE`.
+  Il motore di decisione **non tocca** lo stato: lo muove solo la convalida, cosi'
+  "decidere" e "convalidare" restano due atti distinti.
+- Gli stati sono **duplicati di proposito** in `tracker` e `decision.models` (il
+  ledger non importa il pacchetto di decisione e viceversa, tripwire incluso) e
+  un test confronta le due tabelle di stringhe: non possono divergere in silenzio.
+
+**2) `ValidatingLedgerGateway`: la convalida sta DENTRO il gateway di storage.**
+Ordine esatto dei passi, garantito dal test (`persist → read → write`):
+
+    1. SALVA      la riga sul ledger (stato `pending`)
+    2. RILEGGE    cio' che e' stato scritto  ← NON l'oggetto in memoria
+    3. CONVALIDA  la riga (`decision/validation.py`, motore PURO)
+    4. SCRIVE     lo stato risultante (`validated` / `rejected` / `pending`)
+
+*Perche' la convalida legge la riga e non l'oggetto*: esaminando l'oggetto, una
+scrittura fallita non si vedrebbe e la catena autorizzerebbe un ordine in nome
+di una decisione che sul ledger non esiste. Leggendo cio' che e' stato scritto,
+"prima persistere, poi convalidare" e' una proprieta' **strutturale**.
+*Perche' nello stesso gateway e non in un comando separato*: riga e stato sono
+due meta' dello stesso atto di audit — tenerli insieme rende impossibile
+convalidare qualcosa che non e' stato scritto, senza aggiungere un tipo di
+comando che ogni fabbrica del motore dovrebbe emettere in coppia (e ricordarsi
+di non dimenticare). **Nessun comando nuovo, `COMMAND_ORDER` invariato,
+`by_command` della shadow mode invariato**: i 22 test preesistenti della shadow
+non sono stati toccati.
+
+**3) REGOLE DI CONVALIDA (nessuna soglia copiata, nessun fuzzy).** Il verdetto
+e' gia' scritto nella riga: qui si traduce una riga in uno stato.
+
+| riga persistita | stato | motivo |
+|---|---|---|
+| verdict `reject` (kill switch, feed, gate) | rejected | il motivo del rifiuto (letto, mai inventato) |
+| verdict `review` | **pending** | `review_pending` (un umano puo' ancora promuoverla) |
+| verdict `approve` + stake eseguibile | validated | `ok` |
+| verdict `approve` senza stake eseguibile | rejected | `stake_not_executable` (cap severo/floor) |
+| verdict assente/ignoto | **pending** | `validation_incomplete` |
+| riga assente o senza `record_id` | **pending** | `validation_incomplete` |
+
+`pending` blocca l'ordine esattamente come `rejected`: la differenza e' che
+`pending` puo' ancora diventare `validated`, `rejected` e' definitivo.
+
+**4) IL BLOCCO DELL'ORDINE (`Dispatcher(require_persist=True)`, opt-in).**
+Un `place_order` viene **saltato** se il `persist_decision` del piano e'
+fallito, se **non c'e' affatto** un `persist_decision`, o se la convalida ha
+dato esito non positivo (`data["validated"] != True`). Con
+`require_persist=False` (default) il dispatcher resta **fail-soft** come prima.
+
+- **Blocca SOLO l'ordine**: audit e notifiche proseguono. Una revisione umana
+  deve poter arrivare anche se il ledger ha avuto un problema — un guasto di
+  telemetria non deve diventare un silenzio operativo (test dedicato).
+- Un gateway di storage **senza** convalida (il vecchio `LedgerGateway`) non ha
+  `data["validated"]`: vale il salvataggio riuscito (retrocompatibilita'
+  esplicita, verificata dai test).
+- `DispatchReport` ha ora `aborted` e `blocked_reason`, e l'evento
+  `order.blocked` registra il motivo.
+- I gateway di **solo audit** (`audit_only = True` su `LedgerGateway` e
+  `ValidatingLedgerGateway`) sono esclusi da `DispatchReport.shadow`: senza
+  questa distinzione un giro in shadow mode con la persistenza attiva si
+  dichiarerebbe "non shadow" pur non avendo eseguito nulla sul mondo.
+
+**5) TRACCIABILITA' NEI LOG DEL MIDDLEWARE.** `record_id` e `signal_id` sono
+ora su `plan.dispatch`, sugli span `command.*`, su `command.result` (col campo
+`validated` della convalida) e su `plan.dispatched`; il `trace_id` (e
+`request_id`/`span_id`/`parent_span_id`) c'era gia' perche' arriva dal
+`TraceContext`. Test: `TestTracciabilita` (5 test, con trace fissa).
+
+**6) SHADOW MODE: persistenza OPT-IN (`DECISION_SHADOW_PERSIST`, default OFF).**
+Con l'interruttore attivo `run_shadow` registra **prima** il
+`ValidatingLedgerGateway` e poi lo `ShadowGateway` (il dispatcher sceglie il
+primo che sa gestire il comando): il `persist_decision` scrive **davvero** sul
+ledger, mentre `place_order`/`notify_operators` restano al registro shadow.
+`require_persist=True` garantisce che l'ordine risulti "sarebbe partito" solo a
+convalida positiva. `out` riporta `persist_enabled`, `persisted`,
+`persisted_duplicates`, `order_blocked`.
+
+**⚠️ DEVIAZIONE DICHIARATA dalla lettera della richiesta: la deduplicazione e'
+per `signal_id`, NON per `record_id`.** Il `record_id` ha granularita' al
+**secondo** e cambia a ogni giro del job (60s), quindi deduplicare su di esso
+non deduplicherebbe nulla: la stessa opportunita' finirebbe sul ledger fino a
+1440 volte al giorno. `signal_id` (match+mercato+esito) e' invece stabile.
+*Limite noto e accettato*: un segnale viene registrato alla **PRIMA**
+valutazione — se il prezzo si muove dopo, la riga non si aggiorna (una riga per
+opportunita', non un diario di ogni giro). Il contatore `persisted_duplicates`
+rende il fenomeno visibile.
+
+**7) IMPATTO IN PRODUZIONE: ZERO, per costruzione.** `DECISION_SHADOW_PERSIST`
+default OFF → la shadow mode non scrive sul ledger come prima;
+`require_persist` default False → il percorso d'ordine di `auto_bet` non cambia.
+Il nuovo stato `pending` **esiste** ma nessuno lo usa finche' (a) non si accende
+l'interruttore o (b) non si passa al percorso Command (passo 3). I test
+preesistenti della shadow che asserivano "nessuna riga sul ledger" passano
+invariati e lo dimostrano.
+
+**Test**: `test_decision_validation.py` **66 verdi, tutti OFFLINE** (gateway
+finti in memoria, SQLite temporaneo, zero rete/credenziali/ordini); pacchetto
+`decision` = **539 verdi**. Regressioni verdi: `test_auto_bet*` (3 file),
+`test_favourites_only`, `test_risk_guards`, `test_bot`, `test_web_api`,
+`test_reports`, `test_settlement_watchdog`, `test_sx_native_settlement`,
+`test_secret_hygiene`, `test_performance_report`. `verify_guardrails.py`:
+**A–F tutti bloccano** (invariato). `compileall` OK.
+
+**IaC**: `DECISION_SHADOW_PERSIST` dichiarata `preserve()` nel blocco
+`decisionEnv` di `.railway/railway.ts` (solo servizio `api`).
+`railway config plan` dopo la modifica: **0 to add, 1 to change, 0 to destroy**
+(l'unico cambio e' il flag non distruttivo `api-volume config.isCreated`).
+
+**Prossimo passo naturale**: accendere `DECISION_SHADOW_PERSIST=1` su Railway per
+far girare la convalida sui segnali veri (una riga per segnale, zero ordini) e
+leggere `decision_stats()["by_status"]` + il registro shadow dopo qualche
+giorno — e' il dato che serve prima di decidere il passo 3 (sostituire
+l'esecuzione di `auto_bet` col percorso Command).

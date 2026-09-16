@@ -9,10 +9,21 @@ percorsi e' misurato sui dati veri prima di sostituire qualcosa.
 Tre garanzie, tutte verificate dai test:
 
 1. **Nessun effetto reale**: i gateway sono lo `ShadowGateway` (registra) e
-   basta — niente ordini, niente Telegram, niente righe sul ledger `decisions`.
-   Perche' non si scrive sul ledger: il job gira ogni 60s e lo stesso segnale
+   basta — niente ordini, niente Telegram. Perche' di default non si scrive
+   nemmeno sul ledger `decisions`: il job gira ogni 60s e lo stesso segnale
    verrebbe registrato mille volte al giorno. Il registro della shadow mode e'
    il suo JSONL, deduplicato per `dedup_key`.
+
+   **Shadow Validation, opt-in** (`DECISION_SHADOW_PERSIST`, default OFF): con
+   l'interruttore attivo la valutazione viene anche PERSISTITA sul ledger
+   (stato `pending`) e subito convalidata dal gateway di storage
+   (`ValidatingLedgerGateway`), con l'ordine registrato — mai eseguito — solo a
+   convalida positiva (`require_persist=True`). La deduplicazione e' per
+   **segnale** (`signal_id`), non per `record_id`: il `record_id` porta i
+   secondi e cambia a ogni giro, quindi deduplicare su di esso non deduplicherebbe
+   nulla. Limite noto e accettato: un segnale viene registrato alla PRIMA
+   valutazione — se il prezzo si muove dopo, la riga non si aggiorna (una riga
+   per opportunita', non un diario di ogni giro).
 2. **Zero crediti** the-odds-api: del mercato si legge SOLO il feed primario
    (`decision/feeds.py`, SX pubblica: nessuna credenziale, nessun ordine). Con
    `DECISION_FEED_ENABLED=0` la chain valuta senza il gate di mercato (nessun
@@ -40,6 +51,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
 from . import engine, guards, kill_switch as kill_switch_mod
+from .commands import CommandKind
 from .dispatcher import Dispatcher
 from .feeds import feed_enabled as feeds_enabled, feed_from_env
 from .gateways import ShadowGateway, shadow_log_path
@@ -52,6 +64,7 @@ logger = logging.getLogger("decision.shadow")
 
 SHADOW_ENABLED_ENV = "DECISION_SHADOW"
 REVIEWS_ENABLED_ENV = "DECISION_REVIEWS"
+SHADOW_PERSIST_ENV = "DECISION_SHADOW_PERSIST"
 
 
 def shadow_enabled(value: Optional[str] = None) -> bool:
@@ -59,6 +72,21 @@ def shadow_enabled(value: Optional[str] = None) -> bool:
     raw = os.getenv(SHADOW_ENABLED_ENV) if value is None else value
     if raw is None or not str(raw).strip():
         return True
+    return str(raw).strip().lower() not in ("0", "false", "no", "off")
+
+
+def shadow_persist_enabled(value: Optional[str] = None) -> bool:
+    """La shadow mode PERSISTE le valutazioni sul ledger? (opt-in: default NO).
+
+    Default spento per non tradire il progetto del 15/09: la shadow mode non
+    scrive sul ledger perche' il job gira ogni 60s. Chi accende l'interruttore
+    accetta la deduplicazione per segnale (`signal_id`) come contropartita —
+    vedi la docstring del modulo. L'interruttore e' esplicito in ENTRAMBE le
+    direzioni: `1` accende, `0` spegne.
+    """
+    raw = os.getenv(SHADOW_PERSIST_ENV) if value is None else value
+    if raw is None or not str(raw).strip():
+        return False
     return str(raw).strip().lower() not in ("0", "false", "no", "off")
 
 
@@ -81,20 +109,28 @@ def run_shadow(*, signals: Optional[Sequence[Signal]] = None, bankroll: float = 
                kills: Optional[Any] = None, limits: Optional[RiskLimits] = None,
                feed: Optional[Any] = None, feed_required: Optional[bool] = None,
                review_queue: Optional[Any] = None,
-               reviews: Optional[bool] = None) -> dict:
+               reviews: Optional[bool] = None,
+               persist: Optional[bool] = None) -> dict:
     """Valuta i segnali aperti in shadow mode. NON esegue nulla, non solleva.
 
     Il **feed di mercato** (`decision/feeds.py`) e' la sorgente primaria dei
     dati di quotazione: se non viene iniettato e `DECISION_FEED_ENABLED` non e'
     a zero, la catena ne forza il refresh PRIMA di ogni valutazione di rischio
     e blocca il giro se il feed non e' fresco, conforme e validato.
+
+    `persist` (default: ambiente, `DECISION_SHADOW_PERSIST`, OFF) accende la
+    **Shadow Validation**: la valutazione viene scritta sul ledger con stato
+    `pending` e poi convalidata, e l'ordine che ne deriva resta registrato (mai
+    eseguito) solo a convalida positiva.
     """
     obs = observability or Observability()
     ctx = obs.new_trace(request_id=request_id)
     out: dict[str, Any] = {"evaluated": 0, "plans": [], "by_verdict": {},
                            "by_command": {}, "shadow": True, "blocked": None,
                            "market": None, "market_blocked": None, "errors": [],
-                           "reviews_queued": 0}
+                           "reviews_queued": 0, "persisted": 0,
+                           "persist_enabled": False, "persisted_duplicates": 0,
+                           "order_blocked": 0}
     try:
         status = kills or kill_switch_mod.status()
 
@@ -144,12 +180,38 @@ def run_shadow(*, signals: Optional[Sequence[Signal]] = None, bankroll: float = 
         if review_queue is None and (reviews if reviews is not None else reviews_enabled()):
             review_queue = ReviewQueue()
 
-        dispatcher = Dispatcher([ShadowGateway(shadow_path)], observability=obs)
+        # Shadow Validation (opt-in): con la persistenza attiva il gateway di
+        # storage va registrato PRIMA dello ShadowGateway (il dispatcher sceglie
+        # il primo che sa gestire il comando), cosi' il `persist_decision`
+        # scrive davvero sul ledger mentre `place_order`/`notify_operators`
+        # restano al registro shadow. `require_persist` impedisce che l'ordine
+        # parta (rectius: venga registrato come partente) senza convalida.
+        persist_enabled = shadow_persist_enabled() if persist is None else bool(persist)
+        out["persist_enabled"] = persist_enabled
+        gateways: list[Any] = [ShadowGateway(shadow_path)]
+        already_persisted: Optional[Any] = None
+        if persist_enabled:
+            from .feedback import row_exists_for_signal
+            from .gateways import ValidatingLedgerGateway
+            gateways = [ValidatingLedgerGateway(), ShadowGateway(shadow_path)]
+            already_persisted = row_exists_for_signal
+
+        dispatcher = Dispatcher(gateways, observability=obs, require_persist=persist_enabled)
         obs.event("shadow.start", ctx=ctx, signals=len(signals), mode=mode,
                   bankroll=bankroll, path=str(shadow_path or shadow_log_path()),
-                  advisories=advisories)
+                  advisories=advisories, persist=persist_enabled)
 
         for signal in signals:
+            # Un segnale -> una riga: senza questo controllo il job ogni 60s
+            # riscriverebbe la stessa opportunita' mille volte al giorno.
+            if already_persisted is not None and already_persisted(signal.signal_id):
+                out["persisted_duplicates"] += 1
+                out["plans"].append({
+                    "record_id": "", "signal_id": signal.signal_id,
+                    "match_id": signal.match_id, "outcome": signal.outcome,
+                    "commands": [], "persisted": "duplicate", "would_order": False,
+                })
+                continue
             # Una trace per decisione (stesso request_id): guardie, rischio e
             # comandi di QUEL segnale restano leggibili insieme anche quando
             # il giro ne valuta molti.
@@ -171,8 +233,20 @@ def run_shadow(*, signals: Optional[Sequence[Signal]] = None, bankroll: float = 
             for command in plan.commands:
                 key = command.kind.value
                 out["by_command"][key] = out["by_command"].get(key, 0) + 1
+            # Esito della persistenza/convalida di QUESTO piano (colonna
+            # `status` del ledger): e' cio' che la Shadow Validation aggiunge
+            # al registro, senza cambiare come vengono eseguiti i comandi.
+            persist_results = report.of_kind(CommandKind.PERSIST_DECISION)
+            decision_status = ""
+            if persist_results:
+                decision_status = str(persist_results[0].data.get("decision_status") or "")
+                if persist_results[0].ok:
+                    out["persisted"] += 1
+            if report.aborted:
+                out["order_blocked"] += 1
             out["plans"].append({
                 "record_id": plan.record.record_id,
+                "signal_id": signal.signal_id,
                 "blocked": (plan.blocked or {}).get("reason"),
                 "match_id": signal.match_id,
                 "outcome": signal.outcome,
@@ -180,6 +254,8 @@ def run_shadow(*, signals: Optional[Sequence[Signal]] = None, bankroll: float = 
                 "reason": plan.record.risk.reason.value,
                 "commands": plan.kinds(),
                 "would_order": plan.places_order,
+                "order_blocked": report.aborted,
+                "decision_status": decision_status,
                 "stake": (plan.record.stake.stake if plan.record.stake else 0.0),
                 "executed": report.executed,
                 "duplicated": report.duplicated,
@@ -191,7 +267,11 @@ def run_shadow(*, signals: Optional[Sequence[Signal]] = None, bankroll: float = 
                   evaluated=out["evaluated"], verdicts=out["by_verdict"],
                   commands=out["by_command"], errors=len(out["errors"]),
                   reviews_queued=out["reviews_queued"],
-                  market_blocked=out["market_blocked"], **(out["market"] or {}))
+                  market_blocked=out["market_blocked"],
+                  persist_enabled=out["persist_enabled"],
+                  persisted=out["persisted"],
+                  persisted_duplicates=out["persisted_duplicates"],
+                  order_blocked=out["order_blocked"], **(out["market"] or {}))
         return out
     except Exception as exc:                       # la shadow non rompe mai il job
         logger.warning("shadow: valutazione fallita (%s)", exc)
@@ -283,8 +363,8 @@ def format_report(summary_or_path: Any = None) -> str:
 
 
 __all__ = [
-    "REVIEWS_ENABLED_ENV", "SHADOW_ENABLED_ENV", "format_report",
-    "iter_shadow_commands", "reviews_enabled", "run_shadow", "shadow_enabled",
-    "shadow_summary",
+    "REVIEWS_ENABLED_ENV", "SHADOW_ENABLED_ENV", "SHADOW_PERSIST_ENV",
+    "format_report", "iter_shadow_commands", "reviews_enabled", "run_shadow",
+    "shadow_enabled", "shadow_persist_enabled", "shadow_summary",
 ]
 

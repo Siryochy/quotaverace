@@ -13,6 +13,7 @@ verifica che:
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -44,10 +45,16 @@ def db(monkeypatch, tmp_path):
 def add_open_signal(tmp_path, *, match_id="sx-1", status="strong_value",
                     ratings=True):
     """Riga di ledger pronta per l'adapter (con o senza rating delle squadre)."""
+    # Kickoff RELATIVO a now: l'adapter filtra la finestra mobile (now..now+24h)
+    # e una data fissa diventa una time-bomb che scatta da sola (il 15/09 la
+    # partita delle 18:45Z e' scaduta nel pomeriggio e i tre test di percorso
+    # reale sono caduti senza che nessuno avesse toccato il codice).
+    kickoff = (datetime.now(timezone.utc) + timedelta(hours=3)) \
+        .isoformat().replace("+00:00", "Z")
     conn = sqlite3.connect(str(tmp_path / "shadow.db"))
     conn.execute("INSERT OR REPLACE INTO matches (id, league, home_team, away_team, "
                  "commence_time, status) VALUES (?,?,?,?,?,'scheduled')",
-                 (match_id, ALLOWED_LEAGUE, "Inter", "Cagliari", "2026-09-15T18:45:00Z"))
+                 (match_id, ALLOWED_LEAGUE, "Inter", "Cagliari", kickoff))
     conn.execute("INSERT OR REPLACE INTO predictions (match_id, mercato, esito, quota, "
                  "prob, ev, market_prob, market_edge, status) "
                  "VALUES (?,?,?,?,?,?,?,?,?)",

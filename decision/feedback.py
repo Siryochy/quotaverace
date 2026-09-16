@@ -101,6 +101,65 @@ def attach_order(record_id: str, order: dict, store: Optional[Any] = None) -> di
         return {"updated": False, "record_id": record_id, "error": str(exc)}
 
 
+def read_row(record_id: str, store: Optional[Any] = None) -> Optional[dict]:
+    """Rilegge dal ledger la riga PERSISTITA (None se assente o illeggibile).
+
+    E' la lettura che precede la convalida: la Shadow Validation deve esaminare
+    cio' che e' stato DAVVERO scritto, non l'oggetto in memoria — altrimenti una
+    scrittura fallita autorizzerebbe un ordine in nome di una decisione che sul
+    ledger non esiste. Fail-safe: un ledger non leggibile vale come "riga
+    assente", che a valle blocca (fail-closed).
+    """
+    try:
+        module = _ledger(store)
+        row = module.get_decision(record_id)
+        return dict(row) if row else None
+    except Exception as exc:
+        logger.warning("decision.feedback: riga %s non rileggibile (%s)",
+                       record_id or "?", exc)
+        return None
+
+
+def set_status(record_id: str, status: str, store: Optional[Any] = None) -> dict:
+    """Scrive lo stato della Shadow Validation su una riga persistita.
+
+    Ritorna `{"updated": bool, "status": str, "error": str}`. Fail-safe come
+    le altre scritture: il chiamante (gateway di validazione) decide cosa farne,
+    ma un errore NON deve sollevare. Nota: una riga non aggiornata non e' un
+    successo per il gateway, che la tratta come convalida non riuscita.
+    """
+    try:
+        module = _ledger(store)
+        changed = module.set_decision_status(record_id, status)
+        return {"updated": bool(changed), "status": status, "error": ""}
+    except Exception as exc:
+        logger.warning("decision.feedback: stato di %s non aggiornato a '%s' (%s)",
+                       record_id or "?", status, exc)
+        return {"updated": False, "status": status, "error": str(exc)}
+
+
+def row_exists_for_signal(signal_id: str, store: Optional[Any] = None) -> bool:
+    """Esiste gia' una riga per questo segnale? (dedup della shadow persistence)
+
+    Serve perche' `record_id` porta i SECONDI: il job gira ogni 60s e la stessa
+    opportunita' verrebbe scritta 1440 volte al giorno. `signal_id`
+    (match+mercato+esito) e' invece stabile.
+
+    Su un ledger illeggibile ritorna False (si tenta comunque la scrittura): un
+    doppione e' meno grave di una valutazione mai registrata, e il `persist` che
+    segue fallirebbe comunque se il ledger fosse davvero inaccessibile.
+    """
+    if not signal_id:
+        return False
+    try:
+        module = _ledger(store)
+        return bool(module.decision_exists_for_signal(signal_id))
+    except Exception as exc:
+        logger.warning("decision.feedback: dedup del segnale %s non leggibile (%s)",
+                       signal_id, exc)
+        return False
+
+
 def settle(store: Optional[Any] = None) -> dict:
     """Chiude le decisioni coi risultati reali. Fail-safe.
 
@@ -170,6 +229,14 @@ def format_report(data: dict) -> str:
     if reasons:
         top = sorted(reasons.items(), key=lambda kv: -kv[1])[:5]
         lines.append("  motivi: " + " | ".join(f"{k} {v}" for k, v in top))
+    statuses = decisions.get("by_status") or {}
+    if statuses:
+        # Stato della Shadow Validation: `pending` sono righe persistite ma mai
+        # convalidate (con `require_persist` non hanno potuto ordinare).
+        order = ("pending", "validated", "rejected")
+        parts = [f"{name} {statuses[name]}" for name in order if name in statuses]
+        parts += [f"{k} {v}" for k, v in sorted(statuses.items()) if k not in order]
+        lines.append("  convalida: " + " | ".join(parts))
     lines.append(f"  stake totale: {decisions.get('stake_total', 0.0):.2f} "
                  f"| ordini agganciati: {decisions.get('with_order', 0)} "
                  f"| aperte: {decisions.get('open', 0)}")
@@ -194,5 +261,6 @@ def format_report(data: dict) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["attach_order", "format_report", "persist", "persist_many", "settle",
+__all__ = ["attach_order", "format_report", "persist", "persist_many",
+           "read_row", "row_exists_for_signal", "set_status", "settle",
            "snapshot", "stats"]
