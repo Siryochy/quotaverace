@@ -148,6 +148,12 @@ export default defineRailway(() => {
     // codice OFF: senza dichiarazione, un `config apply` la distruggerebbe (e
     // con essa la scelta, in entrambe le direzioni).
     DECISION_SHADOW_PERSIST: preserve(),
+    // Confronto shadow catena ↔ corsia (16/09/2026): job ogni 6h che mette a
+    // confronto il ledger delle decisioni con quello delle puntate (sola
+    // lettura, zero costi). `DECISION_COMPARE_ENABLED=0` spegne il job;
+    // `DECISION_COMPARE_DAYS` cambia la finestra (default 7 giorni).
+    DECISION_COMPARE_ENABLED: preserve(),
+    DECISION_COMPARE_DAYS: preserve(),
   };
 
   const api = service("api", {

@@ -21,6 +21,12 @@ Comandi:
       avvisi (legge i file di stato: nessuna scrittura, nessun ordine);
   shadow [--json] [--limit N]
       registro della shadow mode (comandi che SAREBBERO stati eseguiti);
+  compare [--days N | --all] [--json]
+      confronto MISURATO fra le due strade: le righe del ledger `decisions`
+      (cosa decide la catena) contro le puntate del ledger `bets` (cosa la
+      corsia ha piazzato), giunte su (match, esito). Mostra i casi concordati,
+      le puntate reali che la catena avrebbe rifiutato (col motivo e col P/L) e
+      le opportunita' che la corsia ha saltato. Sola lettura, zero crediti.
   market [--file F | --stdin] [--gateway ID] [--source NOME] [--json] [--assume-utc]
       valida quote contro il contratto di mercato (schema, campi, quota minima
       0.1, timestamp UTC): senza input usa due esempi integrati, uno valido e
@@ -46,6 +52,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from .compare import format_report as compare_report, measure as compare_measure
 from .feedback import settle as feedback_settle, snapshot, format_report as feedback_report
 from .feeds import DEFAULT_GATEWAY_ID, MarketFeed, feed_enabled
 from .guards import SAFETY_CHAIN, snapshot as guard_snapshot
@@ -261,6 +268,20 @@ def cmd_shadow(args) -> int:
     return 0
 
 
+def cmd_compare(args) -> int:
+    """Confronto shadow catena ↔ corsia.
+
+    Sola lettura (`mode=ro`) e `--all` per tutto lo storico: la finestra di
+    default e' quella dell'ambiente (`DECISION_COMPARE_DAYS`, 7 giorni).
+    """
+    data = compare_measure(days=0 if args.all else args.days)
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+    else:
+        print("\n" + compare_report(data))
+    return 1 if data.get("error") else 0
+
+
 #: Esempi per il comando `market`: una quota conforme al contratto e una che
 #: viola quattro regole insieme (schema, mercato/selezione, quota, timestamp).
 SAMPLE_QUOTES: tuple[dict[str, Any], ...] = (
@@ -414,6 +435,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     shadow.add_argument("--json", action="store_true")
     shadow.add_argument("--limit", type=int, default=500)
     shadow.set_defaults(func=cmd_shadow)
+
+    compare = sub.add_parser("compare",
+                             help="confronto shadow catena ↔ corsia (read-only)")
+    compare.add_argument("--days", type=float, default=None,
+                         help="finestra in giorni (default: ambiente)")
+    compare.add_argument("--all", action="store_true",
+                         help="tutto lo storico invece della finestra")
+    compare.add_argument("--json", action="store_true")
+    compare.set_defaults(func=cmd_compare)
 
     market = sub.add_parser("market", help="valida quote contro il contratto di mercato")
     market.add_argument("--file", help="file JSON (una quota o una lista)")

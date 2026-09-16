@@ -3333,3 +3333,87 @@ far girare la convalida sui segnali veri (una riga per segnale, zero ordini) e
 leggere `decision_stats()["by_status"]` + il registro shadow dopo qualche
 giorno — e' il dato che serve prima di decidere il passo 3 (sostituire
 l'esecuzione di `auto_bet` col percorso Command).
+
+### Fase di confronto shadow: catena ↔ corsia (`decision/compare.py`, 16/09/2026)
+
+Aperta su indicazione del proprietario subito dopo la Shadow Validation: le due
+strade vengono messe a confronto su dati reali, in **sola lettura**, perche' il
+passo 3 (sostituire l'esecuzione di `auto_bet` col percorso Command) si decida
+su numeri e non su impressioni.
+
+**Le due strade, un registro ciascuna.**
+
+| strada | ledger | cosa contiene |
+|---|---|---|
+| catena (`decision/`) | `decisions` | verdetto + `ReasonCode` + stato di convalida (per ogni segnale VALUTATO) |
+| corsia (`auto_bet`) | `bets` | una riga **solo se la puntata e' stata piazzata** (sim o live) |
+
+Chiave di giunzione: **(match_id, esito canonico)**. L'esito della corsia e'
+normalizzato con `decision.adapters.canonical_outcome` (import pigro): lo stesso
+ledger misto che il 15/09 aveva ingannato l'adapter (nomi squadra nelle righe di
+`fixture_engine`, `1`/`X`/`2` in quelle di `sx_signals`) non falsa il confronto.
+
+**I cinque casi (esaustivi: nessuna riga sparisce in silenzio).**
+
+| caso | catena | corsia |
+|---|---|---|
+| `both_play` | approva + stake eseguibile | ha puntato |
+| `blocked_played` | rifiuta / non eseguibile | **ha puntato** |
+| `would_play_skipped` | approva + stake eseguibile | **non ha puntato** |
+| `agree_skip` | rifiuta | non ha puntato |
+| `unobserved` | nessuna riga | ha puntato |
+
+- `blocked_played` e' il numero che conta di piu': **puntate reali che la catena
+  nuova avrebbe rifiutato**, col motivo (`by_reason`) e col P/L realizzato (in
+  valuta, dal ledger `bets`);
+- `would_play_skipped` e' il rovescio: opportunita' che la catena avrebbe
+  giocato e la corsia ha saltato — P/L **per unita' di stake** (nessun denaro e'
+  stato messo) e `avg_ev`; quando il monitor liquidita' ha uno scarto per quella
+  partita, il motivo viene allegato come `hint` (`lane_skip_hints`, fail-safe);
+- `unobserved` **NON e' una divergenza**: sono puntate senza riga nella catena
+  (valutate fuori dalla finestra di persistenza shadow, aperta il 16/09 alle
+  15:00 UTC). Contarle come "bloccate" sarebbe un falso: la catena non le ha mai
+  viste. Finiscono fuori da `compared` e la cosa e' dichiarata nel `caveat`.
+
+**`chain_would_play(row)`** = verdetto `approve` **e** stake eseguibile: la
+stessa condizione con cui `engine.plan_for_resolved` emette `place_order`. Il
+`mode` non entra di proposito — qui si misura se il GATE avrebbe fatto passare il
+segnale, non quale comando sarebbe stato emesso in simulazione.
+
+**Garanzie** (tripwire in `test_decision_compare.py`): connessione SQLite
+`mode=ro` (**il test tenta un UPDATE e pretende che il DB lo rifiuti**), nessuna
+istruzione di scrittura nel sorgente, `import decision.compare` che non carica
+`tracker`/`auto_bet`/`bot`/`odds_api`/`sx_signals` (zero crediti, nessuna rete),
+fail-safe su DB assente, **file corrotto** (probe `_assert_readable`: senza,
+un file non-SQLite verrebbe letto come "nessuna tabella" e la misura sembrerebbe
+vuota invece che rotta) e tabelle mancanti (volume di un deploy precedente).
+
+**Comandi e job.**
+- CLI: `venv/bin/python -m decision compare [--days N | --all] [--json]`
+  (`--days` default = `DECISION_COMPARE_DAYS`, 7 giorni; `--all` = tutto lo
+  storico). Exit 1 se la misura non e' disponibile.
+- `bot.decision_compare_job` (ogni 6h, `first=900`, `max_instances=1`): logga
+  SEMPRE il riepilogo (e' la serie storica della fase) e notifica **solo gli
+  admin** — e' materiale di ingegneria, non un segnale per gli iscritti — e solo
+  se c'e' almeno una divergenza, con anti-spam 1 alert/giorno (chiave
+  `SHADOW_COMPARE`). Zero costi: legge i due ledger locali.
+- Env dichiarate in `preserve()` (`.railway/railway.ts`, blocco `decisionEnv`):
+  `DECISION_COMPARE_ENABLED` (default ON: sola lettura) e `DECISION_COMPARE_DAYS`.
+  `railway config plan` dopo la modifica: **0 to add, 1 to change, 0 to destroy**.
+
+**⚠️ Cosa NON e' ancora giudicabile.** Le righe di `decisions` esistono solo dal
+16/09 15:00 UTC: all'apertura della fase il campione e' minuscolo e il verdetto
+sul P/L resta sospeso sotto `MIN_RELIABLE_CLOSED` (20 puntate chiuse fra
+`both_play` e `blocked_played`), come `league_gate_impact` aveva gia' insegnato
+("il P/L non e' conclusivo, il flusso si'"). Il campo `caveat` dichiara sempre il
+campione: nessun ROI verra' letto come verita' prima della soglia.
+
+**Test**: `test_decision_compare.py` (**40 verdi, tutti OFFLINE**: ledger SQLite
+temporaneo con lo schema di produzione, nessuna rete, nessun provider) +
+regressioni verdi (`test_decision_*` = 399, `test_bot`, `test_auto_bet*`,
+`test_favourites_only`, `test_risk_guards`, `test_secret_hygiene`,
+`test_liquidity_monitor`) e `verify_guardrails.py` con **A–F tutti bloccanti**.
+**Bug trovato dai test**: `lane_skip_hints` riceveva `days=0` ("tutto lo
+storico") e lo passava al monitor, dove una finestra a 0 taglia OGNI evento (il
+cutoff diventa `now`) — gli indizi sparivano in silenzio proprio nel caso "tutto
+lo storico". Ora `0` viene tradotto in `None` prima della chiamata.

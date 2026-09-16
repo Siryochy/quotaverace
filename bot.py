@@ -1931,6 +1931,68 @@ async def liquidity_monitor_job(context: ContextTypes.DEFAULT_TYPE = None):
         logger.warning("liquidity_monitor_job fallito: %s", e)
 
 
+async def decision_compare_job(context: ContextTypes.DEFAULT_TYPE = None):
+    """Confronto shadow catena ↔ corsia, ogni 6h (16/09/2026).
+
+    Dal 15/09 la catena `decision/` valuta in shadow mode gli stessi segnali
+    che la corsia sta per giocare, e dal 16/09 ne persiste il verdetto sul
+    ledger `decisions`. Qui le due strade vengono messe a confronto su
+    (match, esito): quante volte concordano, **quante puntate REALI la catena
+    avrebbe rifiutato** (e con che P/L) e quante opportunita' la corsia ha
+    saltato mentre la catena le avrebbe giocate.
+
+    Zero costi: legge solo i due ledger locali (`decisions`, `bets`) in sola
+    lettura — nessun ordine, nessun credito the-odds-api. Lo stato viene
+    SEMPRE loggato (e' la serie storica della fase di misura); la notifica va
+    SOLO agli admin (il confronto e' materiale di ingegneria, non un segnale
+    per gli iscritti) e solo se c'e' almeno una divergenza, con anti-spam 1
+    alert/giorno (chiave `SHADOW_COMPARE`).
+    """
+    try:
+        from decision.compare import (compare_enabled, format_report, measure,
+                                      window_days)
+        if not compare_enabled():
+            return
+        days = window_days()
+        data = measure(days=days)
+        if data.get("error"):
+            logger.warning("decision_compare: misura non disponibile (%s)",
+                           data["error"])
+            return
+        chain = data.get("chain") or {}
+        lane = data.get("lane") or {}
+        agr = data.get("agreement") or {}
+        logger.info(
+            "decision_compare: catena %d righe (avrebbe giocato %d) | corsia %d "
+            "puntate | entrambe giocano %d | bloccate-ma-giocate %d | "
+            "giocate-ma-saltate %d | non confrontabili %d | divergenza %s",
+            chain.get("rows", 0), chain.get("would_play", 0), lane.get("bets", 0),
+            agr.get("both_play", 0), agr.get("blocked_played", 0),
+            agr.get("would_play_skipped", 0), agr.get("unobserved", 0),
+            agr.get("divergence_rate"))
+        if not agr.get("divergences"):
+            return              # nessuna divergenza: il log basta, niente messaggio
+        from datetime import timezone as _tz, timedelta as _td
+        day = (datetime.now(_tz.utc) + _td(hours=2)).strftime("%Y-%m-%d")
+        if is_notified("SHADOW_COMPARE", day):
+            return
+        mark_notified("SHADOW_COMPARE", day)
+        text = ("🔀 *CONFRONTO SHADOW* — catena vs corsia\n\n"
+                + format_report(data))
+        if context is not None:
+            # Solo admin: e' una misura interna (passo 3), non un segnale.
+            for chat_id in _admin_chat_ids():
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=text,
+                                                   parse_mode="Markdown")
+                except Exception:
+                    pass
+        else:
+            logger.warning("decision_compare: %s", text.replace("\n", " | "))
+    except Exception as e:
+        logger.warning("decision_compare_job fallito: %s", e)
+
+
 async def end_of_day_report_job(context: ContextTypes.DEFAULT_TYPE):
     """Riepilogo quando FINISCE L'ULTIMA PARTITA della giornata.
 
@@ -2368,6 +2430,12 @@ def main() -> None:
         # Zero costi API: legge solo il JSONL sul volume.
         job_queue.run_repeating(liquidity_monitor_job, interval=6 * 3600,
                                 first=600)
+        # Confronto shadow catena ↔ corsia (16/09): ogni 6h confronta il ledger
+        # delle decisioni con quello delle puntate (sola lettura, zero costi) e
+        # allerta SOLO gli admin, 1 volta/giorno, quando ci sono divergenze.
+        # E' la misura su cui si decidera' il passo 3 (sostituire l'esecuzione).
+        job_queue.run_repeating(decision_compare_job, interval=6 * 3600,
+                                first=900, job_kwargs={"max_instances": 1})
         # Sandbox tennis (paper trading, 08/09): SOLO simulazione su SX Bet
         # (mercati Moneyline type 52, letture pubbliche gratuite). Gated da
         # TENNIS_SANDBOX_ENABLED=1: scan+settle ogni 6h (primo giro 15 min

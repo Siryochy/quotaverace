@@ -44,11 +44,15 @@ test (`test_decision_pipeline.py` confronta i gate con `value_filter.is_sane`).
 from __future__ import annotations
 
 from . import (
-    commands, dispatcher, engine, feedback, feeds, gateways, guards, kill_switch,
-    market, middleware, review_telegram, risk_engine, shadow, stake_engine,
-    validation,
+    commands, compare, dispatcher, engine, feedback, feeds, gateways, guards,
+    kill_switch, market, middleware, review_telegram, risk_engine, shadow,
+    stake_engine, validation,
 )
 from .commands import Command, CommandKind, CommandPlan
+from .compare import (
+    AGREE_SKIP, BLOCKED_PLAYED, BOTH_PLAY, CELLS, UNOBSERVED, WOULD_PLAY_SKIPPED,
+    chain_would_play, compare_enabled,
+)
 from .dispatcher import DispatchReport, Dispatcher
 from .engine import build_plan, emit_many, plan_for_resolved
 from .feeds import (
@@ -139,4 +143,7 @@ __all__ = [
     "HttpTelegramClient", "plan_for_resolved",
     # Shadow Validation (stato della riga persistita, opt-in nella shadow mode)
     "shadow_persist_enabled", "SHADOW_PERSIST_ENV",
+    # Confronto misurato fra la catena (decisions) e la corsia che ordina (bets)
+    "compare", "compare_enabled", "chain_would_play", "CELLS", "BOTH_PLAY",
+    "BLOCKED_PLAYED", "WOULD_PLAY_SKIPPED", "AGREE_SKIP", "UNOBSERVED",
 ]
