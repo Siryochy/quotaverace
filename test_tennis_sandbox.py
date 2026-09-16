@@ -279,6 +279,27 @@ class TestSurface:
         assert ts.detect_surface("") is None
         assert ts.detect_surface(None, None) is None
 
+    def test_challenger_ita_wta(self):
+        # Estensione 16/09: Challenger/ITF/WTA con superficie verificata su
+        # fonte esterna (Wikipedia, campo "Surface"). Le etichette sono quelle
+        # REALI osservate nel ledger data/tennis_sandbox/ledger.db.
+        # clay: Szczecin (red), Biella (red clay outdoor)
+        assert ts.detect_surface("Szczecin Challenger ATP") == "clay"
+        assert ts.detect_surface("Biella Challenger ATP") == "clay"
+        assert ts.detect_surface("2026 Citta di Biella", "ATP") == "clay"
+        # hard: Tiburon (outdoor), Rennes (indoor), Guangzhou/Nansha,
+        # Phan Thiet, WTA Guadalajara
+        assert ts.detect_surface("Tiburon Challenger ATP") == "hard"
+        assert ts.detect_surface("Rennes Challenger ATP") == "hard"
+        assert ts.detect_surface("Guangzhou Challenger ATP") == "hard"
+        assert ts.detect_surface("Guangzhou Nansha International",
+                                 "Challenger") == "hard"
+        assert ts.detect_surface("Phan Thiet Challenger ATP") == "hard"
+        # variante con diacritico normalizzata (Phan Thiết)
+        assert ts.detect_surface("Phan Thiết Challenger") == "hard"
+        assert ts.detect_surface("WTA - Guadalajara") == "hard"
+        assert ts.detect_surface("Guadalajara", "WTA 500") == "hard"
+
     def test_market_surface(self):
         assert ts.market_surface({"leagueLabel": "ATP US Open",
                                   "group1": "US Open"}) == "hard"

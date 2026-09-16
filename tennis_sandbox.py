@@ -261,6 +261,13 @@ _SURFACE_ALIASES = {
 # torneo non e' riconosciuto la superficie resta sconosciuta e l'ELO
 # aggiorna solo l'overall, senza mai contaminare le superfici note.
 # Estendere qui per coprire altri eventi (Challenger/ITF/WTA).
+#
+# 16/09: estensione Challenger/ITF/WTA per i tornei osservati DAL LEDGER
+# reale (data/tennis_sandbox/ledger.db), superficie verificata su fonte
+# esterna (Wikipedia, campo "Surface" del box del torneo) — mai indovinata:
+#   Szczecin = clay (red), Biella = clay (red clay outdoor),
+#   Tiburon = hard (outdoor), Rennes = hard (indoor),
+#   Guangzhou = hard, Phan Thiet = hard, Guadalajara WTA = hard.
 _SURFACE_KEYWORDS = {
     "clay": [
         "clay", "clay court", "terra battuta", "terre battue",
@@ -280,6 +287,8 @@ _SURFACE_KEYWORDS = {
         "bastad", "bastaad", "bucharest", "belgrade", "bordeaux",
         "charleston", "houston", "porsche", "bavarian open",
         "oranjeboom", "santos",
+        # Challenger/ITF su terra (16/09, fonte Wikipedia)
+        "szczecin", "biella", "citta di biella",
     ],
     "grass": [
         "grass", "grass court", "erba", "rasen", "rasenturnier",
@@ -312,6 +321,9 @@ _SURFACE_KEYWORDS = {
         "chengdu", "guanzhou",
         "atp finals", "nitto atp finals", "next gen",
         "united cup", "atp cup", "laver cup",
+        # Challenger/ITF/WTA su cemento (16/09, fonte Wikipedia)
+        "tiburon", "rennes", "guangzhou", "nansha", "huangpu",
+        "phan thiet", "guadalajara",
     ],
 }
 
