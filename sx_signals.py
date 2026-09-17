@@ -848,6 +848,23 @@ def repair_sx_leagues(provider: Optional[SxBetProvider] = None) -> dict:
             "inferred": inferred_count}
 
 
+# Stati API-Football di partita CONCLUSA: solo questi sono risultati.
+# Gli stati in corso (1H/HT/2H/ET/BT/P/LIVE/SUSP...) e non iniziati
+# (NS/TBD) NON lo sono: salvarli chiuderebbe la riga col punteggio live
+# (stesso bug del 17/09 trovato sul percorso the-odds-api).
+_FINISHED_FIXTURE_STATUS = {"FT", "AET", "PEN", "AWD", "WO"}
+
+
+def _fixture_finished(fx: dict) -> bool:
+    """True se API-Football marca la fixture come conclusa.
+
+    Fail-closed: stato assente o non riconosciuto -> False, cosi' la riga
+    resta aperta invece di ricevere un verdetto su dati non definitivi.
+    """
+    status = ((fx.get("fixture") or {}).get("status") or {}).get("short")
+    return bool(status) and str(status).upper() in _FINISHED_FIXTURE_STATUS
+
+
 def _results_from_api_football(meta: Dict[str, dict]) -> int:
     """Punteggi via API-Football per i match ancora senza risultato.
 
@@ -888,6 +905,8 @@ def _results_from_api_football(meta: Dict[str, dict]) -> int:
                 "league": lid, "season": season,
                 "from": day, "to": day})
             for fx in (body or {}).get("response") or []:
+                if not _fixture_finished(fx):
+                    continue   # in corso / non iniziata: mai un risultato finale
                 parsed = fh._parse_fixture(fx, league)
                 if not parsed:
                     continue
@@ -965,6 +984,12 @@ def _results_from_sx(provider: Optional[SxBetProvider] = None) -> int:
         saved += 1
 
     # --- 1. mercati delle bet aperte (find, a batch) ---
+    # GUARDIA DI CONCLUSIONE (17/09): lo stesso principio del percorso 2 —
+    # un evento che non ha ancora finito di giocare NON ha un punteggio
+    # finale. Se SX popolasse i punteggi live anche qui, salvarli chiuderebbe
+    # la bet a partita in corso (il bug osservato il 17/09 sul percorso
+    # the-odds-api); la soglia e' la stessa (`SX_LIVE_MIN_AGE_MS`, 120').
+    now_ms = _now_ms()
     hashes = list(by_hash.keys())
     for i in range(0, len(hashes), SX_FIND_BATCH):
         batch = hashes[i:i + SX_FIND_BATCH]
@@ -985,6 +1010,9 @@ def _results_from_sx(provider: Optional[SxBetProvider] = None) -> int:
             if not hit:
                 continue
             mid, _sel, _esito = hit
+            ko = _kickoff_utc_ms(m.get("gameTime"))
+            if ko is None or ko > now_ms - SX_LIVE_MIN_AGE_MS:
+                continue   # non conclusa: il punteggio puo' ancora cambiare
             sh, sa = m.get("teamOneScore"), m.get("teamTwoScore")
             home = m.get("teamOneName") or ""
             away = m.get("teamTwoName") or ""

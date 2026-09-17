@@ -309,6 +309,7 @@ def _patch_admin(monkeypatch):
 
 AWAY_FIRST = {"id": "m1", "home_team": "FC Machida Zelvia",
               "away_team": "Kawasaki Frontale",
+              "completed": True,
               "scores": [{"name": "Kawasaki Frontale", "score": 0},
                          {"name": "FC Machida Zelvia", "score": 1}],
               "last_update": ""}

@@ -89,6 +89,7 @@ def _recent_iso(days_ago: int = 1, hours_ago: int = 3) -> str:
 
 
 MATCH = {"id": "mX", "home_team": "Inter", "away_team": "Napoli",
+         "completed": True,
          "scores": [{"name": "Inter", "score": "2"},
                     {"name": "Napoli", "score": "1"}],
          "last_update": ""}

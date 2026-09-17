@@ -51,6 +51,7 @@ MACHIDA_AWAY_FIRST = {
     "id": "machida",
     "home_team": "FC Machida Zelvia",
     "away_team": "Kawasaki Frontale",
+    "completed": True,
     "scores": [{"name": "Kawasaki Frontale", "score": 0},
                {"name": "FC Machida Zelvia", "score": 1}],
 }
@@ -58,7 +59,7 @@ MACHIDA_AWAY_FIRST = {
 
 class TestMatchScoresByName:
     def test_home_first(self):
-        m = {"home_team": "Inter", "away_team": "Napoli",
+        m = {"home_team": "Inter", "away_team": "Napoli", "completed": True,
              "scores": [{"name": "Inter", "score": 2},
                         {"name": "Napoli", "score": 1}]}
         assert odds_api.match_scores_by_name(m) == (2, 1)
@@ -68,30 +69,51 @@ class TestMatchScoresByName:
         assert odds_api.match_scores_by_name(MACHIDA_AWAY_FIRST) == (1, 0)
 
     def test_match_per_key(self):
-        m = {"home_team": "Inter", "away_team": "Napoli",
+        m = {"home_team": "Inter", "away_team": "Napoli", "completed": True,
              "scores": [{"key": "napoli", "score": 0},
                         {"key": "inter", "score": 3}]}
         assert odds_api.match_scores_by_name(m) == (3, 0)
 
     def test_punteggio_mancante_ritorna_none(self):
-        m = {"home_team": "Inter", "away_team": "Napoli",
+        m = {"home_team": "Inter", "away_team": "Napoli", "completed": True,
              "scores": [{"name": "Inter", "score": 2}]}
         assert odds_api.match_scores_by_name(m) is None
 
     def test_squadra_non_riconosciuta_ritorna_none(self):
-        m = {"home_team": "Inter", "away_team": "Napoli",
+        m = {"home_team": "Inter", "away_team": "Napoli", "completed": True,
              "scores": [{"name": "Juventus", "score": 2},
                         {"name": "Roma", "score": 1}]}
         assert odds_api.match_scores_by_name(m) is None
 
     def test_score_non_numerico_ritorna_none(self):
-        m = {"home_team": "Inter", "away_team": "Napoli",
+        m = {"home_team": "Inter", "away_team": "Napoli", "completed": True,
              "scores": [{"name": "Inter", "score": None},
                         {"name": "Napoli", "score": 1}]}
         assert odds_api.match_scores_by_name(m) is None
 
     def test_squadre_mancanti_ritornano_none(self):
-        m = {"scores": [{"name": "Inter", "score": 2}]}
+        m = {"scores": [{"name": "Inter", "score": 2}], "completed": True}
+        assert odds_api.match_scores_by_name(m) is None
+
+    # --- Partita NON conclusa (bug 17/09) --------------------------------
+
+    def test_partita_in_corso_non_emette_punteggi(self):
+        """REGRESSION 17/09: la-odds-api restituisce le partite IN CORSO con
+        i punteggi live popolati. Salvandoli come finali, la bet veniva
+        chiusa ~12' dopo il kickoff (bet #39-#41 del 15/09: match finito 3-1
+        saldata '0-0 → X'). Con completed=False non si referta."""
+        m = {"home_team": "Liverpool", "away_team": "Tottenham Hotspur",
+             "completed": False,
+             "scores": [{"name": "Liverpool", "score": "0"},
+                        {"name": "Tottenham Hotspur", "score": "0"}]}
+        assert odds_api.match_scores_by_name(m) is None
+
+    def test_completed_mancante_vale_come_non_conclusa(self):
+        """Fail-closed: senza il campo `completed` non si puo' affermare che
+        la partita sia finita -> nessun punteggio (la riga resta aperta)."""
+        m = {"home_team": "Inter", "away_team": "Napoli",
+             "scores": [{"name": "Inter", "score": 2},
+                        {"name": "Napoli", "score": 1}]}
         assert odds_api.match_scores_by_name(m) is None
 
 
@@ -190,6 +212,29 @@ class TestUpdateResultsAwayFirst:
         assert rows["1"]["esito_finale"] == "won"
         assert rows["1"]["profit"] == pytest.approx(7.5)  # 5 * (2.5 - 1)
         assert rows["2"]["esito_finale"] == "lost"
+
+    def test_partita_in_corso_non_salda_la_bet(self, temp_db, monkeypatch):
+        """REGRESSION 17/09 (bet #39-#41): il job di refertazione che gira
+        a partita IN CORSO non deve chiudere nulla. Il payload live (0-0 al
+        12') non e' un risultato: la bet resta aperta, senza verdetto."""
+        self._setup(temp_db)
+        _patch_send(monkeypatch)
+        live = dict(MACHIDA_AWAY_FIRST, completed=False,
+                    scores=[{"name": "FC Machida Zelvia", "score": "0"},
+                            {"name": "Kawasaki Frontale", "score": "0"}])
+        _patch_fetch_scores(monkeypatch, {"soccer_japan_j_league": [live]})
+        _patch_ratings(monkeypatch)
+        _patch_admin(monkeypatch)
+
+        bot._update_results()
+
+        rows = tracker.get_bets(limit=10)
+        assert rows[0]["esito_finale"] is None   # MAI un verdetto sul live
+        conn = tracker._get_conn()
+        n = conn.execute("SELECT COUNT(*) FROM match_results WHERE "
+                         "match_id='machida'").fetchone()[0]
+        conn.close()
+        assert n == 0                            # nessun punteggio finale
 
 
 # --- 3. Verifica 1X2 diretta ----------------------------------------------
@@ -397,13 +442,20 @@ class TestRepairVerdictAudit:
 # --- 4. Riparazione dati esistenti ----------------------------------------
 
 def _seed_inverted(temp_db):
-    """Stato produzione del bug: risultato 1-2 (errato) + bet sul 2 vinta."""
+    """Stato produzione del bug: risultato 1-2 (errato) + bet sul 2 vinta.
+
+    Date RELATIVE a ora (lezione 15/09): con un seed fisso al 02/09 la riga
+    cassa usciva dalla finestra di 14 giorni e il test, un tempo verde,
+    falliva da solo con il passare del calendario.
+    """
     tracker.save_match("machida", "J1 League", "FC Machida Zelvia",
-                       "Kawasaki Frontale", "2026-09-02T05:00:00Z")
+                       "Kawasaki Frontale", _started_iso(days_ago=2,
+                                                         hours_ago=0))
     tracker.save_analysis("machida", 1.2, 1.6, 0.28, 0.26, 0.46, 0.52,
                           0.14, "2", 4.0, "Pinnacle", "value")
     tracker.save_result("machida", "J1 League", "FC Machida Zelvia",
-                        "Kawasaki Frontale", 1, 2, "2026-09-02T13:53:49Z")
+                        "Kawasaki Frontale", 1, 2,
+                        _started_iso(days_ago=2, hours_ago=0))
     tracker.save_bet("machida", "1X2", "2", None, None, 4.0, 5.0)
     tracker.save_prediction("machida", "1X2", "2", 4.0, 0.25, 0.14,
                             status="value")

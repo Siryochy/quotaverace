@@ -3707,3 +3707,66 @@ automatica, con **0 crediti** di costo atteso (`leagues_to_query: []`):
 - **1 bet live aperta** (`sx-L19974965`, Europa League `1`, con `market_id`):
   partita di stasera, si salda col percorso SX-native (gratis).
 Nessuna azione manuale residua: la coda si svuota da sola con le scadenze.
+
+### Refertazione su punteggi LIVE: bet saldate a partita in corso (17/09/2026)
+
+**Direttiva del proprietario**: "verifica stasera che la bet live su Europa
+League si saldi da sola col percorso SX-native". La verifica ha fatto emergere
+un bug GRAVE, diverso da quello atteso, che avrebbe sbagliato il verdetto
+della stessa bet di stasera.
+
+**1) SCOPERTA — tre bet del 15/09 saldate ~12 minuti dopo il kickoff.**
+Dal ledger di produzione:
+
+| bet | partita | kickoff | saldata | `match_results` | vera finale |
+|---|---|---|---|---|---|
+| #41 | Liverpool–Tottenham (esito `1`) | 15/09 19:00 | **19:12** | 0-0 → X | **3-1 → 1** (find SX) |
+| #40 | (EFL, esito `1`) | 15/09 18:45 | **18:57** | 0-0 → X | — |
+| #39 | (EFL, esito `1`) | 15/09 18:45 | **18:57** | 0-1 → 2 | — |
+
+Tutte e tre chiuse ~12' dopo il calcio d'inizio: sono **punteggi live** salvati
+come risultati finali. Il verdetto di #41 (persa) e' quindi FALSO — la partita
+e' finita 3-1 e il segno `1` era quello giocato.
+
+**2) CAUSA RADICE (`odds_api.match_scores_by_name`).** La cache punteggi
+della the-odds-api conteneva **12 partite con `completed: false` e `scores`
+popolati** (partite in corso). `match_scores_by_name` — il punto di passaggio
+COMUNE di `bot._update_results`, `sx_signals._results_from_the_odds_api` e
+`repair_scores` — associava i gol alle squadre **senza controllare
+`completed`**: un `0-0` al 12' diventava un risultato finale e `settle_bets`
+chiudeva la riga. Non e' un caso isolato: la finestra di refertazione gira
+di continuo, quindi QUALSIASI bet la cui partita e' in corso al giro
+successivo al kickoff veniva chiusa con un punteggio non definitivo.
+
+**3) FIX (tre guardie, tutte fail-closed).**
+- `odds_api.match_scores_by_name`: **prima** di leggere i gol richiede
+  `m.get("completed")`. Campo assente = NON conclusa (la riga resta aperta
+  invece di ricevere un verdetto su dati non definitivi). Difende in un colpo
+  solo i tre chiamanti.
+- `sx_signals._results_from_sx` percorso 1 (`markets/find`): nuova guardia di
+  conclusione con `gameTime` — l'evento deve avere almeno `SX_LIVE_MIN_AGE_MS`
+  (120'), la stessa soglia gia' usata dal percorso 2. Difesa in profondita':
+  se SX popolasse i punteggi live anche nella find, la bet non si chiude.
+- `sx_signals._results_from_api_football` (fallback): nuovo
+  `_fixture_finished(fx)` — si accettano SOLO gli stati API-Football di
+  partita conclusa (`FT/AET/PEN/AWD/WO`); in corso (`1H/HT/2H/ET/...`) e non
+  iniziate (`NS/TBD`) vengono scartate (stato ignoto o assente -> False).
+
+**4) TEST.** `test_scores_parsing.py`: fixture aggiornate con `completed:
+True` (come la API reale) + 3 test nuovi — partita in corso -> `None`,
+`completed` mancante -> `None` (fail-closed), e la **regressione end-to-end**
+(`_update_results` con payload live 0-0 NON chiude la bet e NON scrive
+`match_results`). `test_sx_native_settlement.py`: find su evento a 15' dal
+kickoff -> nessun risultato + controprova a 2h (salda normalmente).
+Bug collaterale chiuso nello stesso giro: `_seed_inverted` in
+`test_scores_parsing` usava un seed FISSO al 02/09 che, superata la finestra
+cassa di 14 giorni, faceva fallire da solo il test (stessa trappola di data
+del 15/09) — ora le date sono relative a `now`.
+
+**5) DA FARE (non ancora eseguito).** Le tre bet #39-#41 restano saldate
+male nel ledger (real money: -3.00 USDC in totale): la riparazione richiede
+di riscrivere `match_results` col punteggio VERO (ottenibile da
+`markets/find` sul `market_id` della bet, gratis) e lasciar fare a
+`heal_settled_contradictions` (riapertura + ri-saldo automatico). Da
+eseguire solo con autorizzazione, come ogni scrittura sul ledger di
+produzione.

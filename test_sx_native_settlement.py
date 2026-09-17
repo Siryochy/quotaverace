@@ -158,6 +158,31 @@ class TestFindPath:
         assert res["results"] == 0 and res["settled"] == 0
         assert _bet_outcome("sx-LEV1") == (None, None)
 
+    def test_evento_non_concluso_non_salda(self, temp_db):
+        """REGRESSION 17/09: la find puo' portare i punteggi di un evento
+        ancora in corso (o appena iniziato). Salvarli chiuderebbe la bet a
+        partita in corso: la guardia di conclusione (SX_LIVE_MIN_AGE_MS,
+        120') tiene la riga APERTA, con i punteggi veri che arrivano al
+        giro successivo."""
+        tracker.save_bet("sx-LEV1", "1X2", "1", "0xh1", 1, 2.0, 1.0,
+                         mode="live")
+        in_corso = dict(_find_market("0xh1", sh=0, sa=0))
+        in_corso["gameTime"] = NOW_S - 900       # 15 minuti fa: in gioco
+        prov = FakeSxSettle(find_data=[in_corso])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["results"] == 0 and res["settled"] == 0
+        assert _bet_outcome("sx-LEV1") == (None, None)
+
+    def test_evento_concluso_salda_anche_col_guard(self, temp_db):
+        """Controprova del guard: a 2h dal kickoff (oltre la soglia) il
+        punteggio viene salvato e la bet saldata come prima."""
+        tracker.save_bet("sx-LEV1", "1X2", "1", "0xh1", 1, 2.0, 1.0,
+                         mode="live")
+        prov = FakeSxSettle(find_data=[_find_market("0xh1", sh=3, sa=1)])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["results"] == 1 and res["settled"] == 1
+        assert _bet_outcome("sx-LEV1")[0] == "won"
+
     def test_hash_sconosciuti_ignorati(self, temp_db):
         tracker.save_bet("sx-LEV1", "1X2", "1", "0xh1", 1, 2.0, 1.0,
                          mode="live")

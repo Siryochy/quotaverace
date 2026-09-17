@@ -145,10 +145,22 @@ def match_scores_by_name(m):
     Zelvia vs Kawasaki Frontale e' stato saldato con i punteggi invertiti
     (bet sul 2 segnata vinta per una vittoria casalinga).
 
+    SOLO PARTITE CONCLUSE (bug 17/09/2026, `completed`). the-odds-api
+    restituisce anche le partite IN CORSO con i punteggi live popolati: la
+    cache ne conteneva 12 e la refertazione le salvava come risultati finali,
+    chiudendo le bet ~12 minuti dopo il kickoff (bet #39-#41 del 15/09: una
+    partita finita 3-1 e' stata saldata '0-0 → X'). Senza `completed`
+    veritiero la funzione non emette punteggi: fail-closed, la riga resta
+    aperta invece di ricevere un verdetto su un punteggio che puo' ancora
+    cambiare. Il campo mancante vale come NON conclusa (stessa direzione).
+
     Returns:
         (score_home, score_away) oppure None se i punteggi non sono
-        associabili con certezza (dati parziali o nomi non corrispondenti).
+        associabili con certezza (dati parziali, nomi non corrispondenti o
+        partita non conclusa).
     """
+    if not m.get("completed"):
+        return None
     scores = m.get("scores") or []
     home = str(m.get("home_team") or "").strip().lower()
     away = str(m.get("away_team") or "").strip().lower()
