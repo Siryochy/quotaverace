@@ -3589,9 +3589,9 @@ codice): `T60_EXECUTION_ONLY`, `T60_WINDOW_MIN_MIN`, `T60_WINDOW_MAX_MIN`,
    CB1). Oggi il secondo e' INERTE in produzione (`DECISION_SHADOW_PERSIST`
    default OFF ⇒ nessuna riga `decisions`), quindi l'esecuzione reale resta la
    corsia; il dedup `UNIQUE(match_id, esito)` impedisce il doppio ordine. Da
-   decidere: se il CB1 (1 USDC) debba valere anche sulla corsia Kelly, e se
-   attivare la persistenza shadow per dare al dispatch T-60 le righe da
-   eseguire.
+   decidere: se il CB1 (1 USDC) debba valere anche sulla corsia Kelly (misura
+   fatta il 17/09, vedi sotto) e se attivare la persistenza shadow per dare al
+   dispatch T-60 le righe da eseguire.
 2. **CB2 a 30 USDC con wallet ~36 USDC**: l'arresto scatta dopo ~6 USDC di
    perdite di equity. E' la soglia della direttiva — ma va ricordato che un
    arresto NON si sblocca da solo se il wallet resta sotto soglia
@@ -3599,3 +3599,44 @@ codice): `T60_EXECUTION_ONLY`, `T60_WINDOW_MIN_MIN`, `T60_WINDOW_MAX_MIN`,
 3. La misura del gate leghe del 15/09 e' precedente a questo deploy: dopo
    qualche giorno di ledger conviene rimisurare il flusso (quante puntate
    arrivano davvero in finestra T-60 sulle sole leghe ammesse).
+
+#### Misura d'impatto del cap CB1 sulla corsia (17/09/2026, `t60_cap_impact.py`)
+
+Direttiva del proprietario: prima di decidere se il cap CB1 debba valere anche
+sulla corsia Kelly che piazza davvero, **misura**. Nuovo strumento di sola
+LETTURA (zero ordini, zero crediti, SQLite `mode=ro`, nessuna rete) che usa
+l'`adaptive_stake` REALE della produzione — non una formula ricopiata — piu' il
+tripwire `test_t60_cap_impact.py` (20 verdi offline: la connessione RIFIUTA una
+`UPDATE`, il sorgente non contiene scritture ne' import di rete, le soglie
+seguono l'env reale).
+
+**Perche' la risposta dipende dal BANKROLL**: con `STAKE_CAP_HARD=0`
+(produzione dal 12/09) il floor dell'exchange (1.00 USDC) **prevale** sul cap
+percentuale — sotto il floor lo stake viene ALZATO a 1.00 USDC, che e'
+esattamente il cap CB1. Il taglio esiste solo quando il cap percentuale (1%
+value/moderate, 2% strong) supera 1.00 USDC.
+
+**Numeri (configurazione di produzione: cap severo OFF, cap 1%/2%, Kelly 5%;
+con Kelly dinamico 0.05-0.40 le soglie NON cambiano: il cap percentuale domina):**
+
+| bankroll | value/moderate | strong_value |
+|---|---|---|
+| 36 (equity reale 17/09) | 1.00 = | 1.00 = |
+| 50 | 1.00 = | 1.00 = |
+| 75 | 1.00 = | **1.50 → 1.00 (−33%)** |
+| 100 | 1.00 = | **2.00 → 1.00 (−50%)** |
+| 150 | **1.50 → 1.00 (−33%)** | **3.00 → 1.00 (−67%)** |
+| 250 | **2.50 → 1.00 (−60%)** | **5.00 → 1.00 (−80%)** |
+| 500 | **5.00 → 1.00 (−80%)** | **10.00 → 1.00 (−90%)** |
+
+**Soglie di rottura**: `strong_value` da **50.25 USDC**, `value`/`moderate` da
+**100.50 USDC** (il cap percentuale, appunto).
+
+**VERDETTO**: con l'equity attuale (**36 USDC**) il cap CB1 non cambierebbe
+NESSUNA puntata — il floor 1.00 USDC e' gia' il cap: applicarlo oggi sarebbe a
+costo ZERO, e il tetto comincerebbe a proteggere quando il wallet cresce (a
+100 USDC dimezza i `strong_value`, a 250-500 USDC taglia il 60-90% dello stake
+Kelly). Ledger locale al momento della misura: 6 segnali vivi, **0 tagliati**.
+Uso: `venv/bin/python t60_cap_impact.py [--bankroll N] [--clv] [--json]
+[--db PATH]` (da rifare in sola lettura sul ledger di produzione per la
+conferma sui segnali reali).
