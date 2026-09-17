@@ -3684,3 +3684,26 @@ ledger COSI' COME SONO SALVATE — ogni confronto SQL su date va avvolto in
 codice nuovo sul container (`T60 cap 1.0`, `exec_only True`, `kill_wallet 30.0`,
 CB2 non armato, `t60_stake(34.83)` = 1.0, gate leghe `Premier League True` /
 `La Liga False`, `t60_cap_impact` presente con soglia 50.25).
+
+**ESITO DELLA PULIZIA (17/09, deploy `303f933`, deployment `ccdfa195`).**
+`overdue_orphans` **2 → 0**: la scadenza con il confronto corretto ha chiuso
+subito le righe insaldabili oltre soglia (2 previsioni chiuse come push,
+50 previsioni aperte). Residuo rimanente, TUTTO spiegato e in chiusura
+automatica, con **0 crediti** di costo atteso (`leagues_to_query: []`):
+- **32 orfane** (nessuna riga in `matches`, insaldabili per costruzione):
+  9 del 12/09 scadono oggi/stanotte, 20 del 13/09 il 18/09, 3 del 14/09 il
+  19/09 — il job `sx_signals_job` (ogni 15') chiama `expire_stale_sx_rows`
+  in coda a `settle_sx_bets`, quindi ora scadono PUNTUALI alla soglia;
+- **11 previsioni su partite future** (normali);
+- **5 refertabili in attesa di risultato**: NON vengono interrogate perche'
+  la politica `SETTLEMENT_BETS_ONLY=1` (15/09: "il referto segue il DENARO")
+  interroga solo le leghe con una PUNTATA — la loro lega non ne ha, quindi
+  restano in telemetria fino alla scadenza (per saldarle servirebbe spendere
+  ~2-3 crediti o rimettere `SETTLEMENT_BETS_ONLY=0`: decisione del
+  proprietario, non un difetto);
+- **3 righe su leghe fuori catalogo** (`Primera A`, `LigaPro`,
+  `Primera Nacional`): insaldabili per scelta (the-odds-api non le copre) →
+  scadenza;
+- **1 bet live aperta** (`sx-L19974965`, Europa League `1`, con `market_id`):
+  partita di stasera, si salda col percorso SX-native (gratis).
+Nessuna azione manuale residua: la coda si svuota da sola con le scadenze.
