@@ -1266,9 +1266,18 @@ def expire_stale_sx_rows() -> dict:
     try:
         stale_days = _stale_days()
         cutoff = f"-{stale_days} days"
+        # ⚠️ datetime(col) NON e' cosmetico (fix 17/09/2026): le date del
+        # ledger sono salvate in formato ISO con 'T' ('2026-09-12T07:11:39')
+        # e a volte con 'Z', mentre `datetime('now', ?)` produce il formato
+        # SQLite con lo SPAZIO ('2026-09-12 10:48:40'). Nel confronto fra
+        # STRINGHE 'T' (0x54) > ' ' (0x20), quindi a parita' di giorno la
+        # riga risultava piu' NUOVA del cutoff e la scadenza arrivava con
+        # ~1 giorno di ritardo (misurato sul container: `overdue_orphans` 2
+        # invece di 0). `datetime(...)` normalizza 'T', 'Z' e l'offset.
         stale = {r[0] for r in c.execute(
             "SELECT m.id FROM matches m "
-            "WHERE m.id LIKE 'sx-%' AND m.commence_time < datetime('now', ?) "
+            "WHERE m.id LIKE 'sx-%' "
+            "AND datetime(m.commence_time) < datetime('now', ?) "
             "AND NOT EXISTS (SELECT 1 FROM match_results r WHERE r.match_id = m.id)",
             (cutoff,)).fetchall()}
         # Ramo orfani: nessuna riga in `matches` -> il kickoff non esiste,
@@ -1278,13 +1287,15 @@ def expire_stale_sx_rows() -> dict:
         # `_sx_open_matches`, che fa JOIN su `matches`).
         stale |= {r[0] for r in c.execute(
             "SELECT DISTINCT match_id FROM bets "
-            "WHERE esito_finale IS NULL AND created_at < datetime('now', ?) "
+            "WHERE esito_finale IS NULL "
+            "AND datetime(created_at) < datetime('now', ?) "
             "AND match_id NOT IN (SELECT id FROM matches) "
             "AND NOT EXISTS (SELECT 1 FROM match_results r WHERE r.match_id = bets.match_id)",
             (cutoff,)).fetchall()}
         stale |= {r[0] for r in c.execute(
             "SELECT DISTINCT match_id FROM predictions "
-            "WHERE esito_finale IS NULL AND created_at < datetime('now', ?) "
+            "WHERE esito_finale IS NULL "
+            "AND datetime(created_at) < datetime('now', ?) "
             "AND match_id NOT IN (SELECT id FROM matches) "
             "AND NOT EXISTS (SELECT 1 FROM match_results r WHERE r.match_id = predictions.match_id)",
             (cutoff,)).fetchall()}

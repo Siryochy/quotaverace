@@ -305,6 +305,47 @@ class TestScadenzaRigheStale:
         assert res["expired"] == {"bets": 0, "predictions": 0}
         assert _pred_outcome("sx-NEW1") == (None, None)
 
+    def test_created_at_iso_con_T_non_ritarda_la_scadenza(self, temp_db,
+                                                         monkeypatch):
+        """Il confronto SQL non deve degradare in ordine ALFABETICO (fix 17/09).
+
+        `created_at` e' salvato in ISO con 'T' ('2026-09-12T07:11:39') mentre
+        `datetime('now', ?)` produce il formato con lo SPAZIO
+        ('2026-09-12 10:48:40'): fra stringhe 'T' (0x54) > ' ' (0x20), quindi
+        a parita' di giorno la riga risultava piu' NUOVA del cutoff e la
+        scadenza arrivava con ~1 giorno di ritardo (misurato sul container:
+        `overdue_orphans` 2 invece di 0). Qui la riga ha 5 giorni e 1 ora:
+        deve scadere SUBITO.
+        """
+        monkeypatch.setenv("SX_STALE_DAYS", "5")
+        vecchia = (datetime.now(timezone.utc)
+                   - timedelta(days=5, hours=1)).isoformat()
+        # ISO con 'T' (e senza fuso, come le righe scritte dal ledger).
+        tracker.save_prediction("sx-ISO1", "1X2", "1", 1.7, 0.60, 0.04)
+        conn = tracker._get_conn()
+        conn.execute("UPDATE predictions SET created_at=? "
+                     "WHERE match_id='sx-ISO1'", (vecchia,))
+        conn.commit()
+        conn.close()
+        assert "T" in vecchia
+        # Riga orfana: nessuna riga in `matches` (ramo creato il 13/09).
+        res = sx_signals.settle_sx_bets(provider=FakeSxSettle())
+        assert res["expired"]["predictions"] >= 1
+        assert _pred_outcome("sx-ISO1") == ("push", 0.0)
+
+    def test_commence_time_con_Z_non_ritarda_la_scadenza(self, temp_db,
+                                                         monkeypatch):
+        """Stesso confronto, lato `matches.commence_time` (ISO con 'Z')."""
+        monkeypatch.setenv("SX_STALE_DAYS", "5")
+        vecchio = (datetime.now(timezone.utc)
+                   - timedelta(days=5, hours=1)).isoformat()
+        tracker.save_match("sx-ISO2", "Primera A", "Alpha", "Beta",
+                           vecchio.replace("+00:00", "Z"))
+        tracker.save_prediction("sx-ISO2", "1X2", "1", 1.7, 0.60, 0.04)
+        res = sx_signals.settle_sx_bets(provider=FakeSxSettle())
+        assert res["expired"]["predictions"] >= 1
+        assert _pred_outcome("sx-ISO2") == ("push", 0.0)
+
     def test_bet_orfana_senza_matches_scade(self, temp_db, monkeypatch):
         """Ramo orfani: la bet del batch 09/09 senza riga in `matches` non ha
         kickoff -> la scadenza usa `created_at`. Senza questo ramo resterebbe

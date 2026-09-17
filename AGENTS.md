@@ -3638,5 +3638,49 @@ costo ZERO, e il tetto comincerebbe a proteggere quando il wallet cresce (a
 100 USDC dimezza i `strong_value`, a 250-500 USDC taglia il 60-90% dello stake
 Kelly). Ledger locale al momento della misura: 6 segnali vivi, **0 tagliati**.
 Uso: `venv/bin/python t60_cap_impact.py [--bankroll N] [--clv] [--json]
-[--db PATH]` (da rifare in sola lettura sul ledger di produzione per la
-conferma sui segnali reali).
+[--db PATH]`.
+
+**CONFERMA SUL CONTAINER (17/09, sola lettura, `railway ssh` + DB `mode=ro`).**
+Env di produzione: `STAKE_CAP_HARD=0`, `STAKE_CAP_PCT=0.01`,
+`STAKE_CAP_PCT_STRONG=0.02`, `KELLY_MIN/MAX_FRACTION=0.05`, `T60_*` **assenti**
+(default di codice) — esattamente la configurazione misurata. Equity reale
+**34.8255 USDC** (33.8255 liberi + 1.00 in escrow, da `execution_engine.py
+--balance`; `daily_stop.start_bankroll` 34.8255), flag CB2 assente. Segnali
+**1X2 vivi: 2** (Europa League `1` @1.7467 strong_value, edge +37.9pp;
+La Liga Atlético Madrid @1.54 strong_value, edge +13.4pp): stake della corsia
+**1.00 USDC** ciascuno → CB1 1.00 → **0 tagliati**. Verdetto CONFERMATO sui
+dati reali: oggi il cap CB1 e' a costo zero, morde da 50.25 USDC (strong) e
+100.50 (value/moderate).
+
+#### Bug trovato dalla verifica POST-DEPLOY: scadenza righe in ritardo di ~1 giorno (17/09/2026)
+
+Il controllo dopo il deploy (`GET /api/health` → `settlement.overdue_orphans`)
+ha segnalato **2** dove la memoria dice "DEVE restare 0": righe insaldabili piu'
+vecchie della soglia non ancora scadute. Causa REALE (misurata sul container,
+non ipotizzata) — il contrasto fra i FORMATI di data:
+- le date del ledger sono ISO con la **'T'** (`2026-09-12T07:11:39.587521`, a
+  volte con 'Z');
+- il cutoff `datetime('now', ?)` produce il formato SQLite con lo **SPAZIO**
+  (`2026-09-12 10:48:40`);
+- il confronto `created_at < datetime('now', ?)` e' quindi fra **STRINGHE**, e
+  `'T'` (0x54) > `' '` (0x20): a parita' di giorno la riga risultava piu' NUOVA
+  del cutoff e la scadenza slittava (~1 giorno: la riga del 12/09 07:11 non
+  scadeva il 17/09 10:48 ma il 18/09).
+
+**Fix** (`tracker.expire_stale_sx_rows`, tutti e tre i confronti): `datetime(col)`
+avvolge i valori (`datetime(m.commence_time)`, `datetime(created_at)`) e
+normalizza 'T', 'Z' e l'offset (verificato in SQLite 3.45.1). Tripwire:
+`test_created_at_iso_con_T_non_ritarda_la_scadenza` e
+`test_commence_time_con_Z_non_ritarda_la_scadenza` — **falliscono entrambi
+senza il fix** (verificato con `git stash` del solo `tracker.py`). Sul
+container le orfane del 12/09 (11 righe) + 13/09 (20) + 14/09 (3) ora scadono
+alla soglia vera.
+
+⚠️ **Lezione permanente**: `datetime('now')` NON e' comparabile con le date del
+ledger COSI' COME SONO SALVATE — ogni confronto SQL su date va avvolto in
+`datetime(...)`.
+
+**Deploy del 17/09 (`c35f0fe`, deployment `e0fa2a44`) verificato**: health 200,
+codice nuovo sul container (`T60 cap 1.0`, `exec_only True`, `kill_wallet 30.0`,
+CB2 non armato, `t60_stake(34.83)` = 1.0, gate leghe `Premier League True` /
+`La Liga False`, `t60_cap_impact` presente con soglia 50.25).
