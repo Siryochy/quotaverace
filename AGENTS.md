@@ -3763,10 +3763,27 @@ Bug collaterale chiuso nello stesso giro: `_seed_inverted` in
 cassa di 14 giorni, faceva fallire da solo il test (stessa trappola di data
 del 15/09) — ora le date sono relative a `now`.
 
-**5) DA FARE (non ancora eseguito).** Le tre bet #39-#41 restano saldate
-male nel ledger (real money: -3.00 USDC in totale): la riparazione richiede
-di riscrivere `match_results` col punteggio VERO (ottenibile da
-`markets/find` sul `market_id` della bet, gratis) e lasciar fare a
-`heal_settled_contradictions` (riapertura + ri-saldo automatico). Da
-eseguire solo con autorizzazione, come ogni scrittura sul ledger di
-produzione.
+**5) DEPLOY E RIPARAZIONE (17/09, eseguiti).** Commit `cc0e93c` deployato su
+Railway (health 200). Verifica del fix **sul container**, sui dati REALI
+della cache: delle **306 partite non concluse** (molte con punteggi live)
+**0** vengono ora refertate per errore, e delle **178 concluse** **0**
+vengono perse (nessuna regressione sui risultati veri).
+
+Riparazione delle tre bet eseguita in sola scrittura mirata: i punteggi
+VERI presi da `markets/find` (gratis) — #41 Liverpool 3-1 Tottenham, #40
+Hibernian 0-1 Kilmarnock, #39 Middlesbrough 2-2 Millwall — riscritti in
+`match_results`, poi `settlement_sanity_check()` + `heal_settled_contradictions()`.
+Esito: **#41 da `lost -1.00` a `won +0.86`** (era l'unico verdetto
+sbagliato; #40 e #39 erano perse anche nella realta', ma ora hanno il
+punteggio corretto), piu' la previsione #12731 risaldata. Il P/L live
+totale passa da **-14.14 a -12.28 USDC** (24 chiuse).
+
+**6) BET DI STASERA (#42, Celtic–Ferencvaros, kickoff 17/09 19:00 UTC).**
+Verificata in stato di attesa: aperta, `market_id` presente, nel set
+`_sx_open_matches()` (17 match). Prerequisiti del saldo automatico tutti
+verificati sul container: settlement NON in pausa, `SX_NATIVE_SETTLEMENT`
+= default ON, `ODDS_API_KEY` presente (gate), `markets/find` risponde sul
+suo hash (`status ACTIVE`, punteggi `None` prima del fischio d'inizio),
+`sx_signals_job` ogni 15'. Con il fix si saldera' col **punteggio
+finale**: il percorso SX-native tace finche' l'evento non ha almeno 120'
+di gioco e il percorso the-odds-api non accetta piu' partite non concluse.
