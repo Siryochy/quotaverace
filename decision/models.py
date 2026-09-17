@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 Market = Literal["1X2"]
 Outcome = Literal["1", "X", "2"]
@@ -78,6 +78,17 @@ class ReasonCode(str, Enum):
     # --- Shadow Validation (convalida della riga PERSISTITA) ---
     STAKE_NOT_EXECUTABLE = "stake_not_executable"   # stake assente/cappato sotto il floor
     VALIDATION_INCOMPLETE = "validation_incomplete"  # riga incompleta/illeggibile
+    # --- Circuit breakers T-60 (17/09/2026, direttiva del proprietario) ---
+    T60_WINDOW_OPEN = "t60_window_open"          # dentro la finestra esecutiva T-60..T-50
+    T60_WINDOW_NOT_YET = "t60_window_not_yet"    # kickoff oltre la finestra: attendi
+    T60_WINDOW_MISSED = "t60_window_missed"      # meno di T60_EXEC_MIN_MIN: non si ordina
+    T60_NO_EXECUTABLE_WINDOW = "t60_no_executable_window"  # nessun segnale eseguibile nel giro
+    T60_NO_PENDING_FOR_EXECUTION = "t60_no_pending_for_execution"  # riga non trovata per signal_id
+    T60_ORDER_ALREADY_PLACED = "t60_order_already_placed"  # lineage: eseguito in un giro precedente
+    T60_NOT_VALIDATED_FOR_EXECUTION = "t60_not_validated_for_execution"  # convalida non positiva
+    T60_NO_EXECUTION_IN_SIM = "t60_no_execution_in_sim"  # esecuzione reale solo in live
+    T60_KILL_SWITCH_WALLET = "t60_kill_switch_wallet"    # CB2: wallet <= kill switch
+    T60_FEED_GATE_BLOCKED = "t60_feed_gate_blocked"      # gate di mercato non passato
 
 
 # Stati del ciclo di vita di una riga del ledger `decisions`:
@@ -369,10 +380,85 @@ class DecisionRecord(BaseModel):
         return row
 
 
+class T60OrderContract(BaseModel):
+    """Contratto dell'ordine T-60: identity + verdetto + decisione di rischio.
+
+    CB3 (validazione Pydantic rigida): ogni parametro dell'ordine in uscita
+    DEVE passare da questo modello prima del gateway d'esecuzione. Rigore
+    (piu' stretto di PlaceOrderPayload, perche' qui passa il denaro):
+
+    - price > 1.0 (una quota <= 1 e' dati malformati, non un mercato);
+    - kickoff e created_at con fuso orario OBBLIGATORIO (mai un istante
+      ambiguo su un ordine reale);
+    - league NON vuota (gate STRATEGY_LEAGUES: senza lega non si sa cosa si
+      sta giocando);
+    - outcome nei canoni accettati ("1", "X", "2" o il nome della squadra);
+    - stake: richiesto (una decisione senza stake non e' eseguibile).
+
+    I circuit breakers sono SopRA il modello: `stake <= T60_MAX_STAKE_USDC`
+    e `price <= T60_MAX_ODDS` vengono VERIFICATI dal chiamante (`validate_
+    order_payload`) e, se violati, l'ordine e' scartato con `order.rejected`
+    — il contratto del decreto e' una REGOLA, non un default silenzioso.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    signal_id: str = Field(..., min_length=1)
+    record_id: str = Field(..., min_length=1)
+    match_id: str = Field(..., min_length=1)
+    league: str = Field(..., min_length=1)
+    market: Market = "1X2"
+    outcome: str = Field(..., min_length=1)
+    home: str = ""
+    away: str = ""
+    price: float = Field(..., gt=1.0)
+    stake: float = Field(..., gt=0.0)
+    verdict: Verdict = "approve"
+    mode: Mode = "live"
+    provider: str = ""
+    kickoff: datetime
+    created_at: datetime
+    # Timestamp di convalida del payload: l'ordine parte SOLO se la riga sul
+    # ledger e' stata convalidata positiva (Shadow Validation).
+    validated_at: Optional[datetime] = None
+
+    @field_validator("kickoff", "created_at", "validated_at")
+    @classmethod
+    def _require_tz(cls, v: Optional[datetime]) -> Optional[datetime]:
+        if v is not None and v.tzinfo is None:
+            raise ValueError("timestamp senza fuso orario: usa l'UTC esplicito")
+        return v
+
+    @model_validator(mode="after")
+    def _coherence(self) -> "T60OrderContract":
+        if self.kickoff <= self.created_at:
+            raise ValueError("kickoff non successivo a created_at: riga incoerente")
+        if self.mode == "live" and not self.provider:
+            raise ValueError("ordine live senza provider: rifiutato")
+        return self
+
+    def model_dump_json_compact(self) -> str:
+        return self.model_dump_json()
+
+
+def t60_executable(stake: float, price: float) -> bool:
+    """Un contratto T-60 rispetta i circuit breakers di decreto?
+
+    CB1 hard cap (0.50 USDC direttiva; su SX il minimo ordine e' 1.00 e la
+    scelta del proprietario del 17/09 e' il cap eseguibile 1.00) e tetto
+    quota (solo favoriti netti 1.30-1.80). Usato dal validatore d'ordine e
+    dai tripwire: una sola fonte per la regola.
+    """
+    from auto_bet import T60_MAX_ODDS, T60_MAX_STAKE_USDC  # lazy: nessun ciclo
+    return (0.0 < float(stake) <= float(T60_MAX_STAKE_USDC) + 1e-9
+            and 1.0 < float(price) <= float(T60_MAX_ODDS) + 1e-9)
+
+
 __all__ = [
     "DECISION_STATUSES", "DECISION_STATUS_PENDING", "DECISION_STATUS_REJECTED",
     "DECISION_STATUS_VALIDATED", "DataQuality", "DecisionRecord", "DecisionStatus",
     "KILL_SWITCH_PRECEDENCE", "KillSwitchStatus", "Market", "Mode", "Outcome",
-    "ReasonCode", "RiskDecision", "Signal", "StakeDecision", "Tier", "Verdict",
-    "make_signal_id", "risk_approve", "risk_reject", "risk_review", "utcnow",
+    "ReasonCode", "RiskDecision", "Signal", "StakeDecision", "T60OrderContract",
+    "Tier", "Verdict", "make_signal_id", "risk_approve", "risk_reject",
+    "risk_review", "t60_executable", "utcnow",
 ]

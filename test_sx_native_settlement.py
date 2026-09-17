@@ -15,7 +15,7 @@ il verdetto 1X2 lo emette comunque settle_bets/settle_predictions dai
 punteggi (fail-closed), non dall'outcome della gamba.
 """
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -292,8 +292,13 @@ class TestScadenzaRigheStale:
 
     def test_match_recente_non_scade(self, temp_db, monkeypatch):
         monkeypatch.setenv("SX_STALE_DAYS", "5")
-        tracker.save_match("sx-NEW1", "Primera A", "Alpha", "Beta",
-                           "2026-09-11T15:00:00Z")
+        # Kickoff RELATIVO a now (lezione 15/09 sui test trappola sulla data):
+        # con una data FISSA ("2026-09-11", 6 giorni fa il 17/09) il test
+        # scadeva da solo col calendario — un falso allarme che arriva sempre
+        # nel momento peggiore, senza che nulla fosse rotto nel codice.
+        recente = (datetime.now(timezone.utc) - timedelta(days=1))\
+            .isoformat().replace("+00:00", "Z")
+        tracker.save_match("sx-NEW1", "Primera A", "Alpha", "Beta", recente)
         tracker.save_prediction("sx-NEW1", "1X2", "1", 1.7, 0.60, 0.04)
         prov = FakeSxSettle()
         res = sx_signals.settle_sx_bets(provider=prov)

@@ -11,6 +11,9 @@ Scenari:
   C. Cap stake severo 1-2%     -> stake cappato < minimo ordine = ordine saltato
   D. Limiti quota 1.30-1.80    -> segnali fuori fascia mai candidati
   E. Liquidita' SX             -> book sottile: ordine rifiutato (no slippage)
+  F. Lega STRATEGY_LEAGUES     -> campionati non vincenti mai candidati
+  G. Circuit breakers T-60     -> finestra T-60..T-50, CB1 cap per ordine,
+                                  CB2 kill switch patrimoniale 30 USDC
 
 Uso: venv/bin/python verify_guardrails.py
 """
@@ -85,9 +88,16 @@ def _start(hours: float = 3.0) -> str:
         .isoformat().replace("+00:00", "Z")
 
 
+# Lega AMMESSA dalla strategia (value_filter.STRATEGY_LEAGUES): dal 15/09 la
+# corsia ordini applica il gate di lega, quindi il seed della diagnostica deve
+# stare in una lega ammessa — altrimenti OGNI scenario misura solo il gate di
+# lega e non il guardrail che vuole verificare.
+ALLOWED_LEAGUE = "Premier League"
+
+
 def _seed(mid: str, esito: str, quota: float, market_prob: float,
           edge: float, home: str = "Osasuna", away: str = "Getafe") -> None:
-    tracker.save_match(mid, "Serie A", home, away, _start())
+    tracker.save_match(mid, ALLOWED_LEAGUE, home, away, _start())
     tracker.save_prediction(mid, "1X2", esito, quota, 0.60, 0.08,
                             market_prob=market_prob, market_edge=edge,
                             status="value")
@@ -216,15 +226,15 @@ def main() -> int:
     _head("D. LIMITI QUOTA 1.30–1.80 — fuori fascia mai candidati")
     _reset_state()
     auto_bet._execution_mode = lambda allow_sim=True: "sim"
-    tracker.save_match("g-high", "Serie A", "Osasuna", "Getafe", _start())
+    tracker.save_match("g-high", ALLOWED_LEAGUE, "Osasuna", "Getafe", _start())
     # quota 1.90 > 1.80 (favorito troppo "lungo")
     tracker.save_prediction("g-high", "1X2", "Osasuna", 1.90, 0.55, 0.08,
                             market_prob=0.52, market_edge=0.05, status="value")
-    tracker.save_match("g-low", "Serie A", "Osasuna", "Getafe", _start())
+    tracker.save_match("g-low", ALLOWED_LEAGUE, "Osasuna", "Getafe", _start())
     # quota 1.20 < 1.30 (ritorno troppo basso)
     tracker.save_prediction("g-low", "1X2", "Osasuna", 1.20, 0.72, 0.05,
                             market_prob=0.75, market_edge=0.05, status="value")
-    tracker.save_match("g-nfav", "Serie A", "Osasuna", "Getafe", _start())
+    tracker.save_match("g-nfav", ALLOWED_LEAGUE, "Osasuna", "Getafe", _start())
     # quota ok ma NON e' il favorito di mercato (prob 0.30 < 0.50)
     tracker.save_prediction("g-nfav", "1X2", "Getafe", 1.70, 0.45, 0.05,
                             market_prob=0.30, market_edge=0.15, status="value")
@@ -293,14 +303,105 @@ def main() -> int:
           f"{len(deep.place_calls)} (atteso 1, stake {stake:.2f}){RESET}")
     ok_e = ok_e1 and ok_e2 and ok_e3
 
+    # --------------------------------------------------------------- F. LEGA ---
+    _head("F. LEGA (STRATEGY_LEAGUES) — campionati non vincenti mai candidati")
+    _reset_state()
+    auto_bet._execution_mode = lambda allow_sim=True: "sim"
+    # Lega vietata (La Liga: ROI negativo nel backtest) con quota, favorito ed
+    # EV perfetti: prima del 15/09 questa riga finiva DRITTA in un ordine
+    # (candidati senza lega -> gate cieco). Ora deve fermarsi.
+    tracker.save_match("gl-bad", "La Liga", "Osasuna", "Getafe", _start())
+    tracker.save_prediction("gl-bad", "1X2", "Osasuna", 1.65, 0.62, 0.08,
+                            market_prob=0.58, market_edge=0.07, status="value")
+    # Controprova: riga IDENTICA in una lega ammessa -> ammessa.
+    tracker.save_match("gl-ok", ALLOWED_LEAGUE, "Osasuna", "Getafe", _start())
+    tracker.save_prediction("gl-ok", "1X2", "Osasuna", 1.65, 0.62, 0.08,
+                            market_prob=0.58, market_edge=0.07, status="value")
+    # Lega assente: senza sapere cosa si gioca non si ordina (fail-closed).
+    tracker.save_match("gl-vuota", "", "Osasuna", "Getafe", _start())
+    tracker.save_prediction("gl-vuota", "1X2", "Osasuna", 1.65, 0.62, 0.08,
+                            market_prob=0.58, market_edge=0.07, status="value")
+    mark = len(_RECORDS)
+    picks = auto_bet._today_value_picks()
+    _print_logs(mark)
+    ids = sorted(p["match_id"] for p in picks)
+    ok_f = ("gl-bad" not in ids and "gl-vuota" not in ids
+            and "gl-ok" in ids)
+    print(f"  {GREEN if ok_f else RED}→ lega vietata ammessa: "
+          f"{'gl-bad' in ids} (atteso no) · lega assente ammessa: "
+          f"{'gl-vuota' in ids} (atteso no) · lega ammessa ammessa: "
+          f"{'gl-ok' in ids} (atteso si){RESET}")
+
+    # ------------------------------------------- G. T-60 / CIRCUIT BREAKERS ---
+    _head("G. STRATEGIA T-60 — finestra esecutiva + circuit breakers")
+    _reset_state()
+    # L'alert di emergenza del CB2 farebbe un POST Telegram REALE: qui lo
+    # intercettiamo (la diagnostica non deve mandare messaggi a nessuno).
+    auto_bet._t60_emergency_alert = lambda reason: print(
+        f"  {DIM}│ (alert CB2 intercettato) {reason}{RESET}")
+    auto_bet._execution_mode = lambda allow_sim=True: "sim"
+
+    # G1 — FINESTRA T-60: il giro esecutivo ordina SOLO fra T-60 e T-50.
+    _seed("t60-nofin", "Osasuna", 1.65, 0.58, 0.07)   # kickoff a +3h
+    auto_bet.T60_EXECUTION_ONLY = True
+    mark = len(_RECORDS)
+    fuori = auto_bet.run_today_bets(stake_eur=1.0)
+    _print_logs(mark)
+    ok_g1 = fuori == []
+    print(f"  {GREEN if ok_g1 else RED}→ kickoff a +3h con T-60 attivo: "
+          f"ordini {len(fuori)} (atteso 0: solo scansione){RESET}")
+    # Controprova: la stessa riga ordina se la finestra T-60 e' disattivata.
+    # (Si verifica la PRESENZA di t60-nofin, non il totale: il ledger della
+    # diagnostica contiene anche le righe degli scenari A-F, anch'esse
+    # giocabili a orizzonte aperto.)
+    auto_bet.T60_EXECUTION_ONLY = False
+    dentro = auto_bet.run_today_bets(stake_eur=1.0)
+    ok_g2 = any(p.get("match_id") == "t60-nofin" for p in dentro)
+    print(f"  {DIM}controprova con T60_EXECUTION_ONLY=0: t60-nofin ordinata: "
+          f"{'si' if ok_g2 else 'NO'} ({len(dentro)} ordini totali nel "
+          f"palinsesto della diagnostica){RESET}")
+    auto_bet.T60_EXECUTION_ONLY = True
+
+    # G2 — CB1 HARD CAP: nessun calcolo dinamico supera il tetto per ordine.
+    cap = auto_bet.T60_MAX_STAKE_USDC
+    stake_big = auto_bet.t60_stake(10_000.0, mode="live")
+    ok_g3 = stake_big <= cap + 1e-9
+    print(f"  {GREEN if ok_g3 else RED}→ CB1: bankroll 10000 USDC -> stake "
+          f"{stake_big:.2f} (cap {cap:.2f}, Kelly sovrascritto){RESET}")
+    _ok, _contract, errs = auto_bet.validate_order_payload({
+        "signal_id": "s", "record_id": "r", "match_id": "g-cb1",
+        "league": ALLOWED_LEAGUE, "market": "1X2", "outcome": "1",
+        "home": "Osasuna", "away": "Getafe", "price": 1.65, "stake": 5.0,
+        "verdict": "approve", "mode": "live", "provider": "sxbet",
+        "kickoff": _start(), "created_at": datetime.now(timezone.utc).isoformat()})
+    ok_g4 = (not _ok) and any("circuit breaker" in e for e in errs)
+    print(f"  {GREEN if ok_g4 else RED}→ CB3: payload con stake 5.00 -> scartato: "
+          f"{'si' if ok_g4 else 'NO'} ({'; '.join(errs)[:80]}){RESET}")
+
+    # G3 — CB2 KILL SWITCH PATRIMONIALE: equity wallet <= 30 USDC = arresto.
+    armed = auto_bet.t60_check_wallet_kill(25.0)
+    _seed("t60-kill", "Osasuna", 1.65, 0.58, 0.07)
+    mark = len(_RECORDS)
+    bloccato = auto_bet.run_today_bets(stake_eur=1.0)
+    _print_logs(mark)
+    ok_g5 = (armed is True and bloccato == []
+             and auto_bet.t60_kill_switch_status().get("triggered") is True)
+    print(f"  {GREEN if ok_g5 else RED}→ CB2: equity 25.00 <= soglia "
+          f"{auto_bet.T60_KILL_WALLET_USDC:.2f} -> flag armato e "
+          f"{len(bloccato)} ordini (atteso 0){RESET}")
+    auto_bet.t60_clear_kill()
+    ok_g = ok_g1 and ok_g2 and ok_g3 and ok_g4 and ok_g5
+
     # ------------------------------------------------------------- ESITO ------
     _head("ESITO")
-    all_ok = ok_a and ok_b and ok_c and ok_d and ok_e
+    all_ok = ok_a and ok_b and ok_c and ok_d and ok_e and ok_f and ok_g
     for name, ok in (("A kill-switch OFF", ok_a),
                      ("B stop-loss 24h", ok_b),
                      ("C cap severo 1%", ok_c),
                      ("D limiti quota", ok_d),
-                     ("E liquidita' SX", ok_e)):
+                     ("E liquidita' SX", ok_e),
+                     ("F lega strategia", ok_f),
+                     ("G circuit breakers T-60", ok_g)):
         print(f"  {GREEN + '✅' if ok else RED + '❌'} {name}{RESET}")
     print(f"\n  {BOLD}{GREEN + 'TUTTI I GUARDRAIL BLOCCANO' if all_ok else RED + 'QUALCOSA NON BLOCCA'}{RESET}\n")
     return 0 if all_ok else 1

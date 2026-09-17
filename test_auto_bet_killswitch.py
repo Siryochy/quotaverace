@@ -44,10 +44,15 @@ def _isolate_daily_stop(tmp_path, monkeypatch):
     monkeypatch.setattr(auto_bet, "DAILY_STOP_FILE", tmp_path / "daily_stop.json")
 
 
+ALLOWED_LEAGUE = "Premier League"   # in STRATEGY_LEAGUES
+
+
 def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
                       quota=1.65, status="value"):
     start = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
-    tracker.save_match(mid, "Serie A", home, away, start)
+    # Lega AMMESSA dalla strategia: dal 15/09 la corsia ordini applica il
+    # gate STRATEGY_LEAGUES (una lega vietata -> 0 puntate).
+    tracker.save_match(mid, ALLOWED_LEAGUE, home, away, start)
     best_esito = home if esito == "1" else (away if esito == "2" else "Draw")
     tracker.save_analysis(mid, 1.7, 1.1, 0.52, 0.27, 0.21, 0.58, 0.08,
                           best_esito, quota, "Pinnacle", status,

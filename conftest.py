@@ -40,4 +40,18 @@ def _isolated_decision_io(tmp_path, monkeypatch):
     # incidere su un canale reale nemmeno per sbaglio.
     monkeypatch.delenv("QUOTAVERACE_BOT_TOKEN", raising=False)
     monkeypatch.delenv("ADMIN_CHAT_ID", raising=False)
+    # Circuit breakers T-60 (17/09): il flag CB2 (kill switch patrimoniale) e'
+    # PERSISTENTE sul volume e molti test usano wallet finti SOTTO la soglia
+    # (es. 12.28 USDC): senza isolamento un solo test lo arma sul percorso
+    # reale e TUTTI i test successivi (stesso processo) trovano il sistema
+    # "arrestato". Il flag vive nella tmp come gli altri stati su volume.
+    monkeypatch.setattr("auto_bet.T60_KILL_FILE",
+                        tmp_path / "t60_kill.json")
+    monkeypatch.setattr("auto_bet.DAILY_STOP_FILE",
+                        tmp_path / "daily_stop.json")
+    # Il gate della FINESTRA T-60 e' OFF nei test: la maggior parte semina
+    # partite a +3h e verifica la semantica di staking/cap/esposizione, non
+    # il timing (in produzione vale il default ON). I test della strategia
+    # T-60 (test_t60_breakers) lo accendono esplicitamente.
+    monkeypatch.setattr("auto_bet.T60_EXECUTION_ONLY", False)
     yield

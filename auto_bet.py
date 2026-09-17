@@ -122,6 +122,360 @@ MIN_STAKE_EUR = float(os.getenv("MIN_STAKE_EUR", "1.0"))
 STAKE_CAP_HARD = os.getenv("STAKE_CAP_HARD", "1").strip().lower() \
     in ("1", "true", "yes", "on")
 
+# --- STRATEGIA T-60 + CIRCUIT BREAKERS (direttiva del proprietario,
+# 17/09/2026) ------------------------------------------------------------
+# La finestra esecutiva di una partita si apre 60 minuti prima del fischio
+# (T-60) e si chiude 50 minuti prima (T-50): dentro quella finestra il giro
+# valuta i segnali validati e dispaccia gli ordini reali, con micro-
+# allocazioni (cap per ordine) e limiti di esposizione rigorosi. Fuori
+# finestra la strategia NON ordina: i segnali vengono scansionati e
+# classificati dai giri normali (che restano ogni 60s), la decisione
+# esecutiva arriva alla T-60.
+T60_WINDOW_MIN_MIN = float(os.getenv("T60_WINDOW_MIN_MIN", "60"))   # apertura (minuti al kickoff)
+T60_WINDOW_MAX_MIN = float(os.getenv("T60_WINDOW_MAX_MIN", "50"))   # chiusura (fail-closed: oltre, non si ordina)
+# CB1 — HARD CAP PER ORDINE: NESSUN calcolo dinamico (Kelly incluso) puo'
+# produrre uno stake sopra questo tetto: viene SORSCRITTO. Il proprietario
+# ha scelto 1.00 USDC (17/09): e' il minimo ordine eseguibile dell'exchange
+# SX Bet (con 0.50 OGNI ordine sarebbe stato scartato dal floor e il
+# sistema sarebbe rimasto armato ma inerte). Env T60_MAX_STAKE_USDC per
+# tornare alla direttiva letterale (0.50) se il minimo exchange cambia.
+T60_MAX_STAKE_USDC = float(os.getenv("T60_MAX_STAKE_USDC", "1.00"))
+# Tetto quota della strategia (favoriti netti, allineato a value_filter): un
+# ordine su una quota fuori fascia e' dati incoerenti, non un mercato.
+T60_MAX_ODDS = float(os.getenv("T60_MAX_ODDS", "1.80"))
+# CB2 — KILL SWITCH PATRIMONIALE: se l'equity del wallet scende a questa
+# soglia o sotto, il sistema si ARRESTA (stop job + alert di emergenza
+# Telegram, antirumore 1/giorno). Persistente sul volume (sopravvive ai
+# redeploy) e fail-closed: un errore di lettura del wallet e' un blocco,
+# non un via libera. Reset manuale: /t60reset (admin) o rimozione del file.
+T60_KILL_WALLET_USDC = float(os.getenv("T60_KILL_WALLET_USDC", "30.0"))
+T60_KILL_FILE = DATA_DIR / "execution" / "t60_kill.json"
+# CB3 — VALORIZZAZIONE PYDANTIC RIGIDA: ogni payload d'ordine passa dal
+# contratto `decision.models.T60OrderContract` PRIMA del dispatch; un
+# payload malformato viene scartato e registrato nel ledger SQLite (bets
+# mode='rejected-t60'). Env: disattivabile SOLO in via eccezionale (i test
+# e la diagnostica la tengono SEMPRE attiva).
+T60_ORDER_VALIDATION = os.getenv("T60_ORDER_VALIDATION", "1").strip().lower() \
+    in ("1", "true", "yes", "on")
+# La corsia d'ordine del giro normale respecta la finestra T-60: fuori
+# finestra il palinsesto viene solo SCANSIONATO e classificato (telemetria
+# completa), la decisione esecutiva arriva nella finestra. T60_EXECUTION_ONLY=0
+# ripristina il comportamento pre-T60 (ordini in tutto l'orizzonte 0.5-24h).
+T60_EXECUTION_ONLY = os.getenv("T60_EXECUTION_ONLY", "1").strip().lower() \
+    in ("1", "true", "yes", "on")
+
+
+def t60_window(kickoff: "datetime | None") -> str:
+    """Posizione di un kickoff rispetto alla finestra esecutiva T-60.
+
+    Ritorna: "before" (kickoff oltre T-60: non ancora), "within" (dentro
+    T-60..T-50: finestra esecutiva), "missed" (meno di T-50: non si ordina,
+    fail-closed), "unknown" (kickoff non parsabile: non si ordina).
+    """
+    if kickoff is None:
+        return "unknown"
+    now = datetime.now(timezone.utc)
+    k = kickoff if kickoff.tzinfo else kickoff.replace(tzinfo=timezone.utc)
+    mins = (k - now).total_seconds() / 60.0
+    if mins > T60_WINDOW_MIN_MIN:
+        return "before"
+    if mins >= T60_WINDOW_MAX_MIN:
+        return "within"
+    return "missed"
+
+
+def t60_stake(bankroll: float, *, mode: str = "sim") -> float:
+    """Stake T-60: CB1 HARD CAP 1.00 USDC, NESSUN Kelly.
+
+    Micro-allocazione FISSA per la strategia T-60 (direttiva 17/09): il
+    Kelly dinamico e' ignorato di proposito — qualunque calcolo che produca
+    uno stake superiore al cap viene sovrascritto. Rispetta comunque i
+    limiti di portafoglio (correlazione 30%, esposizione totale 40%) e la
+    cassa reale del wallet: mai un ordine sopra i fondi disponibili.
+    """
+    try:
+        bankroll = float(bankroll)
+    except (TypeError, ValueError):
+        bankroll = 0.0
+    stake = min(float(T60_MAX_STAKE_USDC),
+                bankroll * CORRELATION_CAP_PCT,
+                bankroll * TOTAL_EXPOSURE_CAP_PCT)
+    if mode == "live":
+        stake = min(stake, bankroll)   # mai oltre la cassa reale
+    if stake < MIN_STAKE_EUR:
+        return 0.0                     # sotto il minimo ordine: no bet
+    return float(round(min(stake, T60_MAX_STAKE_USDC), 2))
+
+
+def t60_kill_switch_status() -> dict:
+    """Stato del CB2 (kill switch patrimoniale a 30 USDC).
+
+    Lettura FAIL-CLOSED del flag persistente: file illeggibile = blocco
+    attivo (meglio fermarsi che dubitare). Il flag e' scritto solo da
+    `t60_check_wallet_kill` (o a mano): finche' non c'e', il sistema respira.
+    """
+    try:
+        data = json.loads(T60_KILL_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("flag non e' un dict")
+        return {
+            "triggered": True,
+            "threshold": T60_KILL_WALLET_USDC,
+            "triggered_at": data.get("triggered_at"),
+            "wallet_equity": data.get("wallet_equity"),
+            "reason": data.get("reason"),
+            "file": str(T60_KILL_FILE),
+        }
+    except FileNotFoundError:
+        return {"triggered": False, "threshold": T60_KILL_WALLET_USDC,
+                "file": str(T60_KILL_FILE)}
+    except Exception as e:
+        return {"triggered": True, "threshold": T60_KILL_WALLET_USDC,
+                "reason": f"flag illeggibile ({e})", "file": str(T60_KILL_FILE)}
+
+
+def t60_clear_kill() -> None:
+    """Rimuove il flag CB2 (riattivazione manuale dopo l'emergenza)."""
+    try:
+        T60_KILL_FILE.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def t60_check_wallet_kill(equity: float | None) -> bool:
+    """CB2: True se l'equity wallet e' a/ sotto la soglia (scrive il flag
+    persistente SOLO al primo innescio reale).
+
+    La soglia vale sull'EQUITY (liberi + in gioco), non sul disponibile:
+    l'escrow non e' una perdita. Un wallet NON LEGGIBILE (None) NON arma il
+    flag: un errore API transitorio non deve arrestare il sistema finche'
+    un admin non lo sblocca — il chiamante decide come gestire la lettura
+    fallita (il giro normale logga e ripiega sulla cassa, il giro T-60 esce
+    fail-closed senza armare nulla).
+    """
+    if equity is None:
+        return False
+    try:
+        equity_float = float(equity)
+    except (TypeError, ValueError):
+        return False
+    if equity_float > T60_KILL_WALLET_USDC + 1e-9:
+        return False
+    st = t60_kill_switch_status()
+    if st.get("triggered"):
+        return True                    # gia' armato: nessuna riscrittura
+    payload = {
+        "triggered_at": datetime.now(timezone.utc).isoformat(),
+        "wallet_equity": equity_float,
+        "threshold": T60_KILL_WALLET_USDC,
+        "reason": (f"equity wallet {equity_float:.2f} <= soglia "
+                   f"{T60_KILL_WALLET_USDC:.2f} USDC"),
+    }
+    try:
+        T60_KILL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = T60_KILL_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp, T60_KILL_FILE)
+    except Exception as e:
+        logger.error("auto_bet: scrittura flag T60_KILL fallita: %s", e)
+    logger.error("auto_bet: T60 KILL SWITCH — %s", payload["reason"])
+    return True
+
+
+def _t60_emergency_alert(reason: str) -> None:
+    """CB2: alert di EMERGENZA via bot Telegram (POST diretto, fail-safe).
+
+    Inviato al primo innescio del kill switch patrimoniale; il promemoria
+    persistente (1/giorno) e' cura del job `t60_kill_watch_job` in bot.py.
+    Mai un'eccezione: l'alert non puo' fermare l'arresto che annuncia.
+    """
+    try:
+        from decision.gateways import _send_telegram, admin_targets
+        targets = admin_targets()
+        if targets:
+            _send_telegram(
+                "🚨 *KILL SWITCH T-60: SISTEMA ARRESTATO*\n\n"
+                f"{reason}\n\n"
+                "⚠️ Tutti i processi di puntata sono FERMI (CB2, "
+                f"soglia {T60_KILL_WALLET_USDC:.2f} USDC).\n"
+                "Riattivazione manuale: `/t60reset` dopo il top-up del "
+                "wallet.", targets)
+    except Exception as e:
+        logger.warning("auto_bet: alert CB2 non inviato: %s", e)
+
+
+def validate_order_payload(payload: dict) -> "tuple[bool, object | None, list[str]]":
+    """CB3: valida il payload d'ordine col contratto Pydantic rigido.
+
+    Ritorna `(ok, contract, errors)`. CB1/CB2 sono verificati QUI oltre che
+    nel motore: un payload che li viola e' SCARTATO (non cappato in silenzio),
+    perche' a valle del contratto non esistono correttivi impliciti. Gli
+    errori sono machine-readable per la riga del ledger.
+    """
+    from decision.models import T60OrderContract, t60_executable
+    errors: list[str] = []
+    try:
+        contract = T60OrderContract.model_validate(payload)
+    except Exception as exc:
+        return False, None, [str(exc)]
+    if T60_ORDER_VALIDATION:
+        if not t60_executable(contract.stake, contract.price):
+            errors.append(
+                f"circuit breaker: stake {contract.stake} > "
+                f"{T60_MAX_STAKE_USDC} o quota {contract.price} > {T60_MAX_ODDS}")
+    return (not errors), (contract if not errors else None), errors
+
+
+def t60_dispatch_pending(bankroll: float | None = None) -> list[dict]:
+    """Esegue gli ordini T-60: righe `decisions` validate nella finestra T-60.
+
+    Pipeline (fail-closed ad ogni passo, nessun ordine "a senso"):
+    1. CB2: kill switch patrimoniale attivo -> nessun ordine;
+    2. CB4: gate di mercato (feed SX validato) -> blocca il giro;
+    3. per ogni riga `validate/approve` in finestra (T-60..T-50):
+       a. dedup: UNIQUE(match_id, esito) su `bets`;
+       b. CB3: contratto Pydantic rigido (payload malformato -> riga di
+          rifiuto sul ledger `bets` mode='rejected-t60', MAI al provider);
+       c. CB1: stake = hard cap 1.00 USDC (mai Kelly, mai di piu');
+       d. esecuzione REALE via `_live_fill` (floor EV + liquidita').
+    Le righe in `sim` NON partono mai verso il provider (mode='t60-sim':
+    paper trading del timing T-60, stesso circuito di validate/dedup).
+    """
+    from tracker import _get_conn, save_bet, bet_exists_open
+    mode = _execution_mode(allow_sim=True)
+    if mode == "off":
+        return []
+    if t60_kill_switch_status().get("triggered"):
+        logger.error("auto_bet: T60 giro bloccato dal CB2 (kill switch "
+                     "patrimoniale attivo)")
+        return []
+    # CB4: il giro esecutivo parte SOLO col feed di mercato verificato (la
+    # stessa rete di protezione del giro normale: senza dati di mercato
+    # freschi, conformi e validati non si punta).
+    allowed, gate_reason, identity = _market_feed_gate(
+        request_id=f"t60-{datetime.now(timezone.utc):%Y%m%dT%H%M}")
+    _last_market_gate.update({
+        "blocked": not allowed, "reason": gate_reason.split(":", 1)[0],
+        "detail": gate_reason,
+        "checked_at": datetime.now(timezone.utc).isoformat(), **identity})
+    if not allowed:
+        logger.error("auto_bet: T60 giro bloccato dal gate di mercato — %s",
+                     gate_reason)
+        return []
+    # Bankroll = equity wallet reale in LIVE, cassa altrimenti.
+    equity = None
+    if bankroll is None:
+        if mode == "live":
+            snap = _live_wallet_snapshot()
+            if snap is None:
+                logger.error("auto_bet: T60 wallet non leggibile: nessun "
+                             "ordine (fail-closed)")
+                return []
+            equity = snap["equity"]
+            if t60_check_wallet_kill(equity):
+                return []
+            bankroll = equity
+        else:
+            try:
+                from adaptive_staking import bankroll_stats
+                bankroll = bankroll_stats().get("current") or 0.0
+            except Exception:
+                bankroll = 0.0
+    stake = t60_stake(bankroll, mode=mode)
+    if stake <= 0:
+        logger.info("auto_bet: T60 stake sotto il minimo ordine "
+                    "(bankroll %.2f): nessun ordine", bankroll or 0.0)
+        return []
+    now = datetime.now(timezone.utc)
+    win_lo = now - timedelta(minutes=T60_WINDOW_MIN_MIN + 10)   # tolleranza dedup
+    win_hi = now + timedelta(minutes=T60_WINDOW_MIN_MIN + 10)
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT d.signal_id, d.record_id, d.match_id, d.league, m.home_team, "
+        "m.away_team, d.outcome, d.selection_label, m.commence_time, d.price, "
+        "d.verdict, d.mode, d.provider, d.created_at "
+        "FROM decisions d JOIN matches m ON d.match_id = m.id "
+        "WHERE d.verdict = 'approve' AND d.status = 'validated' "
+        "AND m.commence_time IS NOT NULL AND m.commence_time >= ? "
+        "AND m.commence_time <= ? ORDER BY m.commence_time",
+        (win_lo.isoformat(), win_hi.isoformat())).fetchall()
+    conn.close()
+    placed: list[dict] = []
+    for (signal_id, record_id, mid, league, home, away, outcome, sel_label,
+         kickoff, price, verdict, row_mode, provider, created_at) in rows:
+        k = _parse_iso_utc(kickoff)   # SEMPRE aware UTC (contratto CB3)
+        if t60_window(k) != "within":
+            continue                     # fuori finestra: solo scan/osservazione
+        esito = outcome
+        canon = _canonical_esito(outcome, home, away)
+        if canon:
+            esito = canon["esito_key"]
+        if bet_exists_open(mid, esito):
+            continue                     # CB dedup: UNIQUE(match_id, esito)
+        created = _parse_iso_utc(created_at)  # ledger puo' avere ISO naive
+        payload = {
+            "signal_id": signal_id, "record_id": record_id,
+            "match_id": mid, "league": (league or "").strip(),
+            "market": "1X2", "outcome": outcome,
+            "home": home or "", "away": away or "",
+            "price": float(price or 0), "stake": float(stake),
+            "verdict": verdict, "mode": mode, "provider": provider or "sxbet",
+            # Timestamp con fuso OBBLIGATORIO: un payload con date naive
+            # NON supera CB3 (riga di rifiuto, mai ordine).
+            "kickoff": k.isoformat() if k else "",
+            "created_at": created.isoformat() if created else "",
+        }
+        ok, contract, errors = validate_order_payload(payload)
+        if not ok:
+            # CB3: payload malformato o circuit breaker violato -> riga di
+            # rifiuto sul ledger, MAI verso il provider.
+            logger.error("auto_bet: T60 payload SCARTATO per %s: %s",
+                         mid, "; ".join(errors))
+            try:
+                save_bet(match_id=mid, mercato="1X2", esito=esito,
+                         price=float(price or 0), stake=0.0,
+                         mode="rejected-t60",
+                         status="PAYLOAD_REJECTED: " + " | ".join(errors))
+            except Exception as e:
+                logger.warning("auto_bet: riga rifiuto T60 %s: %s", mid, e)
+            continue
+        if mode != "live":
+            placed.append({"match_id": mid, "home": home, "away": away,
+                           "esito_key": esito, "price": float(price),
+                           "stake": 0.0, "mode": "t60-sim",
+                           "status": "SIMULATED_T60"})
+            continue
+        filled = _live_fill({"match_id": mid, "home": home, "away": away,
+                             "esito_key": esito, "esito_raw": outcome,
+                             "mercato": "1X2", "commence": kickoff,
+                             "quota": float(price), "league": league or "",
+                             "best_ev": 0.0},
+                            stake, float(price))
+        if filled is None:
+            continue
+        if not filled.get("ok"):
+            logger.warning("auto_bet: T60 ordine non piazzato per %s: %s",
+                           mid, filled.get("error") or filled.get("status"))
+            continue
+        record = {"match_id": mid, "home": home, "away": away,
+                  "esito_key": esito, "price": float(filled["price"] or price),
+                  "stake": float(filled["stake"] or stake),
+                  "mode": "t60-live", "status": filled.get("status") or "SUCCESS",
+                  "bet_id": filled.get("bet_id")}
+        placed.append(record)
+        try:
+            save_bet(match_id=mid, mercato="1X2", esito=esito,
+                     market_id=filled["market_id"],
+                     selection_id=filled["selection_id"],
+                     price=record["price"], stake=record["stake"],
+                     mode="live", status=record["status"],
+                     bet_id=filled.get("bet_id"))
+        except Exception as e:
+            logger.warning("auto_bet: salvataggio T60 live %s: %s", mid, e)
+    if placed:
+        logger.info("auto_bet: T60 %d ordini (%s)", len(placed), mode)
+    return placed
+
 # --- FILTRO LIQUIDITA' SX (tarato 11/09/2026) ------------------------------
 # SX Bet e' un EXCHANGE: la quota mostrata esiste solo se c'e' chi compra
 # dall'altra parte. Un book sottile produce slippage o un riempimento
@@ -529,10 +883,15 @@ def _today_value_picks() -> list[dict]:
     ripetuto QUI (difesa in profondita') oltre che nel motore, cosi' eventuali
     righe storiche di segnali su sfavorite/quote alte — o scritte da moduli
     non aggiornati — non possono mai trasformarsi in un ordine.
+
+    STRATEGIA SOLO CAMPIONATI VINCENTI (12/09, applicata qui dal 15/09):
+    stessa difesa in profondita' sulla LEGA (`value_filter.league_allowed`),
+    fail-closed se la lega manca. Il ledger resta completo (telemetria),
+    il gate ferma solo gli ordini.
     """
     from tracker import _get_conn
     from value_filter import (ODDS_MIN, ODDS_MAX, MIN_FAVOURITE_MARKET_PROB,
-                              FAVOURITES_ONLY)
+                              FAVOURITES_ONLY, league_allowed)
     conn = _get_conn()
     c = conn.cursor()
     now_utc = datetime.now(timezone.utc)
@@ -568,6 +927,24 @@ def _today_value_picks() -> list[dict]:
                             mid, esito, float(m_prob),
                             MIN_FAVOURITE_MARKET_PROB)
                 continue
+        # STRATEGIA SOLO CAMPIONATI VINCENTI (12/09): gate di lega ripetuto
+        # QUI (difesa in profondita'). Fino al 15/09 questa corsia era CIECA:
+        # i candidati non portavano la lega, `is_sane(league="")` ammetteva
+        # tutto e il bot ha puntato leghe vietate (EFL Cup, Scottish, La
+        # Liga: 0 vinte su 4 chiuse). La lega arriva da `matches.league`
+        # (mappata dal resolver, mai indovinata).
+        # FAIL-CLOSED sulla lega assente: sul volume NESSUNA riga con partita
+        # in `matches` ha lega vuota (le vuote sono orfane senza riga, quindi
+        # senza mercato): se manca, non si sa cosa si sta giocando -> skip.
+        league_name = (league or "").strip()
+        if not league_name:
+            logger.info("auto_bet: skip %s %s (lega assente: gate "
+                        "STRATEGY_LEAGUES fail-closed)", mid, esito)
+            continue
+        if not league_allowed(league_name):
+            logger.info("auto_bet: skip %s %s (lega '%s' fuori dai "
+                        "campionati vincenti)", mid, esito, league_name)
+            continue
         if mid in seen:
             continue  # un pick per match (best EV tra i value)
         seen.add(mid)
@@ -1142,6 +1519,7 @@ def run_today_bets(stake_eur: float | None = None,
     # copre nemmeno il minimo ordine non si piazza nulla (fail-closed).
     _wallet_balance: float | None = None
     _wallet_exposure: float | None = None
+    _wallet_equity: float | None = None   # riferimento del CB2 (kill switch)
     _spendable = _bankroll          # limite di cassa per singolo ordine
     if mode == "live":
         snapshot = _live_wallet_snapshot()
@@ -1156,6 +1534,7 @@ def run_today_bets(stake_eur: float | None = None,
         else:
             _wallet_balance = snapshot["available"]
             _wallet_exposure = snapshot["exposure"]
+            _wallet_equity = snapshot["equity"]
             _spendable = snapshot["available"]
             # Kelly, drawdown protection e stop-loss misurano l'EQUITY: cosi'
             # una bet piazzata (liberi -> escrow) non e' una perdita.
@@ -1177,6 +1556,24 @@ def run_today_bets(stake_eur: float | None = None,
                      "(%s) — nessuna puntata", stop.get("until"),
                      stop.get("reason") or "perdita giornaliera")
         return []
+
+    # --- CB2: KILL SWITCH PATRIMONIALE T-60 (17/09) — autorita' SUPERIORE a
+    # qualunque altra considerazione. Se il flag e' armato (persistente, sul
+    # volume) il sistema e' ARRESTATO: nessuna puntata in ALCUNA modalita'
+    # finche' un admin non lo disinnesca (/t60reset). In LIVE il wallet viene
+    # ricontrollato QUI: equity <= 30 USDC (o non leggibile) -> arresto
+    # immediato + alert di emergenza Telegram (solo al primo innescio;
+    # il job t60 del bot gestisce il promemoria persistente 1/giorno).
+    if t60_kill_switch_status().get("triggered"):
+        logger.error("auto_bet: T60 KILL SWITCH attivo (%s) — processo "
+                     "arrestato: nessuna puntata",
+                     t60_kill_switch_status().get("reason") or "soglia wallet")
+        return []
+    if mode == "live":
+        if t60_check_wallet_kill(_wallet_equity):
+            _t60_emergency_alert(
+                t60_kill_switch_status().get("reason") or "soglia wallet")
+            return []
 
     # Carica CLV storico per la confidenza
     try:
@@ -1221,6 +1618,19 @@ def run_today_bets(stake_eur: float | None = None,
             logger.info("auto_bet: quota segnale non valida per %s, salto",
                         pick["match_id"])
             continue
+
+        # --- STRATEGIA T-60 (17/09): la decisione esecutiva viene presa SOLO
+        # nella finestra T-60..T-50 minuti prima del fischio d'inizio. Fuori
+        # finestra il palinsesto resta SCANSIONATO e classificato (il ledger
+        # e la catena shadow misurano tutto), ma nessun ordine parte: e' il
+        # controllo del timing richiesto dal proprietario.
+        if T60_EXECUTION_ONLY:
+            _tw = t60_window(_parse_iso_utc(pick.get("commence")))
+            if _tw != "within":
+                logger.info("auto_bet: %s (%s) fuori finestra T-60 (%s): solo "
+                            "scansione, nessun ordine", pick["match_id"],
+                            pick["esito_key"], _tw)
+                continue
 
         # Timing filter: piazza solo nel momento ottimale (0.5-24h prima)
         timing = get_optimal_timing(pick.get("commence"))

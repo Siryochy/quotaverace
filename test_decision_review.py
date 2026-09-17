@@ -126,8 +126,14 @@ class TestDecisione:
                                   reviewer="admin", bankroll=BANKROLL, limits=limits,
                                   max_stake_pct=0.002)
         assert resolved.risk.tightened == {"max_stake_pct": 0.002}
-        assert resolved.stake.cap_source == "risk"
         assert resolved.stake.stake <= BANKROLL * 0.002
+        # CB1 (T-60, 17/09): il cap ASSOLUTO per ordine vale anche su un
+        # stake dimensionato da un umano — l'approvazione puo' stringere,
+        # mai superare il tetto del circuit breaker. Il cap che morde puo'
+        # essere il tightened dell'umano (se piu' stretto del CB1) o CB1.
+        from auto_bet import T60_MAX_STAKE_USDC
+        assert resolved.stake.stake <= T60_MAX_STAKE_USDC + 1e-9
+        assert resolved.stake.cap_source in ("risk", "t60_hard_cap")
 
     def test_rifiuto_umano(self, queue, limits):
         record = enqueue(queue, limits)

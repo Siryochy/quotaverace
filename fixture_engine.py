@@ -352,6 +352,11 @@ def _analyze_match(match_id, match, home_db, away_db, league):
             "market_edge": (model_prob - market_prob) if market_prob is not None else None,
             "mercato": "1X2",
             "esito_key": mkey,
+            # La lega DEVE viaggiare col candidato: `_candidate_status`
+            # classifica ogni esito con `is_sane(..., league=cand["league"])`
+            # e senza la chiave il gate STRATEGY_LEAGUES restava CIECO
+            # (lega vuota = ammessa -> righe "value" in leghe vietate).
+            "league": league,
         })
 
     # 3b. Candidati Asian Handicap: modello vs mercato devig per linea.
@@ -387,6 +392,7 @@ def _analyze_match(match_id, match, home_db, away_db, league):
                 "market_prob": market_prob,
                 "market_edge": (model_prob - market_prob) if market_prob is not None else None,
                 "mercato": "AH",
+                "league": league,
             })
 
     if not candidates:

@@ -88,6 +88,25 @@ def size(signal: Signal, risk: RiskDecision, *, bankroll: float,
     base.cap_source = cap_source
 
     stake_value = min(stake_value, bankroll * cap_pct)
+    # --- CB1 — HARD CAP ASSOLUTO PER ORDINE (T-60, direttiva 17/09/2026) ---
+    # NESSUN calcolo dinamico (Kelly incluso) puo' produrre uno stake sopra
+    # il tetto del circuit breaker: viene SORSCRITTO, non negoziato. Il cap
+    # protegge il DENARO REALE: si applica in mode='live' (in SIM resta la
+    # telemetria del Kelly pieno, altrimenti il feedback impara su stake
+    # che non verrebbero mai giocati). Import PIGRO: `import decision` non
+    # carica auto_bet (tripwire); senza auto_bet la protezione resta al
+    # default di env.
+    if mode == "live":
+        try:
+            from auto_bet import T60_MAX_STAKE_USDC as _t60_hard_cap
+        except Exception:
+            import os as _os
+            _t60_hard_cap = float(_os.getenv("T60_MAX_STAKE_USDC", "1.00"))
+        if stake_value > float(_t60_hard_cap) + 1e-9:
+            base.detail = (f"CB1 hard cap {_t60_hard_cap:.2f} USDC: stake Kelly "
+                           f"{stake_value:.2f} sovrascritto")
+            stake_value = float(_t60_hard_cap)
+            base.cap_source = "t60_hard_cap"
     stake_value = _round_step(stake_value, limits.stake_step)
     base.stake = stake_value
     base.floor = limits.floor_for(mode)

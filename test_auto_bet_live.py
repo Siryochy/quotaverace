@@ -39,12 +39,29 @@ def _env_clean(monkeypatch):
 def _isolate_daily_stop(tmp_path, monkeypatch):
     """Lo stop-loss giornaliero usa un file temporaneo (mai il volume reale)."""
     monkeypatch.setattr(auto_bet, "DAILY_STOP_FILE", tmp_path / "daily_stop.json")
+    # CB2 (T-60, 17/09): la soglia patrimoniale del kill switch (30 USDC) NON
+    # e' l'oggetto di questi test — i wallet finti sono volutamente piccoli
+    # (12.28 / 3.0 / 0.5 USDC, gli importi documentati in AGENTS.md) e con la
+    # soglia reale il giro risulterebbe "arrestato": ogni asserzione di
+    # staking misurerebbe il CB2 invece del cap che vuole verificare (e i test
+    # che attendono [] passerebbero per il motivo sbagliato). Il CB2 ha i suoi
+    # tripwire dedicati in test_t60_breakers.py, che usano la soglia vera.
+    monkeypatch.setattr(auto_bet, "T60_KILL_WALLET_USDC", 0.0)
+
+
+ALLOWED_LEAGUE = "Premier League"   # in STRATEGY_LEAGUES
+# Le 5 leghe della strategia: servono a dare leghe DISTINTE (e ammesse) ai
+# test di correlazione/esposizione senza uscire dal gate di lega.
+ALLOWED_LEAGUES = ("Premier League", "Bundesliga", "Ligue 1",
+                   "Eredivisie", "Turkey Super Lig")
 
 
 def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
                       quota=1.65, status="value", commence=None):
     start = commence or (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
-    tracker.save_match(mid, "Serie A", home, away, start)
+    # Lega AMMESSA dalla strategia: dal 15/09 la corsia ordini applica il
+    # gate STRATEGY_LEAGUES (una lega vietata -> 0 puntate).
+    tracker.save_match(mid, ALLOWED_LEAGUE, home, away, start)
     best_esito = home if esito == "1" else (away if esito == "2" else "Draw")
     tracker.save_analysis(mid, 1.7, 1.1, 0.52, 0.27, 0.21, 0.58, 0.08,
                           best_esito, quota, "Pinnacle", status,
@@ -438,8 +455,11 @@ class TestFlatLive:
                               esito="1" if i % 2 == 0 else "2", quota=1.65)
         if league_prefix:
             conn = tracker._get_conn()
-            conn.execute("UPDATE matches SET league = 'Lega' || rowid "
-                         "WHERE id LIKE 'f%'")
+            rows = conn.execute("SELECT id FROM matches WHERE id LIKE 'f%'")\
+                .fetchall()
+            for i, (mid,) in enumerate(rows):
+                conn.execute("UPDATE matches SET league = ? WHERE id = ?",
+                             (ALLOWED_LEAGUES[i % len(ALLOWED_LEAGUES)], mid))
             conn.commit()
             conn.close()
 
@@ -477,7 +497,7 @@ class TestFlatLive:
     def test_flat_live_blocco_correlato_max_3(self, monkeypatch, temp_db):
         """5 value della STESSA lega e stesso kickoff (blocco correlato):
         cap correlazione 30% di 12.28 = ~3.7 -> solo 3 segni da 1 USDC."""
-        self._seed_n(5, league_prefix=False)  # tutte Serie A stesso kickoff
+        self._seed_n(5, league_prefix=False)  # stessa lega, stesso kickoff
         sent = self._setup_live(monkeypatch)
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert len(placed) == 3

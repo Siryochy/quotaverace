@@ -463,6 +463,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/surebet` – scanner arbitraggi\n"
         "`/setbankroll <€>` – imposta bankroll\n"
         "`/autobet [off|sim|live|now]` – kill-switch/esegui ora (admin)\n"
+        "`/t60reset` – disinnesca il kill switch patrimoniale T-60 (admin)\n"
         "`/settlement [on|off]` – pausa settlement automatico (admin)\n"
         "`/sxscan` – scan segnali SX Bet ora (admin)\n"
         "`/subscribe` – attiva notifiche Pro\n"
@@ -2017,6 +2018,117 @@ async def end_of_day_report_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Riepilogo di fine giornata inviato (ultima partita chiusa).")
 
 
+async def t60_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job strategia T-60 (ogni minuto): dispatch esecutivo nella finestra T-60.
+
+    La SCANSIONE del palinsesto e la valutazione dei segnali restano nei giri
+    normali (auto_bet ogni 60s + analisi): questo job e' la DECISIONE
+    ESECUTIVA — un'ora prima del fischio d'inizio esegue gli ordini sulle
+    righe validate, con i 4 circuit breakers attivi:
+    CB1 cap 1 USDC/ordine (Kelly ignorato) · CB2 kill switch wallet 30 USDC
+    (arresto + alert) · CB3 contratto Pydantic rigido (malformato -> riga di
+    rifiuto sul ledger) · CB4 gate di mercato/feed SX fail-closed.
+    Fail-safe totale: un errore non tocca mai il giro auto_bet normale.
+    """
+    try:
+        from auto_bet import t60_kill_switch_status, t60_dispatch_pending
+    except ImportError as e:
+        logger.warning("t60_job: auto_bet T60 non disponibile: %s", e)
+        return
+    # CB2: wallet a/ sotto 30 USDC (o flag armato) = arresto. Il flag e'
+    # scritto dal giro (auto_bet/t60 dispatch) leggendo il wallet REALE; qui
+    # si rispetta il blocco e si lascia il promemoria al watch job.
+    if t60_kill_switch_status().get("triggered"):
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        placed = await loop.run_in_executor(_scan_executor,
+                                            t60_dispatch_pending)
+    except Exception as e:
+        logger.error("t60_job: %s", e)
+        return
+    for p in placed:
+        if p.get("mode") == "t60-live":
+            try:
+                text = ("🎯 *ORDINE T-60 ESEGUITO (LIVE)*\n\n"
+                        f"• {p.get('home')} vs {p.get('away')} — "
+                        f"{p.get('esito_key')} @ {p.get('price', 0):.2f}\n"
+                        f"💰 Stake: {p.get('stake', 0):.2f} USDC "
+                        f"(CB1 cap 1.00)\n"
+                        f"🆔 Bet: `{p.get('bet_id')}`\n"
+                        f"📍 Kickoff: T-60 minuti")
+                await _send_report_to_recipients(context, text)
+            except Exception as e:
+                logger.warning("t60_job notifica: %s", e)
+
+
+async def t60_kill_watch_job(context: ContextTypes.DEFAULT_TYPE):
+    """CB2 (ogni 6h): verifica il kill switch patrimoniale T-60.
+
+    Logga SEMPRE lo stato; se il flag e' armato invia l'alert di emergenza a
+    admin+iscritti con anti-spam 1/giorno (chiave T60_KILL). Zero costi:
+    legge il flag sul volume, nessuna API.
+    """
+    try:
+        from auto_bet import t60_kill_switch_status
+        st = t60_kill_switch_status()
+        if not st.get("triggered"):
+            logger.info("t60_kill_watch: CB2 ok (wallet sopra la soglia "
+                        "%.2f USDC, nessun flag)", st.get("threshold", 30.0))
+            return
+        logger.error("t60_kill_watch: KILL SWITCH T-60 ATTIVO — %s",
+                     st.get("reason"))
+        from tracker import is_notified, mark_notified
+        from datetime import timezone as _tz
+        today = datetime.now(_tz.utc).strftime("%Y-%m-%d")
+        if is_notified("T60_KILL", today):
+            return
+        text = ("🚨 *KILL SWITCH T-60 ATTIVO*\n\n"
+                f"{st.get('reason') or 'wallet sotto la soglia'}\n\n"
+                "⛔ Processi di puntata ARRESTATI (CB2).\n"
+                "Riattivazione: top-up wallet poi `/t60reset`.")
+        await _send_report_to_recipients(context, text)
+        mark_notified("T60_KILL", today)
+    except Exception as e:
+        logger.error("t60_kill_watch_job: %s", e)
+
+
+async def cmd_t60reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/t60reset (solo admin): disinnesca il CB2 (kill switch patrimoniale).
+
+    Non riattiva nulla da solo: al prossimo giro il wallet viene RILETTO —
+    se l'equity e' tornata sopra la soglia le puntate ripartono, altrimenti
+    il flag si riarma da solo. E' la protezione contro il riarmo immediato
+    dopo un top-up dimenticato.
+    """
+    admin_ids = _admin_chat_ids()
+    if admin_ids and update.effective_chat.id not in admin_ids:
+        await update.message.reply_text("⛔ Comando riservato agli admin.")
+        return
+    from auto_bet import (_live_wallet_snapshot, t60_check_wallet_kill,
+                          t60_clear_kill, t60_kill_switch_status)
+    was = t60_kill_switch_status()
+    t60_clear_kill()
+    snap = _live_wallet_snapshot()
+    equity = snap["equity"] if snap else None
+    rearmed = t60_check_wallet_kill(equity)
+    if rearmed:
+        await update.message.reply_text(
+            "🚨 *CB2 RIARMATO IMMEDIATAMENTE*\n\n"
+            f"Equity wallet: {equity if equity is not None else 'non leggibile'}\n"
+            "Ancora a/ sotto la soglia: il kill switch resta attivo.",
+            parse_mode="Markdown")
+        return
+    prev = (was.get("reason") or "nessun flag precedente") \
+        if was.get("triggered") else "nessun flag precedente"
+    await update.message.reply_text(
+        "✅ *CB2 DISINNESSO*\n\n"
+        f"Flag precedente: {prev}\n"
+        f"Equity wallet attuale: {equity if equity is not None else 'non leggibile'}\n"
+        "Le puntate ripartono col prossimo giro (il wallet viene riletto "
+        "a ogni giro).", parse_mode="Markdown")
+
+
 async def report_morning_job(context: ContextTypes.DEFAULT_TYPE):
     """Riepilogo del mattino (08:05 ITA): cosa è successo ieri."""
     from datetime import timedelta
@@ -2323,6 +2435,7 @@ def main() -> None:
     application.add_handler(CommandHandler("backtest_mc", cmd_backtest_mc))
     application.add_handler(CommandHandler("backup", cmd_backup))
     application.add_handler(CommandHandler("autobet", cmd_autobet))
+    application.add_handler(CommandHandler("t60reset", cmd_t60reset))
     application.add_handler(CommandHandler("settlement", cmd_settlement))
     application.add_handler(CommandHandler("revisioni", cmd_revisioni))
     # Revisioni umane: i bottoni ✅/❌ dei verdetti REVIEW. Il pattern limita
@@ -2385,6 +2498,15 @@ def main() -> None:
         job_queue.run_repeating(auto_bet_job, interval=60,
                                 first=60,
                                 job_kwargs={"max_instances": 1})
+        # Strategia T-60 (17/09): SCANSIONE quotidiana del palinsesto (i giri
+        # analisi/quote restano) + DECISIONE ESECUTIVA nella finestra T-60..T-50
+        # prima del fischio: questo job ogni 60s esegue SOLO dentro finestra
+        # (cap 1 USDC/ordine, kill switch 30 USDC, contratto Pydantic, gate
+        # mercato). Il watch CB2 ogni 6h rende visibile l'arresto.
+        job_queue.run_repeating(t60_job, interval=60, first=75,
+                                job_kwargs={"max_instances": 1})
+        job_queue.run_repeating(t60_kill_watch_job, interval=6 * 3600,
+                                first=600, job_kwargs={"max_instances": 1})
         # Scan SX Bet (09/09): segnali value 1X2 SOLO dai prezzi SX (API
         # pubblica, zero crediti the-odds-api) + settlement bet sx-*. Ogni
         # 15 min (SX_SCAN_INTERVAL_MIN): l'auto-bet (ogni minuto) piazza al

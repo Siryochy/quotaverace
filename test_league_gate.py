@@ -1,0 +1,229 @@
+"""Gate STRATEGY_LEAGUES sulla corsia auto-bet (15/09).
+
+Contesto misurato: fino al 15/09 la corsia ordini era **cieca alla lega**. I
+candidati di `fixture_engine`/`sx_signals` non portavano la chiave `league`,
+quindi `is_sane(league="")` ammetteva tutto (lega vuota = nessun divieto) e il
+bot ha puntato leghe che la strategia del 12/09 vieta: nel ledger live le 4
+chiusure in leghe vietate sono 0 vinte / 4 perse, mentre l'unica in una lega
+ammessa e' vinta. Sintomo del bug: `match_analysis.status = rejected` (dove la
+lega VENIVA passata) e `predictions.status = value` (dove non veniva).
+
+Qui si blinda il fix su TRE livelli:
+1. **propagazione** della lega sul candidato (la causa radice);
+2. **gate in corsia** (`auto_bet._today_value_picks`), fail-closed quando la
+   lega manca: nessun ordine su cio' che non si sa classificare;
+3. **risoluzione deterministica** dei nomi delle leghe AMMESSE: un falso
+   divieto (lega ammessa letta come vietata) e' il rischio peggiore del gate,
+   perche' azzererebbe il flusso autorizzato invece di tagliare quello vietato.
+
+Tutti i test sono OFFLINE: DB SQLite temporaneo, nessuna rete, nessun ordine.
+"""
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+import auto_bet
+import fixture_engine
+import sx_signals
+import tracker
+import value_filter
+
+ALLOWED = "Premier League"          # in STRATEGY_LEAGUES
+BANNED = "La Liga"                  # esclusa per ROI negativo (12/09)
+
+
+@pytest.fixture()
+def temp_db(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr(tracker, "DB_PATH", Path(td) / "test.db")
+        tracker.init_db()
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate(monkeypatch, tmp_path):
+    """Mai toccare il volume reale (stop-loss) ne' la rete (feed di mercato)."""
+    monkeypatch.setattr(auto_bet, "DAILY_STOP_FILE", tmp_path / "daily_stop.json")
+    monkeypatch.setattr(auto_bet, "_market_feed_gate",
+                        lambda *a, **k: (True, "test"))
+
+
+def _seed(mid, league, quota=1.65, status="value", ev=0.08,
+          market_prob=0.60, market_edge=0.07, commence=None):
+    """Una partita + una previsione 1X2 giocabile (favorito netto)."""
+    start = commence or (datetime.now(timezone.utc) + timedelta(hours=3)) \
+        .isoformat().replace("+00:00", "Z")
+    tracker.save_match(mid, league, "Osasuna", "Getafe", start)
+    tracker.save_analysis(mid, 1.7, 1.1, 0.52, 0.27, 0.21, 0.58, ev,
+                          "Osasuna", quota, "Pinnacle", status,
+                          market_prob=market_prob, market_edge=market_edge)
+    tracker.save_prediction(mid, "1X2", "Osasuna", quota, 0.52, ev,
+                            market_prob=market_prob, market_edge=market_edge,
+                            status=status)
+
+
+def _picks():
+    return {p["match_id"]: p for p in auto_bet._today_value_picks()}
+
+
+class TestGateCorsiaOrdini:
+    """`_today_value_picks`: il denaro non va dove la strategia vieta."""
+
+    def test_lega_ammessa_passa(self, temp_db):
+        _seed("ok", ALLOWED)
+        picks = _picks()
+        assert "ok" in picks
+        assert picks["ok"]["league"] == ALLOWED
+
+    def test_lega_vietata_bloccata(self, temp_db):
+        _seed("no", BANNED)
+        assert "no" not in _picks()
+
+    def test_lega_vietata_bloccata_anche_con_ev_alto(self, temp_db):
+        """Il caso reale (EFL Cup / La Liga): EV eccellente non basta.
+
+        Era esattamente cosi' che il bot ha puntato Liverpool in EFL Cup:
+        il segnale piu' appetitoso era proprio in una lega vietata.
+        """
+        _seed("top", BANNED, quota=1.55, ev=0.17, status="strong_value",
+              market_edge=0.09)
+        assert "top" not in _picks()
+
+    def test_lega_assente_fail_closed(self, temp_db):
+        """Senza lega non si sa cosa si sta giocando: nessun ordine.
+
+        Sul volume nessuna riga con partita in `matches` ha lega vuota (le
+        vuote sono orfane senza riga, quindi senza mercato): il fail-closed
+        qui non taglia nulla di legittimo.
+        """
+        _seed("senza", "")
+        assert "senza" not in _picks()
+
+    def test_lega_non_classificata_bloccata(self, temp_db):
+        """Lega mai elencata (ne' ammessa ne' esplicitamente persa) = vietata."""
+        _seed("x", "Lega Inventata")
+        assert "x" not in _picks()
+
+    def test_lega_vietata_resta_nel_ledger_ma_non_si_punta(self, temp_db):
+        """Telemetria intatta: la riga resta nel ledger, cambia solo lo status.
+
+        Il gate NON cancella nulla: e' cosi' che si continua a misurare cosa
+        la strategia taglia (strumento league_gate_impact).
+        """
+        _seed("no", BANNED)
+        conn = tracker._get_conn()
+        row = conn.execute("SELECT status FROM predictions WHERE match_id='no'"
+                           ).fetchone()
+        conn.close()
+        assert row == ("value",)   # il ledger registra il segnale del motore
+        assert "no" not in _picks()  # ma l'ordine non parte
+
+    def test_tutte_le_leghe_ammesse_passano(self, temp_db):
+        for i, league in enumerate(value_filter.STRATEGY_LEAGUES):
+            _seed(f"a{i}", league)
+        picks = _picks()
+        assert len(picks) == len(value_filter.STRATEGY_LEAGUES)
+
+
+class TestPropagazioneLega:
+    """La causa radice: il candidato DEVE portare la lega."""
+
+    def test_candidate_status_boccia_la_lega_vietata(self):
+        """Il meccanismo su cui si regge il fix.
+
+        `_candidate_status` classifica con `is_sane(..., league=cand["league"])`:
+        con la chiave la lega vietata esce `rejected`, senza la chiave
+        l'esito e' `value` (fail-open storico, il bug).
+        """
+        cand = {"prob": 0.72, "quota": 1.65, "ev": 0.08,
+                "market_prob": 0.60, "market_edge": 0.07}
+        assert fixture_engine._candidate_status(dict(cand)) == "value"
+        assert fixture_engine._candidate_status(
+            {**cand, "league": BANNED}) == "rejected"
+        assert fixture_engine._candidate_status(
+            {**cand, "league": ALLOWED}) == "value"
+
+    def test_i_candidati_1x2_e_ah_portano_la_lega(self):
+        """Tripwire sul sorgente: ogni dict candidato ha la chiave `league`."""
+        src = Path(fixture_engine.__file__).read_text()
+        assert src.count('"league": league,') >= 2   # 1X2 + Asian Handicap
+
+    def test_i_candidati_sx_portano_la_lega(self):
+        src = Path(sx_signals.__file__).read_text()
+        assert '"league": league_name,' in src
+
+    def test_scan_su_lega_vietata_non_genera_segnali(self, temp_db, monkeypatch):
+        """End-to-end sul percorso SX reale (provider fake, zero rete).
+
+        Con la lega propagata, `is_sane` boccia i candidati e il ledger li
+        scrive come `rejected`: nessun segnale value salvato.
+        """
+        from test_sx_signals import FakeSxProvider, _raw_markets
+        monkeypatch.setattr(sx_signals, "expected_goals", lambda h, a: (1.9, 0.8))
+        monkeypatch.setattr(sx_signals, "prob_1x2",
+                            lambda lh, la: (0.66, 0.20, 0.14))
+        monkeypatch.setattr(sx_signals, "adjusted_probability",
+                            lambda model_prob, market_prob, price, league=None:
+                            model_prob)
+        saved = sx_signals.scan(provider=FakeSxProvider(_raw_markets(BANNED)))
+        assert saved == []
+        conn = tracker._get_conn()
+        rows = conn.execute("SELECT status FROM predictions").fetchall()
+        conn.close()
+        assert rows and all(r == ("rejected",) for r in rows)
+
+    def test_scan_su_lega_ammessa_genera_segnali(self, temp_db, monkeypatch):
+        """Controprova: la stessa fixture su lega ammessa produce il segnale."""
+        from test_sx_signals import FakeSxProvider, _raw_markets
+        monkeypatch.setattr(sx_signals, "expected_goals", lambda h, a: (1.9, 0.8))
+        monkeypatch.setattr(sx_signals, "prob_1x2",
+                            lambda lh, la: (0.66, 0.20, 0.14))
+        monkeypatch.setattr(sx_signals, "adjusted_probability",
+                            lambda model_prob, market_prob, price, league=None:
+                            model_prob)
+        saved = sx_signals.scan(
+            provider=FakeSxProvider(_raw_markets("English Premier League")))
+        assert len(saved) == 1
+        assert saved[0]["league"] == ALLOWED
+        # e supera anche il gate della corsia ordini
+        assert saved[0]["match_id"] in _picks()
+
+
+class TestNomiDelleLegheAmmesse:
+    """Un falso divieto azzererebbe il flusso autorizzato: nomi blindati."""
+
+    @pytest.mark.parametrize("label,expected", [
+        ("English Premier League", "Premier League"),
+        ("England Premier League", "Premier League"),
+        ("Premier League", "Premier League"),
+        ("German Bundesliga", "Bundesliga"),
+        ("Germany Bundesliga", "Bundesliga"),
+        ("Bundesliga", "Bundesliga"),
+        ("France Ligue 1", "Ligue 1"),
+        ("Ligue 1", "Ligue 1"),
+        ("Netherlands Eredivisie", "Eredivisie"),
+        ("Eredivisie", "Eredivisie"),
+        ("Super Lig", "Turkey Super Lig"),
+        ("Turkish Super Lig", "Turkey Super Lig"),
+    ])
+    def test_etichetta_sx_risolta_verso_una_lega_ammessa(self, label, expected):
+        resolved = sx_signals._league_sx_to_sports_map(label) or label
+        assert resolved == expected
+        assert value_filter.league_allowed(resolved)
+
+    @pytest.mark.parametrize("league", [
+        "EFL Cup", "Scottish Premiership", "La Liga", "Serie A",
+        "EFL Championship", "Liga MX", "Primera A",
+    ])
+    def test_lega_vietata_resta_vietata_dopo_la_risoluzione(self, league):
+        """Nessuna scorciatoia: il resolver non 'promuove' una lega persa."""
+        resolved = sx_signals._league_sx_to_sports_map(league) or league
+        assert not value_filter.league_allowed(resolved)
+
+    def test_le_leghe_della_strategia_esistono_in_sports_map(self):
+        """Ogni lega ammessa deve avere anche la chiave the-odds-api (settlement)."""
+        from odds_api import SPORTS_MAP
+        for league in value_filter.STRATEGY_LEAGUES:
+            assert league in SPORTS_MAP, f"{league} assente da SPORTS_MAP"

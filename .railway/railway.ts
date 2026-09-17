@@ -51,6 +51,20 @@ export default defineRailway(() => {
     // < 100 USDC il cap 1% non e' sostenibile e il bot non piazza nulla
     // (fail-closed), invece di forzare 1 USDC (= 2.6% su 38 USDC).
     STAKE_CAP_HARD: preserve(),
+    // Strategia T-60 + circuit breakers (17/09): finestra esecutiva T-60..T-50
+    // (T60_EXECUTION_ONLY=0 ripristina l'orizzonte 0.5-24h), CB1 hard cap per
+    // ordine (1.00 USDC = minimo eseguibile SX, scelta del proprietario;
+    // T60_MAX_STAKE_USDC=0.50 torna alla direttiva letterale ma NESSUN ordine
+    // puo' partire sotto il floor exchange), CB2 kill switch patrimoniale a
+    // 30 USDC di EQUITY (flag persistente + alert Telegram, reset /t60reset),
+    // CB3 validazione Pydantic rigida del payload d'ordine.
+    T60_EXECUTION_ONLY: preserve(),
+    T60_WINDOW_MIN_MIN: preserve(),
+    T60_WINDOW_MAX_MIN: preserve(),
+    T60_MAX_STAKE_USDC: preserve(),
+    T60_MAX_ODDS: preserve(),
+    T60_KILL_WALLET_USDC: preserve(),
+    T60_ORDER_VALIDATION: preserve(),
     // Pausa settlement (11/09): con SETTLEMENT_PAUSED=1 (o il flag su volume
     // data/execution/settlement_paused.json) i settle non chiudono nulla e
     // _update_results non scarica risultati (zero crediti).

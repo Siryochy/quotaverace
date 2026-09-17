@@ -3463,3 +3463,139 @@ e da quelli futuri (le cui righe ora portano la superficie corretta).
 Eventuale ricostruzione storica = replay ordinato di tutte le osservazioni
 saldate con ELO da zero (deciso solo se il proprietario lo richiede: ogni
 replay sovrascrive la storia dei rating).
+
+### Strategia T-60 + 4 circuit breakers + gate leghe in corsia (17/09/2026)
+
+Direttiva del proprietario: la **decisione esecutiva** di una partita si prende
+in una FINESTRA di 10 minuti (T-60..T-50 dal fischio), con micro-allocazioni e
+quattro **circuit breakers** attivi PRIMA di qualunque ordine reale. Codice
+deployato assieme (commit in corso): `auto_bet.py`, `bot.py`,
+`decision/models.py`, `decision/stake_engine.py`, `fixture_engine.py`,
+`sx_signals.py`, `conftest.py`, `verify_guardrails.py`,
+`.railway/railway.ts`, due file di test NUOVI
+(`test_t60_breakers.py`, `test_league_gate.py`).
+
+**1) FINESTRA ESECUTIVA T-60..T-50 (`auto_bet.t60_window`).** Apertura
+`T60_WINDOW_MIN_MIN` (60), chiusura `T60_WINDOW_MAX_MIN` (50). Verdetto:
+`before` (kickoff oltre i 60'), `within` (finestra), `missed` (< 50' o gia'
+iniziata), `unknown` (kickoff non parsabile) — gli ultimi due sono
+**fail-closed**: non si ordina. Con `T60_EXECUTION_ONLY` (default **ON**) la
+corsia `run_today_bets` **fuori finestra non ordina**: il palinsesto resta
+SCANSIONATO e classificato (ledger `predictions` + shadow mode completi),
+nessun ordine parte. `T60_EXECUTION_ONLY=0` ripristina l'orizzonte 0.5-24h di
+prima (usato dai test e dalla diagnostica). Nuovo job `bot.t60_job` ogni 60s
+(`first=75`, `max_instances=1`) che chiama `auto_bet.t60_dispatch_pending()`.
+
+**2) CB1 — HARD CAP PER ORDINE (`T60_MAX_STAKE_USDC`, default 1.00 USDC).**
+NESSUN calcolo dinamico (Kelly incluso) puo' produrre uno stake sopra il tetto:
+viene **SORSCRITTO** (`decision.stake_engine.size` in `mode='live'`,
+`cap_source="t60_hard_cap"`), non negoziato. Il valore 1.00 = minimo ordine
+eseguibile SX Bet: con la direttiva letterale 0.50 OGNI ordine sarebbe stato
+scartato dal floor e il sistema sarebbe rimasto armato ma inerte
+(`T60_MAX_STAKE_USDC=0.50` per tornare alla lettera). `t60_stake()` ignora il
+Kelly e applica comunque i cap di portafoglio (correlazione 30%, esposizione
+totale 40%) e la cassa reale. `T60_MAX_ODDS` (1.80) chiude il tetto quota.
+`decision.models.t60_executable()` e' l'UNICA fonte della regola (usata dal
+validatore d'ordine e dai tripwire).
+
+**3) CB2 — KILL SWITCH PATRIMONIALE (`T60_KILL_WALLET_USDC`, default 30.0).**
+Equity wallet (liberi + in gioco, MAI il disponibile: l'escrow non e' una
+perdita) **≤ 30 USDC → sistema ARRESTATO**: flag persistente sul volume
+(`data/execution/t60_kill.json`, scrittura atomica), 0 puntate in QUALUNQUE
+modalita' finche' un admin non lo disinnesca. Lettura **fail-closed** (flag
+illeggibile = blocco attivo); un wallet **non leggibile** NON arma il flag (un
+errore API transitorio non deve arrestare il sistema), ma il dispatch T-60 esce
+fail-closed. Alert Telegram di emergenza al primo innesco + promemoria
+1/giorno (`bot.t60_kill_watch_job` ogni 6h, chiave `T60_KILL`) + comando admin
+**`/t60reset`** (disinnesca, RILEGGE il wallet e si riarma da solo se l'equity
+non e' risalita: protegge dal riarmo immediato dopo un top-up dimenticato).
+
+**4) CB3 — CONTRATTO PYDANTIC RIGIDO (`decision.models.T60OrderContract`).**
+`extra="forbid"`; `price > 1.0`; `league` NON vuota; **fuso orario
+OBBLIGATORIO** su `kickoff`/`created_at`/`validated_at` (mai un istante
+ambiguo su un ordine reale); `kickoff > created_at`; `mode='live'` ⇒ provider
+presente. Un payload che viola il contratto (o CB1) e' **SCARTATO** e non
+corretto in silenzio: `auto_bet.validate_order_payload` + riga sul ledger
+`bets` `mode='rejected-t60'` con `stake=0.0` e il motivo — **mai** verso il
+provider.
+
+**5) CB4 — GATE DI MERCATO + LIQUIDITA'.** `t60_dispatch_pending` esce
+fail-closed se il feed di mercato (SX, 3 refresh conformi) non e' validato
+(nessun ordine), e l'esecuzione passa dallo STESSO `_live_fill` del giro
+normale (floor EV, size al floor ≥ `max(stake × 2, 25 USDC)`, scarto
+registrato in `liquidity_monitor`): la guardia non e' reimplementata, cosi'
+non puo' divergere dalla produzione. Esecuzione: righe `decisions`
+`approve`+`validated` in finestra, dedup `UNIQUE(match_id, esito)`; `mode=sim`
+registra solo paper (`t60-sim`), `mode=live` piazza e scrive la riga `mode='live'`
+con `bet_id` reale. Notifica Telegram su ogni ordine T-60 LIVE
+(`bot.t60_job`, `mode='t60-live'`).
+
+**6) GATE LEGHE APPLICATO ALLA CORSIA ORDINI (17/09, dopo la misura del
+15/09).** La strategia "solo campionati vincenti" (5 leghe) non era applicata
+dalla corsia che piazza DAVVERO: i candidati di `fixture_engine` e
+`sx_signals` non portavano la chiave `league`, quindi `is_sane(league="")`
+trattava la lega vuota come AMMESSA. Ora:
+- i candidati di entrambi i motori portano `league` (la classificazione
+  per-esito non e' piu' cieca);
+- `auto_bet._today_value_picks` riapplica `value_filter.league_allowed`
+  (difesa in profondita') ed e' **fail-closed sulla lega assente**: senza
+  sapere cosa si sta giocando non si ordina;
+- `sx_signals.SX_LEAGUE_ALIASES` copre le varianti con PREFISSO PAESE delle
+  leghe della strategia ("England Premier League", "Germany Bundesliga",
+  "France Ligue 1", "Netherlands Eredivisie", "Turkish Super Lig", ...):
+  un falso DIVIETO su una lega ammessa varrebbe più di un divieto mancante
+  (azzererebbe il flusso autorizzato).
+⚠️ Conseguenza ATTESA (misurata il 15/09): il gate spegne quasi tutto il
+flusso — nelle ultime 72h i segnali giocabili erano 0 nelle leghe ammesse e 5
+in leghe vietate. E' la scelta prudente del proprietario, non un bug: per
+tornare indietro serve allargare `STRATEGY_LEAGUES`, non togliere il gate.
+
+**7) TEST E VERIFICHE.** `test_t60_breakers.py` (nuovo, 33 verdi: finestra,
+CB1 sovrascrittura del Kelly, CB2 flag/persistenza/fail-safe sui wallet non
+leggibili, CB3 payload malformato → riga `rejected-t60` e nessuna chiamata al
+provider, CB4 dedup/parziale/sim-mai-al-provider); `test_league_gate.py`
+(nuovo, 32 verdi). `verify_guardrails.py` ha ora **7 scenari (A-G)** e
+l'ultimo giro e' `TUTTI I GUARDRAIL BLOCCANO` (exit 0): F = lega vietata mai
+candidata + controprova su lega ammessa, G = fuori finestra T-60 solo
+scansione + controprova con `T60_EXECUTION_ONLY=0`, CB1 (bankroll 10000 →
+stake 1.00), CB3 (payload stake 5.00 scartato), CB2 (equity 25 → flag armato,
+0 ordini). Altri due fix in questo giro:
+- `conftest.py` isola `T60_KILL_FILE`/`DAILY_STOP_FILE` nella tmp dei test e
+disattiva `T60_EXECUTION_ONLY`: senza isolamento un test con wallet finto
+sotto i 30 USDC armava il CB2 sul percorso REALE e arrestava tutti i test
+successivi dello stesso processo;
+- `test_auto_bet_live.py` neutralizza la soglia CB2 (i suoi wallet finti sono
+12.28/3.0 USDC, documentati in AGENTS): con la soglia vera ogni asserzione di
+staking avrebbe misurato il kill switch — e i test che attendono `[]`
+sarebbero passati per il motivo sbagliato. La soglia vera resta testata in
+`test_t60_breakers.py`;
+- `test_sx_native_settlement.test_match_recente_non_scade` usava un kickoff
+FISSO (2026-09-11): col passare dei giorni e' SCADUTO da solo (6 giorni >
+`SX_STALE_DAYS` 5) e falliva senza che nulla fosse rotto. Ora la data e'
+RELATIVA a `now` (stessa lezione del 15/09: un test che scade col calendario
+arriva sempre nel momento peggiore).
+
+**Env** (dichiarate `preserve()` in `.railway/railway.ts`, blocco accanto a
+`STAKE_CAP_HARD`, NON ancora impostate su Railway → valgono i default di
+codice): `T60_EXECUTION_ONLY`, `T60_WINDOW_MIN_MIN`, `T60_WINDOW_MAX_MIN`,
+`T60_MAX_STAKE_USDC`, `T60_MAX_ODDS`, `T60_KILL_WALLET_USDC`,
+`T60_ORDER_VALIDATION`.
+
+**⚠️ Punti aperti (da decidere, non bug):**
+1. **Due percorsi esecutivi.** In finestra T-60 ordina la corsia
+   `run_today_bets` (Kelly + cap percentuali: con wallet < 100 USDC e
+   `STAKE_CAP_HARD=0` il floor 1 USDC prevale, quindi in pratica 1 USDC) e in
+   parallelo `t60_dispatch_pending` ordina le righe `decisions` validate (cap
+   CB1). Oggi il secondo e' INERTE in produzione (`DECISION_SHADOW_PERSIST`
+   default OFF ⇒ nessuna riga `decisions`), quindi l'esecuzione reale resta la
+   corsia; il dedup `UNIQUE(match_id, esito)` impedisce il doppio ordine. Da
+   decidere: se il CB1 (1 USDC) debba valere anche sulla corsia Kelly, e se
+   attivare la persistenza shadow per dare al dispatch T-60 le righe da
+   eseguire.
+2. **CB2 a 30 USDC con wallet ~36 USDC**: l'arresto scatta dopo ~6 USDC di
+   perdite di equity. E' la soglia della direttiva — ma va ricordato che un
+   arresto NON si sblocca da solo se il wallet resta sotto soglia
+   (`/t60reset` rilegge e si riarma).
+3. La misura del gate leghe del 15/09 e' precedente a questo deploy: dopo
+   qualche giorno di ledger conviene rimisurare il flusso (quante puntate
+   arrivano davvero in finestra T-60 sulle sole leghe ammesse).

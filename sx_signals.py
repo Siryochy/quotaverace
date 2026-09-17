@@ -132,6 +132,18 @@ SX_LEAGUE_ALIASES: Dict[str, Optional[str]] = {
     "English Premier League": "Premier League", "The Championship": "EFL Championship",
     "German Bundesliga": "Bundesliga", "Jupiler League": "Belgian First Div",
     "Portugal Primeira Liga": "Primeira Liga", "Super Lig": "Turkey Super Lig",
+    # Varianti con prefisso paese delle leghe della STRATEGIA (value_filter.
+    # STRATEGY_LEAGUES): esplicite e deterministiche, cosi' il gate non
+    # puo' VIETARE per errore una lega ammessa (un falso divieto varrebbe
+    # piu' di un divieto mancante: azzererebbe il flusso autorizzato).
+    "England Premier League": "Premier League",
+    "Germany Bundesliga": "Bundesliga",
+    "France Ligue 1": "Ligue 1",
+    "Netherlands Eredivisie": "Eredivisie",
+    "Turkish Super Lig": "Turkey Super Lig",
+    "Turkey Super Lig": "Turkey Super Lig",
+    "Ligue 1": "Ligue 1", "Eredivisie": "Eredivisie",
+    "Premier League": "Premier League", "Bundesliga": "Bundesliga",
     "Europa League_UEFA": "Europa League", "Champions League_UEFA": "Champions League",
     "Premiership": "Scottish Premiership", "Superettan": "Sweden Superettan",
     "Superliga": "Superliga Danimarca",
@@ -510,6 +522,10 @@ def scan(provider: Optional[SxBetProvider] = None) -> List[dict]:
                 "esito": mkey, "quota": price, "prob": final_prob, "ev": ev_val,
                 "prob_model": model_prob, "market_prob": market_prob,
                 "market_edge": edge,
+                # Come in fixture_engine: senza la lega sul candidato la
+                # classificazione per-esito (`is_sane`) salta il gate
+                # STRATEGY_LEAGUES e scrive "value" in leghe vietate.
+                "league": league_name,
             })
 
         # match_id deterministico: save_match fa INSERT OR REPLACE,

@@ -13,6 +13,7 @@ import pytest
 
 import tracker
 import auto_bet
+import value_filter
 
 
 @pytest.fixture()
@@ -31,10 +32,17 @@ def _isolate_daily_stop(tmp_path, monkeypatch):
     monkeypatch.setattr(auto_bet, "DAILY_STOP_FILE", tmp_path / "daily_stop.json")
 
 
+ALLOWED_LEAGUE = "Premier League"   # in STRATEGY_LEAGUES
+
+
 def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
                       quota=1.65, status="value", commence=None):
     start = commence or (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
-    tracker.save_match(mid, "Serie A", home, away, start)
+    # Lega AMMESSA dalla strategia (value_filter.STRATEGY_LEAGUES): dal
+    # 15/09 la corsia ordini applica il gate di lega, quindi un seed in una
+    # lega vietata (es. Serie A) farebbe uscire 0 puntate da OGNI test di
+    # flusso, indipendentemente da cio' che il test vuole verificare.
+    tracker.save_match(mid, ALLOWED_LEAGUE, home, away, start)
     # esito "1" -> best_esito = nome squadra di casa (come da API bookmaker)
     best_esito = home if esito == "1" else (away if esito == "2" else "Draw")
     tracker.save_analysis(mid, 1.7, 1.1, 0.52, 0.27, 0.21, 0.58, 0.08,
@@ -173,7 +181,7 @@ def test_best_rejected_ma_esito_value_viene_piazzato(monkeypatch, temp_db):
     -> il bot non piazzava mai)."""
     monkeypatch.setitem(sys.modules, "adaptive_staking", None)
     start = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
-    tracker.save_match("mX", "Serie A", "Osasuna", "Getafe", start)
+    tracker.save_match("mX", ALLOWED_LEAGUE, "Osasuna", "Getafe", start)
     # best-per-EV rejected (come Derby: Draw @3.55 EV 0.151 ma non sano)
     tracker.save_analysis("mX", 1.7, 1.1, 0.52, 0.27, 0.21, 0.58, 0.151,
                           "Draw", 3.55, "Pinnacle", "rejected",
@@ -364,6 +372,10 @@ class TestTotalExposureCap:
         -> totale 45 > 40% di 100 -> gli stake vengono ridotti dal cap
         esposizione totale prima del salvataggio."""
         monkeypatch.setitem(sys.modules, "adaptive_staking", None)
+        # Il gate di lega e' fuori scope in QUESTO test (che isola il cap
+        # TOTALE di portafoglio): le 9 leghe inventate qui sotto servono a
+        # evitare il correlation cap, non a rispettare la strategia.
+        monkeypatch.setattr(value_filter, "league_allowed", lambda lg: True)
         start = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()\
             .replace("+00:00", "Z")
         for i in range(9):
@@ -371,8 +383,7 @@ class TestTotalExposureCap:
                               esito="1", quota=1.65, status="value",
                               commence=start)
         # Leghe diverse per match: evita il correlation cap (che agirebbe
-        # prima) e isola il cap TOTALE. Il seed usa sempre "Serie A": lo
-        # forzo via DB dopo il seed.
+        # prima) e isola il cap TOTALE.
         conn = tracker._get_conn()
         conn.execute("UPDATE matches SET league = 'Lega' || rowid WHERE id LIKE 'tc%'")
         conn.commit()
