@@ -11,12 +11,32 @@ Qui la quota diventa un **tipo**: `MarketQuote`. Chi la produce (feed SX Bet,
 the-odds-api, un import manuale) deve rispettare il contratto; chi la consuma
 riceve campi garantiti, normalizzati e confrontabili.
 
+**Schema 2.0 — multi-mercato (18/09/2026).** Il sistema non si limita piu' al
+1X2: una stessa partita porta PIU' mercati, e alcuni di questi hanno una linea.
+Il contratto lo rappresenta con tre aggiunte sostanziali:
+
+    market_type   tipo tipizzato (1X2, OU, AH, BTTS, DC, CS) — il registro
+                  `MARKET_SPECS` dice per ognuno esiti ammessi, linee,
+                  sorgente nativa e da cosa si deriva;
+    line          la linea (2.5 / -0.75), OBBLIGATORIA sui mercati che ne
+                  hanno una e VIETATA sugli altri: un OU senza linea sarebbe
+                  indistinguibile da un OU 2.5;
+    origin        "native" (la pubblica un book) o "derived" (la produce il
+                  sistema) — e una quota derivata DEVE dichiarare `derived_from`.
+
+Il 1X2 e l'OU non esauriscono SX Bet: la doc ufficiale
+(`docs.sx.bet/api-reference/market-types`) elenca oltre 30 tipi, con la colonna
+"Has lines". Il registro tiene i type id NATIVI (1 = 1X2, 2 = OU, 3 = AH,
+17 = BTTS) e dichiara esplicitamente i tipi osservati vivi ma non modellati
+(`SX_TYPES_NOT_MODELLED`: 52, 226, 835, ...) e i mercati che su SX NON esistono
+(Double Chance, Risultato Esatto: derivati, non inventati).
+
 I campi chiave (tutti obbligatori):
 
     schema_version  versione del contratto dichiarata DAL PRODUTTORE
-    event_id        identificativo dell'evento (es. `sx-L19947936`)
+    event_id        identificativo dell'evento / della partita (fixture_id)
     market          mercato canonico, normalizzato dagli alias del provider
-    selection       esito canonico (`1`/`X`/`2` per 1X2, `over`/`under` per OU)
+    selection       esito canonico del mercato
     odds            quota decimale europea, **minimo 0.1**
     timestamp       istante della rilevazione (obbligatoriamente UTC aware)
     source          chi ha prodotto la quota (provider)
@@ -25,8 +45,9 @@ I campi chiave (tutti obbligatori):
 Cosa valida il contratto e cosa NO (la separazione conta):
 
 - **Struttura**: campi presenti, tipi, quote finite e >= 0.1, timestamp con
-  fuso orario, coerenza mercato/selezione (`1X2` + `over` = rifiuto), versione
-  dello schema supportata. Tutto QUI.
+  fuso orario, coerenza mercato/esito (`1X2` + `over` = rifiuto), regole del
+  registro (linea dove serve, vietata dove non serve, passi di 0.25),
+  provenienza delle quote derivate, versione dello schema supportata. Tutto QUI.
 - **Strategia**: fascia quote 1.30-1.80, EV minimo, edge minimo, cap di stake.
   Tutto nel **Risk Engine** (`decision/risk_engine.py`), che legge le soglie da
   `value_filter`/`market_calib`. Il contratto non conosce la strategia: se la
@@ -34,15 +55,23 @@ Cosa valida il contratto e cosa NO (la separazione conta):
 
 Come si valida all'ingresso:
 
-    quote = parse_quote(row, gateway_id="sx-feed")     # strict: solleva
-    batch = validate_batch(rows, gateway_id="sx-feed") # mai un'eccezione
+    quote = parse_quote(row, gateway_id="sx-feed")         # strict: solleva
+    batch = validate_batch(rows, gateway_id="sx-feed")     # mai un'eccezione
+    multi = validate_fixture_quotes(rows, gateway_id="sx-feed")   # multi-mercato
 
 `parse_quote` solleva `MarketQuoteError` (con `issues` machine-readable) e
 **logga ogni errore**: una riga `logger.error` per diagnostica umana piu' un
 evento JSON `market.quote_rejected` sul sink di osservabilita', con
 `error_code`, campo colpevole e gateway. `validate_batch` fa la stessa cosa in
 modo non bloccante (accettate + respinte + conteggi per codice) per gli import
-a lotti: una riga rotta non deve fermare le altre.
+a lotti: una riga rotta non deve fermare le altre. `validate_fixture_quotes`
+aggiunge il raggruppamento per partita (`FixtureQuotes`), che verifica le
+invarianti di gruppo: un fixture con quote incoerenti viene respinto INTERO.
+
+Persistenza: `MarketQuote.as_row()` produce la riga flat descritta da
+`MARKET_ROW_FIELDS` (JSON-safe), che e' il contratto verso il gateway SQLite —
+una riga per quota, chiave composta `fixture_id + market_type + line_key +
+selection`.
 
 Regole del modulo:
 
@@ -54,6 +83,8 @@ Regole del modulo:
    (`TRUNCATE`, 80 char). Un feed non deve poter scrivere segreti nei log.
 4. **Nessun indovinello**: gli alias di chiave/mercato/selezione sono tabelle
    esplicite; cio' che non e' in tabella e' un rifiuto, mai una scelta silenziosa.
+   Vale anche per i mercati: un tipo che SX non pubblica NON viene derivato in
+   silenzio (serve `origin="derived"` + `derived_from`).
 """
 
 from __future__ import annotations
@@ -73,6 +104,7 @@ from pydantic import (
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 
 from .middleware import Observability, TraceContext
@@ -81,8 +113,13 @@ logger = logging.getLogger("decision.market")
 
 #: Versione del contratto. Cambia quando cambia la FORMA (campi obbligatori,
 #: unita' di misura, semantica di un campo), non quando cambiano le soglie.
-MARKET_SCHEMA_VERSION = "1.0"
-SUPPORTED_SCHEMA_VERSIONS = (MARKET_SCHEMA_VERSION,)
+#:
+#: 1.0 -> 2.0 (18/09/2026): il contratto rappresenta PIU' mercati dello stesso
+#: evento (1X2, OU, AH, BTTS, DC, CS) e quindi anche la LINEA. La 1.0 resta
+#: SUPPORTATA in lettura: i produttori vecchi (e le righe gia' sul ledger)
+#: continuano a essere validi (mercato 1X2/OU senza linea).
+MARKET_SCHEMA_VERSION = "2.0"
+SUPPORTED_SCHEMA_VERSIONS = (MARKET_SCHEMA_VERSION, "1.0")
 
 #: Quota minima ammessa dal contratto (decimale europeo, 1.0 = pari).
 MIN_ODDS = 0.1
@@ -102,9 +139,16 @@ KEY_ALIASES = {
     "matchid": "event_id",
     "match_id": "event_id",
     "fixture_id": "event_id",
-    "markettype": "market",
+    "sportxeventid": "event_id",
+    "markettype": "market_type",
+    "market_type": "market_type",
     "market_name": "market",
     "marketkey": "market",
+    "line_value": "line",
+    "handicap": "line",
+    "total_line": "line",
+    "mainline": "main_line",
+    "is_main_line": "main_line",
     "outcome": "selection",
     "selectionid": "selection",
     "selection_id": "selection",
@@ -127,9 +171,10 @@ KEY_ALIASES = {
 }
 
 #: Alias dei mercati -> mercato canonico (chiavi normalizzate).
+#: Le chiavi sono normalizzate con `_norm_key` (minuscole, senza separatori),
+#: quindi 'Match Odds' == 'match_odds' == 'match-odds' senza doppie voci.
 MARKET_ALIASES = {
     "1x2": "1X2",
-    "1X2": "1X2",
     "12": "1X2",
     "h2h": "1X2",
     "headtohead": "1X2",
@@ -144,8 +189,24 @@ MARKET_ALIASES = {
     "over_under": "OU",
     "total": "OU",
     "totals": "OU",
+    "ah": "AH",
+    "asianhandicap": "AH",
+    "handicap": "AH",
+    "handicapasiatico": "AH",
+    "spread": "AH",
+    "spreads": "AH",
+    "btts": "BTTS",
+    "golgol": "BTTS",
+    "bothteamstoscore": "BTTS",
+    "bothscore": "BTTS",
+    "dc": "DC",
+    "doublechance": "DC",
+    "doppiachance": "DC",
+    "cs": "CS",
+    "correctscore": "CS",
+    "exactscore": "CS",
+    "risultatoesatto": "CS",
 }
-SUPPORTED_MARKETS = ("1X2", "OU")
 
 #: Alias degli esiti -> esito canonico (chiavi normalizzate).
 SELECTION_ALIASES = {
@@ -154,13 +215,198 @@ SELECTION_ALIASES = {
     "2": "2", "away": "2", "a": "2", "trasferta": "2", "team2": "2", "t2": "2",
     "over": "over", "o": "over", "piu": "over",
     "under": "under", "u": "under", "meno": "under",
+    # BTTS (type 17 su SX: "Both Teams To Score")
+    "yes": "yes", "si": "yes", "gol": "yes", "golgol": "yes",
+    "no": "no", "nogoal": "no",
+    # Double Chance (mercato DERIVATO: non esiste un book nativo su SX)
+    "1x": "1X", "homedraw": "1X", "homeordraw": "1X", "casaopareggio": "1X",
+    "x2": "X2", "drawaway": "X2", "draworaway": "X2", "pareggiootrasferta": "X2",
+    "12": "12", "homeaway": "12", "homeoraway": "12",
 }
+
+
+# ---------------------------------------------------------------------------
+# MULTI-MERCATO: il registro dei tipi (schema 2.0)
+#
+# Perche' un registro e non un `if` sparso: ogni mercato ha una FORMA diversa —
+# chi ha linee e chi no, quali esiti ammette, quali sorgenti lo pubblicano, se
+# esiste o va derivato. Tenere queste regole in un unico tavola (dati, non
+# codice) significa che aggiungere un mercato e' una riga, e che chi valida
+# non deve conoscerne le eccezioni.
+#
+# **Convenzione degli esiti** (allineata al ledger del progetto):
+#
+#   1X2   selezioni 1 / X / 2
+#   12    (non modellato: vedi SX_TYPES_NOT_MODELLED)
+#   OU    over / under  + `line` (es. 2.5)
+#   AH    1 / 2 (teamOne / teamTwo) + `line` dal punto di vista di teamOne
+#   BTTS  yes / no
+#   DC    1X / X2 / 12  (derivato, non nativo)
+#   CS    <golCasa>-<golTrasferta> (es. "3-1"; derivato dalla Poisson)
+#
+# La `selection` resta la chiave MACHINE (stabile, deduplicabile); la resa
+# leggibile per il ledger la produce `MarketQuote.ledger_esito` ('Home -0.75',
+# 'Over 2.5', 'Yes'), che e' esattamente il formato che `tracker`/`ml_audit`
+# gia' usano per AH e BTTS.
+# ---------------------------------------------------------------------------
+
+class MarketType(str, Enum):
+    """I mercati che il sistema sa rappresentare (schema 2.0)."""
+
+    MATCH_RESULT = "1X2"
+    OVER_UNDER = "OU"
+    ASIAN_HANDICAP = "AH"
+    BOTH_TEAMS_TO_SCORE = "BTTS"
+    DOUBLE_CHANCE = "DC"
+    CORRECT_SCORE = "CS"
+
+
+class MarketTypeSpec(BaseModel):
+    """Le regole di UN mercato: cosa ammette e chi lo pubblica (immutabile)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    market_type: MarketType
+    label: str
+    #: Esiti canonici ammessi. Vuoto = "validato da regola" (vedi `
+    #: requires_score`): il Risultato Esatto non e' enumerabile in una tupla.
+    selections: tuple[str, ...] = ()
+    #: Il mercato comporta una linea (handicap/totale)?
+    has_lines: bool = False
+    #: La linea puo' essere quartata (x.25 / x.75)
+    quarter_line_eligible: bool = False
+    #: Limiti di sanity della linea (estremi inclusi)
+    line_bounds: Optional[tuple[float, float]] = None
+    #: True se un book NATIVO lo pubblica (False = va derivato)
+    native: bool = True
+    #: Type id nativo per sorgente (SX Bet: vedi `SX_TYPE_IDS`)
+    source_type_ids: tuple[tuple[str, int], ...] = ()
+    #: Da quali mercati si puo' derivare (obbligatorio per i non nativi)
+    derivable_from: tuple[MarketType, ...] = ()
+    #: L'esito e' un punteggio ("3-1") e va validato come tale
+    requires_score: bool = False
+    note: str = ""
+
+    @property
+    def line_required(self) -> bool:
+        return self.has_lines
+
+
+#: IL registro. Fonte delle regole: docs.sx.bet/api-reference/market-types
+#: (letta il 18/09/2026) + probe REALE su GET /markets/active (sportIds=5).
+MARKET_SPECS: dict[MarketType, MarketTypeSpec] = {
+    MarketType.MATCH_RESULT: MarketTypeSpec(
+        market_type=MarketType.MATCH_RESULT, label="Esito finale (1X2)",
+        selections=("1", "X", "2"), source_type_ids=(("sxbet", 1),),
+        note="SX: 3 mercati binari 'X vs Not X' per evento"),
+    MarketType.OVER_UNDER: MarketTypeSpec(
+        market_type=MarketType.OVER_UNDER, label="Totale gol Over/Under",
+        selections=("over", "under"), has_lines=True,
+        quarter_line_eligible=True, line_bounds=(0.5, 12.0),
+        source_type_ids=(("sxbet", 2),),
+        note="SX: piu' linee per evento (mainLine segnala la principale)"),
+    MarketType.ASIAN_HANDICAP: MarketTypeSpec(
+        market_type=MarketType.ASIAN_HANDICAP, label="Asian Handicap",
+        selections=("1", "2"), has_lines=True,
+        quarter_line_eligible=True, line_bounds=(-12.0, 12.0),
+        source_type_ids=(("sxbet", 3),),
+        note="line dal punto di vista di teamOne (positiva = teamOne riceve)"),
+    MarketType.BOTH_TEAMS_TO_SCORE: MarketTypeSpec(
+        market_type=MarketType.BOTH_TEAMS_TO_SCORE, label="Gol/Niente Gol (BTTS)",
+        selections=("yes", "no"), source_type_ids=(("sxbet", 17),),
+        note="type 17 esiste ma sul calcio risultava NON popolato al "
+             "18/09/2026: il feed deve dirlo, non inventarlo"),
+    MarketType.DOUBLE_CHANCE: MarketTypeSpec(
+        market_type=MarketType.DOUBLE_CHANCE, label="Doppia chance",
+        selections=("1X", "X2", "12"), native=False,
+        derivable_from=(MarketType.MATCH_RESULT,),
+        note="non nativo su SX: derivabile dal 1X2 devigato"),
+    MarketType.CORRECT_SCORE: MarketTypeSpec(
+        market_type=MarketType.CORRECT_SCORE, label="Risultato esatto",
+        native=False, requires_score=True,
+        derivable_from=(MarketType.MATCH_RESULT, MarketType.OVER_UNDER),
+        note="non nativo su SX: derivato dalla distribuzione di Poisson"),
+}
+
+#: Mercati canonici ammessi dal contratto (derivato dal registro: mai a mano).
+SUPPORTED_MARKETS = tuple(spec.market_type.value for spec in MARKET_SPECS.values())
 
 #: Selezione ammessa per ogni mercato canonico (validazione INCROCIATA): e' il
 #: controllo che a valle costa di piu' — un esito che non appartiene al mercato
 #: e' il modo in cui un `over` finisce saldato su un 1X2 (vedi il caso
-#: 'Blackburn Rovers' del 09/09, chiuso come Over 2.5).
-MARKET_SELECTIONS = {"1X2": ("1", "X", "2"), "OU": ("over", "under")}
+#: 'Blackburn Rovers' del 09/09, chiuso come Over 2.5). Il Risultato Esatto
+#: non compare: i suoi esiti li valida `_validate_score`.
+MARKET_SELECTIONS: dict[str, tuple[str, ...]] = {
+    spec.market_type.value: spec.selections
+    for spec in MARKET_SPECS.values() if spec.selections
+}
+
+#: Type id ufficiali SX Bet -> mercato canonico (docs.sx.bet, 18/09/2026).
+SX_TYPE_IDS: dict[int, MarketType] = {
+    1: MarketType.MATCH_RESULT,
+    2: MarketType.OVER_UNDER,
+    3: MarketType.ASIAN_HANDICAP,
+    17: MarketType.BOTH_TEAMS_TO_SCORE,
+}
+
+#: Type id SX che portano linee (colonna "Has lines" della doc ufficiale) e
+#: quali sono quarter-line eligible: servono al feed per decidere se chiedere
+#: `onlyMainLine` e come normalizzare la linea.
+SX_LINE_BEARING_TYPES = (2, 3, 28, 29, 166, 201, 342, 835, 1536, 165, 866,
+                          53, 77, 21, 64, 45, 65, 46, 66, 236, 281)
+SX_QUARTER_LINE_TYPES = (2, 3, 28)
+
+#: Type id SX OSSERVATI VIVI sul calcio ma NON modellati dal contratto.
+#: Restano qui dichiarati perche' "non modellato" non vuol dire "inesistente":
+#: chi legge il codice deve sapere cosa manca e perche' (e non ri-scoprirlo).
+#: Verificato il 18/09/2026 su /markets/active (sportIds=5):
+#:   1 -> 1X2 (100 mercati), 2 -> OU (100), 3 -> AH (100), 52 -> 12 (100),
+#:   17 -> BTTS (0 attivi), 53/63/77/226/835 -> 0 attivi.
+SX_TYPES_NOT_MODELLED: dict[int, str] = {
+    52: "12 (senza pareggio)",
+    226: "12 con overtime",
+    835: "Asian Under/Over",
+    77: "Under/Over primo tempo",
+    63: "12 primo tempo",
+}
+
+
+def spec_for(market: Any) -> Optional[MarketTypeSpec]:
+    """Spec del mercato (accetta valore canonico, alias o `MarketType`)."""
+    market_type = market_type_of(market)
+    return MARKET_SPECS.get(market_type) if market_type else None
+
+
+def market_type_of(value: Any) -> Optional[MarketType]:
+    """`MarketType` da un valore qualsiasi (alias inclusi), None se ignoto."""
+    if isinstance(value, MarketType):
+        return value
+    key = _alias_key(value)
+    if key is None:
+        return None
+    canonical = _MARKET_LOOKUP.get(_norm_key(key))
+    if canonical is None:
+        candidate = key.upper()
+        if candidate in SUPPORTED_MARKETS:
+            canonical = candidate
+        else:
+            return None
+    try:
+        return MarketType(canonical)
+    except ValueError:
+        return None
+
+
+def line_required(market: Any) -> bool:
+    """Il mercato ESIGE una linea? (regola del registro, mai duplicata a mano)"""
+    spec = spec_for(market)
+    return bool(spec and spec.line_required)
+
+
+def market_accepts_lines(market: Any) -> bool:
+    """Il mercato TOLLERA una linea? (per i mercati senza linee una linea e' un dato incoerente)"""
+    spec = spec_for(market)
+    return bool(spec and spec.has_lines)
 
 
 class QuoteErrorCode(str, Enum):
@@ -171,11 +417,27 @@ class QuoteErrorCode(str, Enum):
     INVALID_TYPE = "invalid_type"
     UNSUPPORTED_SCHEMA = "unsupported_schema"
     UNKNOWN_MARKET = "unknown_market"
+    UNKNOWN_MARKET_TYPE = "unknown_market_type"
+    MARKET_TYPE_MISMATCH = "market_type_mismatch"
     UNKNOWN_SELECTION = "unknown_selection"
     SELECTION_MARKET_MISMATCH = "selection_market_mismatch"
+    INVALID_SCORE = "invalid_score"
     ODDS_BELOW_MIN = "odds_below_min"
     ODDS_NOT_FINITE = "odds_not_finite"
     TIMESTAMP_NAIVE = "timestamp_naive"
+    # -- multi-mercato (schema 2.0) --------------------------------------
+    LINE_REQUIRED = "line_required"
+    LINE_NOT_ALLOWED = "line_not_allowed"
+    LINE_INVALID = "line_invalid"
+    UNKNOWN_ORIGIN = "unknown_origin"
+    DERIVED_MISSING_SOURCE = "derived_missing_source"
+    FIXTURE_MISMATCH = "fixture_mismatch"
+
+
+#: Origini ammesse di una quota: nativa (la pubblica un book) o derivata (la
+#: produce il sistema da altri mercati). Una quota derivata DEVE dichiarare da
+#: dove viene (`derived_from`): senza provenienza non e' verificabile.
+QUOTE_ORIGINS = ("native", "derived")
 
 
 #: Tipi di errore di pydantic -> codice del contratto (i validator usano il
@@ -289,14 +551,29 @@ class MarketQuote(BaseModel):
 
     # -- identita' del contratto -----------------------------------------
     schema_version: str = Field(..., description="versione dello schema dichiarata dal produttore")
-    event_id: str = Field(..., description="identificativo dell'evento")
-    market: str = Field(..., description="mercato canonico (1X2, OU)")
-    selection: str = Field(..., description="esito canonico (1/X/2, over/under)")
+    event_id: str = Field(..., description="identificativo dell'evento (fixture)")
+    market: str = Field(..., description=f"mercato canonico ({', '.join(SUPPORTED_MARKETS)})")
+    selection: str = Field(..., description="esito canonico del mercato")
     odds: float = Field(..., ge=MIN_ODDS, allow_inf_nan=False,
                         description=f"quota decimale europea (minimo {MIN_ODDS})")
     timestamp: datetime = Field(..., description="istante della rilevazione (UTC)")
     source: str = Field(..., description="provider che ha prodotto la quota")
     gateway_id: str = Field(..., description="gateway che ha ingerito la quota")
+
+    # -- multi-mercato (schema 2.0) --------------------------------------
+    #: Tipo tipizzato. E' la STESSA cosa di `market` (forma stringa): si
+    #: completano a vicenda e non possono contraddirsi (vedi `_resolve_market`).
+    market_type: Optional[MarketType] = Field(
+        None, description="tipo di mercato (1X2, OU, AH, BTTS, DC, CS)")
+    #: Linea del mercato: obbligatoria per i mercati che ne hanno una (OU, AH),
+    #: vietata sugli altri. Per l'AH e' dal punto di vista di teamOne.
+    line: Optional[float] = Field(None, description="linea (handicap/totale)")
+    #: La linea principale dichiarata dalla fonte (nulla se la fonte non lo dice)
+    main_line: Optional[bool] = Field(None, description="linea principale per la fonte")
+    #: Provenienza: "native" (book reale) o "derived" (prodotta dal sistema)
+    origin: str = Field("native", description="native | derived")
+    #: Da quali mercati e' stata derivata (obbligatorio se `origin=derived`)
+    derived_from: tuple[str, ...] = Field(default_factory=tuple)
 
     # -- contesto (facoltativo: arricchisce, non identifica) -------------
     event_name: str = ""
@@ -307,6 +584,38 @@ class MarketQuote(BaseModel):
     selection_label: str = ""
     depth_usdc: Optional[float] = Field(None, ge=0.0,
                                         description="profondita' al floor della selezione")
+
+    # -- `market` / `market_type`: una cosa sola --------------------------
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_market(cls, data: Any) -> Any:
+        """Risolve il tipo di mercato PRIMA dei campi, e non ammette ambiguita'.
+
+        Accetta entrambe le forme (`market` stringa o `market_type`), le
+        completa a vicenda, e respinge la contraddizione: `market='1X2'` con
+        `market_type='AH'` e' un dato rotto, non una scelta da indovinare.
+        """
+        if not isinstance(data, Mapping):
+            return data
+        row = dict(data)
+        raw_market = _raw_field(row, "market")
+        raw_type = _raw_field(row, "market_type")
+        resolved_market = market_type_of(raw_market) if raw_market is not None else None
+        resolved_type = market_type_of(raw_type) if raw_type is not None else None
+        if raw_market is not None and raw_type is not None:
+            if resolved_market is None or resolved_type is None or resolved_market != resolved_type:
+                raise _fail(QuoteErrorCode.MARKET_TYPE_MISMATCH,
+                            f"'market'={_short(raw_market)} e "
+                            f"'market_type'={_short(raw_type)} non concordano")
+        resolved = resolved_market or resolved_type
+        if resolved is not None:
+            row["market"] = resolved.value
+            row["market_type"] = resolved
+        elif raw_type is not None and not raw_market:
+            raise _fail(QuoteErrorCode.UNKNOWN_MARKET_TYPE,
+                        f"tipo di mercato '{_short(raw_type)}' non riconosciuto "
+                        f"(supportati: {', '.join(SUPPORTED_MARKETS)})")
+        return row
 
     # -- validatori ------------------------------------------------------
     @field_validator("schema_version")
@@ -354,6 +663,11 @@ class MarketQuote(BaseModel):
             raise _fail(QuoteErrorCode.INVALID_TYPE, f"selezione non testuale: {_short(value)}")
         if not key:
             raise _fail(QuoteErrorCode.EMPTY_FIELD, "'selection' vuota")
+        # Il Risultato Esatto non ha un elenco di esiti: e' un PUNTEGGIO, e si
+        # valida come tale ("3-1"). Va fatto PRIMA della tabella degli alias,
+        # altrimenti "3-1" verrebbe cercato come alias e respinto come ignoto.
+        if str(info.data.get("market") or "") == MarketType.CORRECT_SCORE.value:
+            return _validate_score(key)
         canonical = _SELECTION_LOOKUP.get(_norm_key(key))
         if canonical is None:
             raise _fail(QuoteErrorCode.UNKNOWN_SELECTION,
@@ -366,6 +680,126 @@ class MarketQuote(BaseModel):
                         f"selezione '{canonical}' non appartiene al mercato "
                         f"'{market}' (ammesse: {', '.join(allowed)})")
         return canonical
+
+    # -- regole multi-mercato (linee, origine, provenienza) ----------------
+    @model_validator(mode="after")
+    def _check_market_shape(self) -> "MarketQuote":
+        """Le regole del REGISTRO: linea dove serve, vietata dove non serve.
+
+        E' qui che un mercato senza linea non puo' passare per un totale (e
+        viceversa): senza questo controllo un OU "senza linea" sarebbe
+        indistinguibile da un OU 2.5 e finirebbe sul ledger come tale.
+        """
+        spec = MARKET_SPECS.get(self.market_type) if self.market_type else None
+        has_lines = bool(spec and spec.has_lines)
+        if has_lines and self.line is None:
+            raise _fail(QuoteErrorCode.LINE_REQUIRED,
+                        f"il mercato '{self.market}' richiede una linea "
+                        f"(es. 2.5) — senza linea l'esito non e' eseguibile")
+        if spec is not None and not has_lines and self.line is not None:
+            raise _fail(QuoteErrorCode.LINE_NOT_ALLOWED,
+                        f"il mercato '{self.market}' non ha linee "
+                        f"(ricevuta {self.line:g})")
+        if spec is not None and not has_lines and self.main_line is not None:
+            raise _fail(QuoteErrorCode.LINE_NOT_ALLOWED,
+                        f"'main_line' su un mercato senza linee ('{self.market}')")
+        if self.line is not None:
+            self._validate_line_bounds(spec)
+        if self.origin == "derived" and not self.derived_from:
+            raise _fail(QuoteErrorCode.DERIVED_MISSING_SOURCE,
+                        "quota derivata senza 'derived_from': la provenienza "
+                        "non e' verificabile (mai un mercato inventato)")
+        if self.origin == "native" and self.derived_from:
+            raise _fail(QuoteErrorCode.UNKNOWN_ORIGIN,
+                        f"origine 'native' con 'derived_from'={list(self.derived_from)}: "
+                        f"una quota nativa non si deriva da altri mercati")
+        return self
+
+    def _validate_line_bounds(self, spec: Optional[MarketTypeSpec]) -> None:
+        """Linea nel range del mercato, a passi di 0.25 (quarter-line SX)."""
+        line = float(self.line or 0.0)
+        bounds = (spec.line_bounds if spec else None)
+        if bounds and not (bounds[0] <= line <= bounds[1]):
+            raise _fail(QuoteErrorCode.LINE_INVALID,
+                        f"linea {line:g} fuori range per '{self.market}' "
+                        f"({bounds[0]:g}..{bounds[1]:g})")
+        quarter = round(line * 4, 6)
+        if abs(quarter - round(quarter)) > 1e-6:
+            raise _fail(QuoteErrorCode.LINE_INVALID,
+                        f"linea {line:g} non e' un multiplo di 0.25")
+        if (spec is not None and not spec.quarter_line_eligible
+                and abs(line * 2 - round(line * 2)) > 1e-6):
+            raise _fail(QuoteErrorCode.LINE_INVALID,
+                        f"linea {line:g} e' quartata ma '{self.market}' non "
+                        f"ammette quarter-line")
+
+    @field_validator("market_type", mode="before")
+    @classmethod
+    def _normalize_market_type(cls, value: Any) -> Optional[MarketType]:
+        if value is None or value == "":
+            return None
+        resolved = market_type_of(value)
+        if resolved is None:
+            raise _fail(QuoteErrorCode.UNKNOWN_MARKET_TYPE,
+                        f"tipo di mercato '{_short(value)}' non riconosciuto "
+                        f"(supportati: {', '.join(SUPPORTED_MARKETS)})")
+        return resolved
+
+    @field_validator("line", mode="before")
+    @classmethod
+    def _check_line(cls, value: Any) -> Optional[float]:
+        """La linea e' un numero finito (stringhe numeriche ammesse, virgola inclusa)."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        number = _as_float(value)
+        if number is None:
+            raise _fail(QuoteErrorCode.INVALID_TYPE, f"linea non numerica: {_short(value)}")
+        if not math.isfinite(number):
+            raise _fail(QuoteErrorCode.INVALID_TYPE, f"linea non finita: {number}")
+        return round(number, 4)
+
+    @field_validator("main_line", mode="before")
+    @classmethod
+    def _check_main_line(cls, value: Any) -> Optional[bool]:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in ("true", "1", "yes", "si"):
+            return True
+        if text in ("false", "0", "no"):
+            return False
+        raise _fail(QuoteErrorCode.INVALID_TYPE, f"'main_line' non booleano: {_short(value)}")
+
+    @field_validator("origin", mode="before")
+    @classmethod
+    def _check_origin(cls, value: Any) -> str:
+        text = ("native" if value is None or value == "" else str(value).strip().lower())
+        if text not in QUOTE_ORIGINS:
+            raise _fail(QuoteErrorCode.UNKNOWN_ORIGIN,
+                        f"origine '{_short(value)}' non ammessa (native | derived)")
+        return text
+
+    @field_validator("derived_from", mode="before")
+    @classmethod
+    def _check_derived_from(cls, value: Any) -> tuple[str, ...]:
+        """Normalizza la provenienza a nomi canonici di mercato."""
+        if value in (None, ""):
+            return ()
+        if isinstance(value, (str, MarketType)):
+            value = [value]
+        if not isinstance(value, (list, tuple, set)):
+            raise _fail(QuoteErrorCode.INVALID_TYPE,
+                        f"'derived_from' non e' una lista: {_short(value)}")
+        out: list[str] = []
+        for item in value:
+            resolved = market_type_of(item)
+            if resolved is None:
+                raise _fail(QuoteErrorCode.UNKNOWN_MARKET_TYPE,
+                            f"'derived_from' cita un mercato ignoto: {_short(item)}")
+            out.append(resolved.value)
+        return tuple(dict.fromkeys(out))
 
     @field_validator("odds", mode="before")
     @classmethod
@@ -402,15 +836,90 @@ class MarketQuote(BaseModel):
         return dict(self.model_extra or {})
 
     @property
+    def fixture_id(self) -> str:
+        """Id della PARTITA: e' `event_id`.
+
+        Nel contratto fixture ed evento coincidono (un fixture = una partita);
+        l'alias esiste perche' e' il termine con cui si ragiona quando i
+        mercati sono molti: N quote di UNA partita.
+        """
+        return self.event_id
+
+    @property
+    def market_spec(self) -> Optional[MarketTypeSpec]:
+        """Regole del mercato (None solo se il tipo non e' nel registro)."""
+        return MARKET_SPECS.get(self.market_type) if self.market_type else None
+
+    @property
+    def line_key(self) -> str:
+        """Linea in forma canonica per chiavi/dedup ('', '2.5', '-0.75').
+
+        La stringa (non il float) e' la chiave: 2.5 e 2.5000000001 non devono
+        diventare due righe diverse sul ledger. La linea e' gia' arrotondata a
+        4 decimali dal contratto.
+        """
+        if self.line is None:
+            return ""
+        text = f"{self.line:.4f}".rstrip("0").rstrip(".")
+        return "0" if text in ("-0", "", "-0.") else text
+
+    @property
+    def handicap_for_selection(self) -> Optional[float]:
+        """Handicap DELLA SELEZIONE giocata (l'AH si legge dal suo lato).
+
+        `line` e' dal punto di vista di teamOne: se si gioca teamTwo, il suo
+        handicap e' l'opposto. Un AH con il segno sbagliato e' un esito perso
+        per un motivo che non e' il calcio.
+        """
+        if self.line is None or self.market != MarketType.ASIAN_HANDICAP.value:
+            return None
+        return self.line if self.selection == "1" else -self.line
+
+    @property
+    def ledger_esito(self) -> str:
+        """Esito nel formato del LEDGER del progetto (`tracker`/`ml_audit`).
+
+        1X2 -> '1'/'X'/'2' · OU -> 'Over 2.5' · AH -> 'Home -0.75' ·
+        BTTS -> 'Yes'/'No' · DC -> '1X'/'X2'/'12' · CS -> '3-1'.
+        E' il ponte fra la chiave macchina (`selection`) e cio' che il resto
+        del sistema gia' scrive e salda.
+        """
+        market = self.market_type
+        if market is MarketType.OVER_UNDER:
+            side = "Over" if self.selection == "over" else "Under"
+            return f"{side} {self.half_line_label()}"
+        if market is MarketType.ASIAN_HANDICAP:
+            side = "Home" if self.selection == "1" else "Away"
+            return f"{side} {_signed_line(self.handicap_for_selection or 0.0)}"
+        if market is MarketType.BOTH_TEAMS_TO_SCORE:
+            return "Yes" if self.selection == "yes" else "No"
+        return self.selection_label or self.selection
+
+    def half_line_label(self) -> str:
+        """Linea leggibile per i mercati di totale ('2.5')."""
+        return f"{float(self.line or 0.0):g}"
+
+    @property
+    def is_derived(self) -> bool:
+        return self.origin == "derived"
+
+    @property
     def quote_id(self) -> str:
         """Id della RILEVAZIONE (cambia quando la quota cambia nel tempo)."""
-        return _digest("quote", self.event_id, self.market, self.selection,
-                       self.gateway_id, self.source, self.timestamp.isoformat())
+        return _digest("quote", self.event_id, self.market, self.line_key,
+                       self.selection, self.gateway_id, self.source,
+                       self.timestamp.isoformat())
 
     @property
     def identity_key(self) -> str:
-        """Chiave STABILE di (evento, mercato, esito): non dipende dal tempo."""
-        return _digest("identity", self.event_id, self.market, self.selection)
+        """Chiave STABILE di (evento, mercato, linea, esito): senza il tempo.
+
+        La LINEA fa parte dell'identita': due totali 2.5 e 3.5 sono due
+        mercati diversi, e confonderli significherebbe saldare un esito con
+        il risultato di un altro.
+        """
+        return _digest("identity", self.event_id, self.market, self.line_key,
+                       self.selection)
 
     def age_seconds(self, now: Optional[datetime] = None) -> float:
         """Eta' della rilevazione in secondi (negativa se nel futuro)."""
@@ -419,25 +928,76 @@ class MarketQuote(BaseModel):
             current = current.replace(tzinfo=timezone.utc)
         return (current - self.timestamp).total_seconds()
 
+    def as_row(self) -> dict[str, Any]:
+        """La riga FLAT da serializzare (contratto verso il gateway SQLite).
+
+        Sono i campi dichiarati in `MARKET_ROW_FIELDS`, tutti JSON-safe
+        (datetime -> ISO): il gateway non deve interpretare nulla, solo
+        scrivere. `extra` conserva cio' che il feed ha mandato in piu'.
+        """
+        return {
+            "fixture_id": self.fixture_id,
+            "market_type": self.market_type.value if self.market_type else self.market,
+            "line_key": self.line_key,
+            "line": self.line,
+            "selection": self.selection,
+            "selection_label": self.selection_label or self.ledger_esito,
+            "ledger_esito": self.ledger_esito,
+            "odds": self.odds,
+            "main_line": self.main_line,
+            "origin": self.origin,
+            "derived_from": list(self.derived_from),
+            "depth_usdc": self.depth_usdc,
+            "source": self.source,
+            "gateway_id": self.gateway_id,
+            "schema_version": self.schema_version,
+            "observed_at": self.timestamp.isoformat(),
+            "kickoff": self.kickoff.isoformat() if self.kickoff else None,
+            "event_name": self.event_name,
+            "league": self.league,
+            "home": self.home,
+            "away": self.away,
+            "identity_key": self.identity_key,
+            "quote_id": self.quote_id,
+            "extra": {key: _jsonable(value) for key, value in self.extra_fields.items()},
+        }
+
     def to_signal_fields(self) -> dict[str, Any]:
         """La parte di `Signal` che il mercato puo' riempire (le probabilita' no).
 
         `outcome` compare SOLO per il mercato 1X2: il contratto non inventa un
-        esito che il `Signal` non accetta (l'OU e' escluso dalle selezioni dal
-        06/09, resta nel ledger come telemetria).
+        esito che il `Signal` non accetta (`Outcome = 1|X|2`). Gli altri
+        mercati viaggiano con `market_type` e `line`, che e' cio' che serve a
+        distinguerli a valle (un OU 2.5 non e' un OU 3.5).
         """
         fields: dict[str, Any] = {
             "match_id": self.event_id,
             "league": self.league,
             "market": self.market,
-            "selection_label": self.selection_label or self.selection,
+            "market_type": self.market_type.value if self.market_type else self.market,
+            "line": self.line,
+            "selection_label": self.selection_label or self.ledger_esito,
             "kickoff": self.kickoff or self.timestamp,
             "price": self.odds,
             "price_source": self.source,
         }
-        if self.market == "1X2":
+        if self.market == MarketType.MATCH_RESULT.value:
             fields["outcome"] = self.selection
         return fields
+
+
+#: Colonne della riga serializzata da `MarketQuote.as_row()`: e' il CONTRATTO
+#: verso il gateway SQLite (una riga per quota, chiave composta
+#: fixture_id + market_type + line_key + selection). Se cambia questa tupla
+#: cambia la persistenza: tenerla dichiarata evita che tabella e modello
+#: divergano in silenzio.
+MARKET_ROW_FIELDS: tuple[str, ...] = (
+    "fixture_id", "market_type", "line_key", "line", "selection",
+    "selection_label", "ledger_esito", "odds", "main_line", "origin",
+    "derived_from", "depth_usdc", "source", "gateway_id", "schema_version",
+    "observed_at", "kickoff", "event_name", "league", "home", "away",
+    "identity_key", "quote_id", "extra",
+)
 
 
 class QuoteBatch(BaseModel):
@@ -486,6 +1046,297 @@ class QuoteBatch(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Un FIXTURE, molti mercati
+# ---------------------------------------------------------------------------
+
+class FixtureQuotes(BaseModel):
+    """Tutte le quote di mercato di UNA partita (`fixture_id`), insieme.
+
+    Perche' un contenitore e non una lista sciolta: i mercati di un fixture
+    hanno invarianti che una lista non puo' esprimere — stessa partita, stesso
+    kickoff, nessuna riga di un'altra partita mescolata. Il contenitore le
+    verifica all'ingresso, cosi' il resto del sistema puo' fidarsi del gruppo.
+
+    Non impone COMPLETEZZA (un feed puo' avere solo una parte dei mercati: e'
+    la normalita'). La dice: `is_complete()` / `incomplete()` esistono perche'
+    uno scanner "universale" deve sapere cosa e' negoziabile e cosa e' parziale.
+    """
+
+    model_config = ConfigDict(extra="allow", str_strip_whitespace=True)
+
+    fixture_id: str = Field(..., min_length=1, description="id della partita")
+    schema_version: str = MARKET_SCHEMA_VERSION
+    source: str = ""
+    gateway_id: str = ""
+    event_name: str = ""
+    league: str = ""
+    home: str = ""
+    away: str = ""
+    kickoff: Optional[datetime] = None
+    quotes: list[MarketQuote] = Field(default_factory=list, min_length=1)
+
+    @field_validator("kickoff", mode="before")
+    @classmethod
+    def _check_kickoff(cls, value: Any) -> Optional[datetime]:
+        if value is None or value == "":
+            return None
+        moment = _as_datetime(value)
+        if moment is None:
+            raise _fail(QuoteErrorCode.INVALID_TYPE,
+                        f"'kickoff' non e' una data ISO-8601: {_short(value)}")
+        if moment.tzinfo is None or moment.utcoffset() is None:
+            raise _fail(QuoteErrorCode.TIMESTAMP_NAIVE,
+                        "'kickoff' senza fuso orario (serve UTC)")
+        return moment.astimezone(timezone.utc)
+
+    @model_validator(mode="after")
+    def _check_same_fixture(self) -> "FixtureQuotes":
+        """Tutte le quote sono della STESSA partita (e dello stesso kickoff).
+
+        E' la guardia che impedisce il bug piu' costoso della multi-mercato:
+        mescolare le gambe di due partite diverse e leggere una probabilita'
+        dall'una e una quota dall'altra.
+        """
+        # Il kickoff di riferimento: quello del gruppo, o il primo dichiarato da
+        # una quota. Cosi' l'incoerenza si vede ANCHE quando il contenitore non
+        # lo porta: due quote della stessa partita non possono avere due orari.
+        reference = self.kickoff or next(
+            (item.kickoff for item in self.quotes if item.kickoff is not None), None)
+        for quote in self.quotes:
+            if quote.event_id != self.fixture_id:
+                raise _fail(QuoteErrorCode.FIXTURE_MISMATCH,
+                            f"la quota {quote.identity_key} e' dell'evento "
+                            f"'{quote.event_id}', non di '{self.fixture_id}'")
+            if (reference is not None and quote.kickoff is not None
+                    and quote.kickoff != reference):
+                raise _fail(QuoteErrorCode.FIXTURE_MISMATCH,
+                            f"kickoff incoerente sulla quota {quote.identity_key}: "
+                            f"{quote.kickoff.isoformat()} vs {reference.isoformat()}")
+        return self
+
+    # -- letture ---------------------------------------------------------
+    def market_types(self) -> list[MarketType]:
+        """I tipi di mercato presenti, in ordine di registro (stabile)."""
+        present = {quote.market_type for quote in self.quotes if quote.market_type}
+        return [market for market in MARKET_SPECS if market in present]
+
+    def by_market(self) -> dict[MarketType, list[MarketQuote]]:
+        """Quote raggruppate per tipo di mercato (linee incluse)."""
+        out: dict[MarketType, list[MarketQuote]] = {}
+        for quote in self.quotes:
+            if quote.market_type:
+                out.setdefault(quote.market_type, []).append(quote)
+        return out
+
+    def lines_for(self, market_type: Any) -> list[float]:
+        """Le linee disponibili per un mercato (ordinate)."""
+        resolved = market_type_of(market_type)
+        lines = {quote.line for quote in self.quotes
+                 if quote.market_type is resolved and quote.line is not None}
+        return sorted(lines)
+
+    def quotes_for(self, market_type: Any,
+                   line: Optional[float] = None) -> list[MarketQuote]:
+        """Quote di un mercato: tutte le linee, o solo quella indicata."""
+        resolved = market_type_of(market_type)
+        out = [quote for quote in self.quotes if quote.market_type is resolved]
+        if line is not None:
+            key = _line_key(line)
+            out = [quote for quote in out if quote.line_key == key]
+        return out
+
+    def main_line(self, market_type: Any) -> Optional[float]:
+        """Linea principale dichiarata dalla fonte (None se non e' dichiarata)."""
+        for quote in self.quotes_for(market_type):
+            if quote.main_line:
+                return quote.line
+        return None
+
+    def is_complete(self, market_type: Any,
+                    line: Optional[float] = None) -> Optional[bool]:
+        """Tutti gli esiti del mercato sono presenti? None se non e' decidibile.
+
+        Per il Risultato Esatto "completo" non vuol dire nulla (gli esiti
+        possibili non sono enumerabili): dire `False` sarebbe un falso, quindi
+        la risposta e' None — esplicitamente sconosciuta.
+        """
+        resolved = market_type_of(market_type)
+        spec = MARKET_SPECS.get(resolved) if resolved else None
+        if spec is None or not spec.selections:
+            return None
+        keys = {quote.selection for quote in self.quotes_for(resolved, line)}
+        return all(selection in keys for selection in spec.selections)
+
+    def incomplete(self) -> list[dict[str, Any]]:
+        """Elenco dei mercati (tipo, linea) a cui MANCANO esiti.
+
+        E' il report che serve allo scanner: cosa non e' giocabile e perche'.
+        """
+        out: list[dict[str, Any]] = []
+        for market, quotes in self.by_market().items():
+            spec = MARKET_SPECS.get(market)
+            if spec is None or not spec.selections:
+                continue
+            groups: dict[str, list[MarketQuote]] = {}
+            for quote in quotes:
+                groups.setdefault(quote.line_key, []).append(quote)
+            for line_key, group in groups.items():
+                keys = {quote.selection for quote in group}
+                missing = [s for s in spec.selections if s not in keys]
+                if missing:
+                    out.append({"market_type": market.value,
+                                "line_key": line_key,
+                                "missing": missing,
+                                "present": len(keys)})
+        return out
+
+    def as_rows(self) -> list[dict[str, Any]]:
+        """Righe flat per il gateway (una per quota), in ordine deterministico."""
+        return [quote.as_row() for quote in sorted(
+            self.quotes, key=lambda q: ((q.market_type.value if q.market_type
+                                         else q.market), q.line_key, q.selection))]
+
+    def summary(self) -> dict[str, Any]:
+        """Riepilogo per log/report: quanti mercati, quali linee, cosa manca."""
+        return {
+            "fixture_id": self.fixture_id,
+            "event_name": self.event_name,
+            "league": self.league,
+            "kickoff": self.kickoff.isoformat() if self.kickoff else None,
+            "quotes": len(self.quotes),
+            "markets": [market.value for market in self.market_types()],
+            "lines": {market.value: self.lines_for(market)
+                      for market in self.market_types()},
+            "incomplete": self.incomplete(),
+        }
+
+
+class FixtureQuoteBatch(BaseModel):
+    """Esito di un ingresso a LOTTI multi-mercato (mai un'eccezione)."""
+
+    gateway_id: str = ""
+    source: str = ""
+    fixtures: list[FixtureQuotes] = Field(default_factory=list)
+    rejected: list[QuoteRejection] = Field(default_factory=list)
+    total: int = 0
+    suppressed_events: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return not self.rejected
+
+    @property
+    def quotes(self) -> int:
+        """Quote accettate in totale (su tutti i fixture)."""
+        return sum(len(fixture.quotes) for fixture in self.fixtures)
+
+    @property
+    def rejected_rows(self) -> int:
+        return len({rejection.index for rejection in self.rejected})
+
+    def by_code(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for rejection in self.rejected:
+            counts[rejection.code.value] = counts.get(rejection.code.value, 0) + 1
+        return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+    def fixture(self, fixture_id: str) -> Optional[FixtureQuotes]:
+        for item in self.fixtures:
+            if item.fixture_id == fixture_id:
+                return item
+        return None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "gateway_id": self.gateway_id,
+            "source": self.source,
+            "total": self.total,
+            "fixtures": len(self.fixtures),
+            "accepted": self.quotes,
+            "rejected_rows": self.rejected_rows,
+            "rejected": len(self.rejected),
+            "by_code": self.by_code(),
+            "suppressed_events": self.suppressed_events,
+        }
+
+
+def validate_fixture_quotes(rows: Iterable[Any], *, gateway_id: Optional[str] = None,
+                            source: Optional[str] = None,
+                            schema_version: Optional[str] = None,
+                            assume_utc: bool = False,
+                            max_events: int = DEFAULT_MAX_REJECTION_EVENTS,
+                            obs: Optional[Observability] = None,
+                            ctx: Optional[TraceContext] = None
+                            ) -> FixtureQuoteBatch:
+    """Ingresso a lotti MULTI-MERCATO: raggruppa per fixture, mai un'eccezione.
+
+    Riusa la porta unica di validazione (`parse_quote`, quindi `prepare_payload`
+    e il contratto): qui si aggiunge solo il raggruppamento per partita e le
+    invarianti di gruppo. Una riga rotta non ferma le altre, e **un fixture con
+    quote incoerenti viene respinto intero** (non si tiene la meta' buona:
+    sarebbe un gruppo che promette invarianti che non ha).
+    """
+    accepted: list[MarketQuote] = []
+    rejections: list[QuoteRejection] = []
+    suppressed = 0
+    total = 0
+    for index, row in enumerate(rows or ()):
+        total += 1
+        event_hint = _safe_get(row, "event_id", "fixture_id", "sportXeventId")
+        try:
+            quote = parse_quote(row, gateway_id=gateway_id, source=source,
+                                schema_version=schema_version, assume_utc=assume_utc)
+        except MarketQuoteError as exc:
+            for issue in exc.issues:
+                if len(rejections) >= max_events:
+                    suppressed += 1
+                    continue
+                rejections.append(QuoteRejection.from_issue(
+                    issue, index=index, event_id=event_hint,
+                    source=_safe_get(row, "source") or (source or ""),
+                    gateway_id=gateway_id or "", raw_keys=_safe_keys(row)))
+            continue
+        accepted.append(quote)
+
+    grouped: dict[str, list[MarketQuote]] = {}
+    for quote in accepted:
+        grouped.setdefault(quote.event_id, []).append(quote)
+
+    fixtures: list[FixtureQuotes] = []
+    for fixture_id, quotes in sorted(grouped.items()):
+        first = quotes[0]
+        try:
+            fixtures.append(FixtureQuotes(
+                fixture_id=fixture_id, schema_version=first.schema_version,
+                source=first.source, gateway_id=gateway_id or first.gateway_id,
+                event_name=first.event_name, league=first.league,
+                home=first.home, away=first.away, kickoff=first.kickoff,
+                quotes=quotes))
+        except ValidationError as exc:
+            for issue in _issues_from_validation_error(exc):
+                if len(rejections) >= max_events:
+                    suppressed += 1
+                    continue
+                rejections.append(QuoteRejection.from_issue(
+                    issue, index=-1, event_id=fixture_id,
+                    source=source or first.source, gateway_id=gateway_id or ""))
+    batch = FixtureQuoteBatch(gateway_id=gateway_id or "", source=source or "",
+                              fixtures=fixtures, rejected=rejections, total=total,
+                              suppressed_events=suppressed)
+    if obs is not None:
+        level = logger.info if batch.ok else logger.warning
+        level("multi-mercato: %d righe -> %d fixture / %d quote accettate, "
+              "%d problemi %s (gateway=%s)", total, len(fixtures), batch.quotes,
+              len(rejections), batch.by_code() or "-", gateway_id or "-")
+        obs.event("market.fixtures_validated", ctx=ctx, stage="market",
+                  gateway_id=gateway_id or "", source=source or "",
+                  total=total, fixtures=len(fixtures), accepted=batch.quotes,
+                  rejected=len(rejections), by_code=batch.by_code(),
+                  suppressed_events=suppressed)
+    return batch
+
+
+# ---------------------------------------------------------------------------
 # Helper di conversione e formato
 # ---------------------------------------------------------------------------
 
@@ -515,6 +1366,89 @@ def _alias_key(value: Any) -> Optional[str]:
     if not isinstance(value, str):
         return None
     return re.sub(r"\s+", "", value.strip())
+
+
+def _line_key(line: Any) -> str:
+    """Linea in forma canonica di chiave ('2.5', '-0.75', '' se assente)."""
+    if line is None or (isinstance(line, str) and not line.strip()):
+        return ""
+    number = _as_float(line)
+    if number is None:
+        return str(line).strip()
+    text = f"{round(number, 4):.4f}".rstrip("0").rstrip(".")
+    return "0" if text in ("-0", "") else text
+
+
+def _signed_line(value: float) -> str:
+    """Linea col segno esplicito nel formato del ledger: -1.0, +0.25, 0."""
+    number = round(float(value), 4)
+    if number == 0:
+        return "0"
+    return f"{number:+.1f}" if number == int(number) else f"{number:+g}"
+
+
+def _raw_field(row: Mapping[str, Any], canonical: str) -> Any:
+    """Valore di un campo canonico cercando anche fra i suoi alias di chiave.
+
+    Serve al contratto per risolvere `market`/`market_type` anche quando la
+    riga arriva con i nomi del feed (`marketType`, `market_name`, ...) e non e'
+    passata da `prepare_payload`. Prudente: una riga ostile non fa esplodere.
+    """
+    try:
+        value = row.get(canonical)
+    except Exception:
+        value = None
+    if value not in (None, ""):
+        return value
+    try:
+        items = list(row.items())
+    except Exception:
+        return None
+    for key, candidate in items:
+        try:
+            alias = KEY_ALIASES.get(re.sub(r"[^a-z0-9]", "", str(key).lower()))
+        except Exception:
+            continue
+        if alias == canonical and candidate not in (None, ""):
+            return candidate
+    return None
+
+
+_SCORE_RE = re.compile(r"^(\d{1,2})\s*[-–:]\s*(\d{1,2})$")
+#: Tetto di sanity sui gol di un risultato esatto (oltre e' un dato sporco).
+MAX_SCORE_GOALS = 20
+
+
+def _validate_score(value: str) -> str:
+    """Valida e normalizza un esito di Risultato Esatto nella forma 'C-T'.
+
+    Accetta i separatori che i feed usano davvero (`3-1`, `3:1`, `3 – 1`) e
+    normalizza in `3-1`. Un punteggio non plausibile e' un dato sporco, non un
+    esito raro: 25-3 non e' un mercato, e' un errore di parsing.
+    """
+    match = _SCORE_RE.match(str(value).strip())
+    if not match:
+        raise _fail(QuoteErrorCode.INVALID_SCORE,
+                    f"esito di risultato esatto non valido: {_short(value)} "
+                    f"(forma attesa 'Casa-Trasferta', es. '3-1')")
+    home, away = int(match.group(1)), int(match.group(2))
+    if home > MAX_SCORE_GOALS or away > MAX_SCORE_GOALS:
+        raise _fail(QuoteErrorCode.INVALID_SCORE,
+                    f"punteggio implausibile {home}-{away} (max {MAX_SCORE_GOALS} gol)")
+    return f"{home}-{away}"
+
+
+def _jsonable(value: Any) -> Any:
+    """Valore serializzabile in JSON (datetime -> ISO, il resto invariato)."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    return str(value)
 
 
 def _as_float(value: Any) -> Optional[float]:
@@ -766,9 +1700,14 @@ def _log_batch(batch: QuoteBatch, *, obs: Optional[Observability] = None,
 
 
 __all__ = [
-    "DEFAULT_MAX_REJECTION_EVENTS", "KEY_ALIASES", "MARKET_ALIASES", "MARKET_SCHEMA_VERSION",
-    "MARKET_SELECTIONS", "MIN_ODDS", "MarketQuote", "MarketQuoteError", "QuoteBatch",
-    "QuoteErrorCode", "QuoteIssue", "QuoteRejection", "SELECTION_ALIASES",
-    "SUPPORTED_MARKETS", "SUPPORTED_SCHEMA_VERSIONS", "TRUNCATE",
-    "log_issues", "parse_quote", "prepare_payload", "validate_batch",
+    "DEFAULT_MAX_REJECTION_EVENTS", "KEY_ALIASES", "MARKET_ALIASES", "MARKET_ROW_FIELDS",
+    "MARKET_SCHEMA_VERSION", "MARKET_SELECTIONS", "MARKET_SPECS", "MAX_SCORE_GOALS",
+    "MIN_ODDS", "MarketQuote", "MarketQuoteError", "MarketType", "MarketTypeSpec",
+    "QuoteBatch", "QuoteErrorCode", "QuoteIssue", "QuoteRejection", "QUOTE_ORIGINS",
+    "SELECTION_ALIASES", "SUPPORTED_MARKETS", "SUPPORTED_SCHEMA_VERSIONS",
+    "SX_LINE_BEARING_TYPES", "SX_QUARTER_LINE_TYPES", "SX_TYPE_IDS",
+    "SX_TYPES_NOT_MODELLED", "TRUNCATE", "FixtureQuoteBatch", "FixtureQuotes",
+    "line_required", "log_issues", "market_accepts_lines", "market_type_of",
+    "parse_quote", "prepare_payload", "spec_for", "validate_batch",
+    "validate_fixture_quotes",
 ]

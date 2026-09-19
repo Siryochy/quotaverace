@@ -17,8 +17,8 @@ import pytest
 
 from decision import (
     MARKET_SCHEMA_VERSION, MIN_ODDS, SUPPORTED_MARKETS, SUPPORTED_SCHEMA_VERSIONS,
-    MarketQuote, MarketQuoteError, QuoteErrorCode, parse_quote, prepare_payload,
-    validate_batch,
+    MarketQuote, MarketQuoteError, MarketType, QuoteErrorCode, parse_quote,
+    prepare_payload, validate_batch,
 )
 from decision.__main__ import SAMPLE_QUOTES, main
 from decision.middleware import ListSink, Observability
@@ -73,7 +73,10 @@ class TestContratto:
 
     def test_versione_schema_dichiarata(self):
         assert MARKET_SCHEMA_VERSION in SUPPORTED_SCHEMA_VERSIONS
-        assert SUPPORTED_MARKETS == ("1X2", "OU")
+        # Lo schema 2.0 apre il contratto a TUTTI i mercati del registro:
+        # la lista non si scrive a mano (altrimenti diverge dal registro).
+        assert SUPPORTED_MARKETS == tuple(m.value for m in MarketType)
+        assert {"1X2", "OU", "AH", "BTTS", "DC", "CS"} == set(SUPPORTED_MARKETS)
 
     def test_quote_valida_normalizza(self):
         quote = parse_quote(payload(market="h2h", selection="home", odds="1.69",
@@ -108,7 +111,7 @@ class TestContratto:
         assert fields["price_source"] == "sxbet"
         assert fields["kickoff"] == quote.timestamp       # senza kickoff esplicito
         # L'OU non inventa un `outcome` che il Signal non accetta.
-        ou = parse_quote(payload(market="OU", selection="over"))
+        ou = parse_quote(payload(market="OU", selection="over", line=2.5))
         assert "outcome" not in ou.to_signal_fields()
 
     def test_age_seconds(self):
@@ -213,13 +216,19 @@ class TestSchemaVersion:
 
     def test_versione_non_supportata(self):
         with pytest.raises(MarketQuoteError) as exc:
-            parse_quote(payload(schema_version="2.0"))
+            parse_quote(payload(schema_version="9.9"))
         assert codes(exc.value) == [QuoteErrorCode.UNSUPPORTED_SCHEMA.value]
+
+    def test_schema_1_0_ancora_supportato(self):
+        """Retrocompatibilita': un produttore vecchio (1.0) resta valido."""
+        quote = parse_quote(payload(schema_version="1.0"))
+        assert quote.schema_version == "1.0"
+        assert quote.market_type is MarketType.MATCH_RESULT
 
     def test_default_di_feed_solo_se_assente(self):
         row = payload()
         row.pop("schema_version")
-        assert parse_quote(row, schema_version=MARKET_SCHEMA_VERSION).schema_version == "1.0"
+        assert parse_quote(row, schema_version=MARKET_SCHEMA_VERSION).schema_version == MARKET_SCHEMA_VERSION
         # Il valore della riga vince: il default non sovrascrive mai.
         assert parse_quote(payload(schema_version="1.0"),
                            schema_version="9.9").schema_version == "1.0"
@@ -300,7 +309,10 @@ class TestMercatoSelezione:
         ("total", "over", "OU"), (" O/U ", "over", "OU"),
     ])
     def test_alias_mercato(self, market, selection, expected):
-        assert parse_quote(payload(market=market, selection=selection)).market == expected
+        # Dal 18/09 (schema 2.0) l'OU comporta una LINEA: senza non e' eseguibile.
+        extra = {"line": 2.5} if expected == "OU" else {}
+        assert parse_quote(payload(market=market, selection=selection,
+                                   **extra)).market == expected
 
     @pytest.mark.parametrize("selection,expected", [
         ("1", "1"), ("home", "1"), ("Home", "1"), ("casa", "1"), (1, "1"),
@@ -311,14 +323,24 @@ class TestMercatoSelezione:
         assert parse_quote(payload(selection=selection)).selection == expected
 
     def test_alias_selezione_ou(self):
-        assert parse_quote(payload(market="OU", selection="over")).selection == "over"
-        assert parse_quote(payload(market="OU", selection="U")).selection == "under"
+        """Dal 18/09 un OU ESIGE la linea: senza, l'esito non e' eseguibile."""
+        assert parse_quote(payload(market="OU", selection="over", line=2.5)).selection == "over"
+        assert parse_quote(payload(market="OU", selection="U", line=2.5)).selection == "under"
 
-    @pytest.mark.parametrize("market", ["asian handicap", "btts", "corner", "nope"])
+    @pytest.mark.parametrize("market", ["corner", "nope", "risultato finale"])
     def test_mercato_sconosciuto(self, market):
         with pytest.raises(MarketQuoteError) as exc:
             parse_quote(payload(market=market))
         assert codes(exc.value) == [QuoteErrorCode.UNKNOWN_MARKET.value]
+
+    @pytest.mark.parametrize("market,expected", [
+        ("asian handicap", "AH"), ("spread", "AH"), ("btts", "BTTS"),
+        ("gol gol", "BTTS"), ("dc", "DC"), ("correct score", "CS"),
+    ])
+    def test_mercati_del_registro_riconosciuti(self, market, expected):
+        """I mercati aggiunti dallo schema 2.0 non sono piu' 'sconosciuti'."""
+        from decision import spec_for
+        assert spec_for(market).market_type.value == expected
 
     def test_selezione_sconosciuta(self):
         with pytest.raises(MarketQuoteError) as exc:
@@ -330,7 +352,8 @@ class TestMercatoSelezione:
     def test_selezione_fuori_mercato(self, market, selection):
         """E' il controllo che il 09/09 mancava: un `over` saldato su un 1X2."""
         with pytest.raises(MarketQuoteError) as exc:
-            parse_quote(payload(market=market, selection=selection))
+            parse_quote(payload(market=market, selection=selection, line=2.5))
+        assert QuoteErrorCode.SELECTION_MARKET_MISMATCH.value in codes(exc.value)
         issue = exc.value.issues[0]
         assert issue.code is QuoteErrorCode.SELECTION_MARKET_MISMATCH
         assert issue.field == "selection"

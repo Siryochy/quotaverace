@@ -20,9 +20,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from decision import (
-    DEFAULT_GATEWAY_ID, DataQuality, FeedSnapshot, KillSwitchStatus, MarketFeed,
-    ReasonCode, RiskLimits, Signal, StaticSource, SxBetSource, build_plan,
-    emit_many, feed_enabled, utcnow, verify_feed,
+    DEFAULT_GATEWAY_ID, MARKET_SCHEMA_VERSION, DataQuality, FeedSnapshot,
+    KillSwitchStatus, MarketFeed, ReasonCode, RiskLimits, Signal, StaticSource,
+    SxBetSource, build_plan, emit_many, feed_enabled, utcnow, verify_feed,
 )
 from decision.__main__ import main
 from decision.feeds import (
@@ -146,7 +146,7 @@ class TestSxBetSource:
         by_selection = {row["selection"]: row for row in rows}
         assert set(by_selection) == {"1", "X", "2"}
         casa = by_selection["1"]
-        assert casa["schema_version"] == "1.0"
+        assert casa["schema_version"] == MARKET_SCHEMA_VERSION
         assert casa["event_id"] == "sx-L20144985"        # id del ledger
         assert casa["market"] == "1X2"
         assert casa["source"] == "sxbet"
@@ -437,7 +437,7 @@ class TestGate:
         assert gate.block.stage == "market" and gate.block.name == "market_feed"
         assert gate.block.precedence == 4                  # dopo le autorita' umane
         assert gate.identity["gateway_id"] == DEFAULT_GATEWAY_ID
-        assert gate.identity["schema_version"] == "1.0"
+        assert gate.identity["schema_version"] == MARKET_SCHEMA_VERSION
         assert gate.identity["config_hash"]
 
     def test_gate_ignora_la_finestra_di_riuso(self):
@@ -466,7 +466,7 @@ class TestTracciabilita:
         snapshot = feed.refresh(request_id="giro-42", force=True)
         assert snapshot.request_id == "giro-42"
         assert snapshot.trace_id and snapshot.gateway_id == DEFAULT_GATEWAY_ID
-        assert snapshot.schema_version == "1.0" and snapshot.config_hash
+        assert snapshot.schema_version == MARKET_SCHEMA_VERSION and snapshot.config_hash
         evento = [e for e in sink.events if e["event"] == "feed.refreshed"][-1]
         for campo in ("request_id", "trace_id", "gateway_id", "schema_version",
                       "config_hash"):

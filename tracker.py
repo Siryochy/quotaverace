@@ -5,7 +5,7 @@ import math
 import sqlite3
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -156,6 +156,10 @@ def _get_conn():
     # decisione, stake e (dopo) ordine ed esito, cosi' si puo' misurare se i
     # gate avevano ragione ANCHE sulle righe non giocate (shadow).
     _ensure_decisions_table(c)
+    # Ledger quote MULTI-MERCATO (schema 2.0 di decision/market.py): una riga
+    # per quota, chiave (partita, mercato, linea, esito). Nasce vuoto e lo
+    # riempie l'ingestione delle quote (gateway `MarketQuotesGateway`).
+    _ensure_market_quotes_table(c)
     # Migrazione: colonna surface nella tabella signals (09/09)
     # per supportare il tracking delle superfici nel modulo tennis.
     sig_cols = [r[1] for r in c.execute("PRAGMA table_info(signals)")]
@@ -321,6 +325,421 @@ def _migrate_decisions(c) -> None:
     # Indice sullo STATO della validazione: e' il filtro del lavoro in attesa
     # (`get_decisions(status=...)`) e dell'audit "cosa non e' mai stato validato".
     c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_status ON decisions(status)")
+
+
+# --- Quote di mercato MULTI-MERCATO (schema 2.0 di decision/market.py) ------
+# Una riga per QUOTA, non per partita: il ledger deve ospitare piu' mercati
+# dello stesso fixture (1X2, OU 2.5, AH -0.75, BTTS, ...). La chiave e' la
+# stessa IDENTITA' del contratto (`MarketQuote.identity_key` = fixture_id +
+# market_type + line_key + selection): se cambia la chiave del contratto,
+# cambia questa tabella.
+#
+# Perche' la LINEA sta nella chiave: due totali 2.5 e 3.5 sono due mercati
+# diversi, e confonderli significherebbe saldare un esito col risultato di un
+# altro (la classe di bug del 09/09 sul match OU/1X2).
+#
+# `line_key` e' una STRINGA ('' per i mercati senza linea): e' la forma
+# canonica del contratto, cosi' 2.5 e 2.5000000001 non diventano due righe.
+# ⚠️ NULL su una colonna di chiave non e' una chiave: SQLite considera i NULL
+# distinti fra loro e ammetterebbe righe "uguali" all'infinito — le quattro
+# colonne della chiave sono quindi NOT NULL (difesa, non formalita').
+MARKET_QUOTE_KEYS = ("fixture_id", "market_type", "line_key", "selection")
+
+#: Colonne del ledger (nome, tipo SQLite) nell'ordine in cui vengono scritte:
+#: CREATE TABLE, migrazione e INSERT leggono tutte da qui (un solo posto in cui
+#: lo schema e' dichiarato).
+MARKET_QUOTE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("fixture_id", "TEXT"), ("market_type", "TEXT"), ("line_key", "TEXT"),
+    ("selection", "TEXT"), ("line", "REAL"), ("selection_label", "TEXT"),
+    ("ledger_esito", "TEXT"), ("price", "REAL"), ("implied_prob", "REAL"),
+    ("market_prob", "REAL"), ("liquidity", "REAL"), ("main_line", "INTEGER"),
+    ("origin", "TEXT"), ("derived_from_json", "TEXT"), ("source", "TEXT"),
+    ("gateway_id", "TEXT"), ("schema_version", "TEXT"), ("observed_at", "TEXT"),
+    ("kickoff", "TEXT"), ("event_name", "TEXT"), ("league", "TEXT"),
+    ("home", "TEXT"), ("away", "TEXT"), ("identity_key", "TEXT"),
+    ("quote_id", "TEXT"), ("extra_json", "TEXT"), ("updated_at", "TEXT"),
+)
+MARKET_QUOTE_FIELDS = tuple(name for name, _ in MARKET_QUOTE_COLUMNS)
+
+#: Rinomine DICHIARATE fra la riga del contratto (`MarketQuote.as_row()`) e le
+#: colonne del ledger: il contratto dice `odds`, lo schema dice `price`;
+#: `depth_usdc` -> `liquidity`; tuple/dict -> JSON. Gli altri campi si chiamano
+#: uguale. Un tripwire in `test_market_quotes_store.py` pretende che OGNI campo
+#: di `MARKET_ROW_FIELDS` finisca in una colonna: un campo nuovo del contratto
+#: non puo' sparire in silenzio.
+MARKET_QUOTE_SOURCE = {
+    "price": "odds",
+    "liquidity": "depth_usdc",
+    "derived_from_json": "derived_from",
+    "extra_json": "extra",
+}
+
+#: Colonne che NON arrivano dalla riga del contratto:
+#: - `implied_prob` e' CALCOLATA (1/price): aritmetica della forma, non una
+#:   scelta di strategia;
+#: - `market_prob` si scrive SOLO se il chiamante la porta (devig): il
+#:   devigging e' una misura dell'engine, il ledger non la inventa;
+#: - `updated_at` e' l'istante della scrittura (UTC ISO).
+MARKET_QUOTE_DERIVED = ("implied_prob", "market_prob", "updated_at")
+
+
+def _ensure_market_quotes_table(c) -> None:
+    """Ledger quote pronto all'uso: tabella -> colonne -> indici.
+
+    L'ORDINE conta (lezione del 14/09 su `decisions`): un `market_quotes`
+    creato da una versione precedente puo' avere meno colonne, quindi le
+    colonne mancanti e gli indici si gestiscono DOPO la CREATE TABLE —
+    altrimenti `_get_conn` fallisce all'avvio e con lui tutto il bot.
+    """
+    _create_market_quotes_table(c)
+    _migrate_market_quotes(c)
+
+
+def _create_market_quotes_table(c) -> None:
+    """Crea il ledger multi-mercato (idempotente)."""
+    defs = []
+    for name, kind in MARKET_QUOTE_COLUMNS:
+        if name in MARKET_QUOTE_KEYS:
+            defs.append(f"{name} {kind} NOT NULL")
+        elif name == "origin":
+            defs.append("origin TEXT NOT NULL DEFAULT 'native'")
+        elif name == "updated_at":
+            # TEXT e non TIMESTAMP: le date del ledger sono testo ISO e ogni
+            # confronto SQL va avvolto in datetime(...) — regola del 17/09.
+            defs.append("updated_at TEXT DEFAULT CURRENT_TIMESTAMP")
+        else:
+            defs.append(f"{name} {kind}")
+    defs.append("PRIMARY KEY (fixture_id, market_type, line_key, selection)")
+    c.execute("CREATE TABLE IF NOT EXISTS market_quotes (\n    "
+              + ",\n    ".join(defs) + ")")
+
+
+def _migrate_market_quotes(c) -> None:
+    """Colonne mancanti + indici di un `market_quotes` precedente (idempotente)."""
+    try:
+        cols = [r[1] for r in c.execute("PRAGMA table_info(market_quotes)")]
+    except sqlite3.OperationalError:
+        return
+    for name, kind in MARKET_QUOTE_COLUMNS:
+        if name in cols:
+            continue
+        if name in MARKET_QUOTE_KEYS:
+            # Una colonna di chiave non puo' essere NULL (vedi sopra): una riga
+            # migrata senza valore non deve diventare una chiave NULL.
+            c.execute(f"ALTER TABLE market_quotes ADD COLUMN {name} {kind} "
+                      "NOT NULL DEFAULT ''")
+        else:
+            # ALTER TABLE non accetta default non costanti (CURRENT_TIMESTAMP):
+            # `updated_at` nasce vuoto sulle righe migrate e si riempie alla
+            # prima riscrittura della riga.
+            c.execute(f"ALTER TABLE market_quotes ADD COLUMN {name} {kind}")
+    # Indice del LOOKUP del ciclo di auto-bet: lo snapshot di un mercato esatto
+    # (partita + mercato + linea) senza full table scan.
+    c.execute("CREATE INDEX IF NOT EXISTS idx_market_quotes_lookup "
+              "ON market_quotes(fixture_id, market_type, line_key)")
+    # Indice di AUDIT/analisi per mercato (es. tutti gli OU 2.5) che attraversa
+    # le partite: il composite della chiave non lo copre, perche' comincia dal
+    # fixture.
+    c.execute("CREATE INDEX IF NOT EXISTS idx_market_quotes_market "
+              "ON market_quotes(market_type, line_key)")
+
+
+def _utc_iso() -> str:
+    """Istante UTC in ISO-8601 (con offset): la data si scrive esplicita."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _quote_field(row, name):
+    """Lettura DIFENSIVA di un campo: una riga ostile non fa esplodere il lotto."""
+    try:
+        if hasattr(row, "as_row"):
+            row = row.as_row()
+        if hasattr(row, "get"):
+            return row.get(name)
+        return getattr(row, name, None)
+    except Exception:
+        return None
+
+
+def _quote_float(value):
+    """Float sicuro (None se non numerico): mai un'eccezione dal feed."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _quote_flag(value):
+    """Booleano a tre stati: None (non dichiarato) / 0 / 1."""
+    if value is None:
+        return None
+    return 1 if value else 0
+
+
+def _quote_json(value, fallback):
+    """Serializza una struttura per il ledger: non solleva MAI."""
+    payload = value if value is not None else fallback
+    try:
+        return json.dumps(payload, ensure_ascii=False, default=str)
+    except Exception:
+        return json.dumps(fallback, ensure_ascii=False, default=str)
+
+
+def _quote_load(text, fallback):
+    """Rilegge il JSON scritto dal ledger (riga corrotta -> fallback)."""
+    if text in (None, ""):
+        return fallback
+    try:
+        return json.loads(text)
+    except Exception:
+        return fallback
+
+
+def _market_quote_row(row) -> tuple:
+    """Normalizza una quota per l'upsert: (riga pronta, motivo di scarto).
+
+    Fail-safe e fail-closed insieme: una riga malformata viene SCARTATA (mai
+    scritta a meta') e contabilizzata dal chiamante, ma non solleva mai — una
+    quota sporca non deve impedire il salvataggio delle altre.
+    """
+    fixture_id = str(_quote_field(row, "fixture_id") or "").strip()
+    if not fixture_id:
+        return None, "fixture_id_mancante"
+    market_type = str(_quote_field(row, "market_type") or "").strip()
+    if not market_type:
+        return None, "market_type_mancante"
+    selection = str(_quote_field(row, "selection") or "").strip()
+    if not selection:
+        return None, "selection_mancante"
+    price = _quote_float(_quote_field(row, MARKET_QUOTE_SOURCE["price"]))
+    if price is None or price <= 0:
+        return None, "price_non_valido"
+    line = _quote_float(_quote_field(row, "line"))
+    raw_key = _quote_field(row, "line_key")
+    line_key = "" if raw_key is None else str(raw_key).strip()
+    if not line_key and line is not None:
+        # Mai fondere due linee nella stessa riga: un OU 2.5 e un OU 3.5 con la
+        # stessa `selection` collasserebbero nella stessa chiave e si
+        # salderebbe l'esito di un mercato con il risultato di un altro.
+        return None, "line_key_mancante"
+    # Copertura GENERICA: ogni colonna legge il suo campo dichiarato, cosi' un
+    # campo aggiunto allo schema non puo' restare fuori dal salvataggio.
+    prepared = {name: _quote_field(row, MARKET_QUOTE_SOURCE.get(name, name))
+                for name in MARKET_QUOTE_FIELDS}
+    prepared.update({
+        "fixture_id": fixture_id,
+        "market_type": market_type,
+        "selection": selection,
+        "line_key": line_key,
+        "line": line,
+        "selection_label": _quote_field(row, "selection_label"),
+        "ledger_esito": _quote_field(row, "ledger_esito") or selection,
+        "price": price,
+        "implied_prob": 1.0 / price,
+        "market_prob": _quote_float(_quote_field(row, "market_prob")),
+        "liquidity": _quote_float(_quote_field(row, MARKET_QUOTE_SOURCE["liquidity"])),
+        "main_line": _quote_flag(_quote_field(row, "main_line")),
+        "origin": str(_quote_field(row, "origin") or "native"),
+        "derived_from_json": _quote_json(
+            _quote_field(row, MARKET_QUOTE_SOURCE["derived_from_json"]), []),
+        "extra_json": _quote_json(
+            _quote_field(row, MARKET_QUOTE_SOURCE["extra_json"]), {}),
+        "updated_at": _utc_iso(),
+    })
+    return prepared, None
+
+
+def _market_quote_iter(rows):
+    """Itera le righe da salvare: lista, `FixtureQuotes` (as_rows) o singola."""
+    if hasattr(rows, "as_rows"):
+        return list(rows.as_rows())
+    if isinstance(rows, dict) or hasattr(rows, "as_row"):
+        return [rows]
+    try:
+        return list(rows)
+    except TypeError:
+        return [rows]
+
+
+def save_market_quotes(rows, conn=None) -> dict:
+    """Upsert delle quote multi-mercato (una riga per quota). Idempotente.
+
+    Una lettura ripetuta del palinsesto AGGIORNA `price`/`updated_at` della
+    riga esistente invece di duplicare (PRIMARY KEY composta + ON CONFLICT):
+    e' esattamente cio' che serve quando le quote fluttuano nella finestra
+    T-60 e il feed gira di continuo.
+
+    Ritorna {saved, skipped, fixtures, by_reason, error} e NON solleva mai:
+    l'ingestione e' telemetria, non deve fermare il giro (stessa regola del
+    feedback engine del 14/09).
+    """
+    try:
+        prepared_rows, rejected, fixtures = [], {}, set()
+        for row in _market_quote_iter(rows):
+            prepared, reason = _market_quote_row(row)
+            if prepared is None:
+                key = reason or "riga_non_valida"
+                rejected[key] = rejected.get(key, 0) + 1
+                continue
+            prepared_rows.append(prepared)
+            fixtures.add(prepared["fixture_id"])
+    except Exception as exc:                       # lotto non leggibile
+        logger.warning("market_quotes: lotto non leggibile (%s)", exc)
+        return {"saved": 0, "skipped": 0, "fixtures": 0, "by_reason": {},
+                "error": f"lotto non leggibile: {exc}"}
+    if rejected:
+        logger.warning("market_quotes: %s righe scartate %s",
+                       sum(rejected.values()), rejected)
+    if not prepared_rows:
+        return {"saved": 0, "skipped": sum(rejected.values()), "fixtures": 0,
+                "by_reason": rejected, "error": None}
+    own_conn = conn is None
+    if own_conn:
+        conn = _get_conn()
+    c = conn.cursor()
+    try:
+        _ensure_market_quotes_table(c)
+        cols = ", ".join(MARKET_QUOTE_FIELDS)
+        marks = ", ".join("?" * len(MARKET_QUOTE_FIELDS))
+        # Sulla riga esistente si aggiorna TUTTO tranne la chiave: la quota
+        # nuova sostituisce la vecchia (lo storico dei prezzi vive in
+        # `price_snapshots`, non qui).
+        updates = ", ".join(f"{name}=excluded.{name}"
+                            for name in MARKET_QUOTE_FIELDS
+                            if name not in MARKET_QUOTE_KEYS)
+        values = [tuple(row[name] for name in MARKET_QUOTE_FIELDS)
+                  for row in prepared_rows]
+        c.executemany(
+            f"INSERT INTO market_quotes ({cols}) VALUES ({marks}) "
+            f"ON CONFLICT({', '.join(MARKET_QUOTE_KEYS)}) DO UPDATE SET {updates}",
+            values)
+        if own_conn:
+            conn.commit()
+    except Exception as exc:                       # scrittura
+        logger.warning("market_quotes: salvataggio fallito (%s)", exc)
+        return {"saved": 0, "skipped": len(prepared_rows),
+                "fixtures": len(fixtures), "by_reason": rejected,
+                "error": str(exc)}
+    finally:
+        if own_conn:
+            conn.close()
+    return {"saved": len(prepared_rows), "skipped": sum(rejected.values()),
+            "fixtures": len(fixtures), "by_reason": rejected, "error": None}
+
+
+def _market_quote_from_row(row) -> dict:
+    """Riga del ledger -> dict leggibile (bool e JSON ripristinati)."""
+    data = dict(zip(MARKET_QUOTE_FIELDS, row))
+    main_line = data.get("main_line")
+    data["main_line"] = None if main_line is None else bool(main_line)
+    data["derived_from"] = _quote_load(data.pop("derived_from_json", None), [])
+    data["extra"] = _quote_load(data.pop("extra_json", None), {})
+    return data
+
+
+def get_market_quotes(fixture_id=None, market_type=None, line_key=None,
+                      selection=None, limit=None, conn=None) -> list[dict]:
+    """Snapshot delle quote salvate, filtrate per chiave (sola lettura)."""
+    where, params = [], []
+    for name, value in (("fixture_id", fixture_id),
+                        ("market_type", market_type),
+                        ("line_key", line_key),
+                        ("selection", selection)):
+        if value is None:
+            continue
+        where.append(f"{name} = ?")
+        params.append(value)
+    sql = f"SELECT {', '.join(MARKET_QUOTE_FIELDS)} FROM market_quotes"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY fixture_id, market_type, line_key, selection"
+    if limit:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    own_conn = conn is None
+    if own_conn:
+        conn = _get_conn()
+    try:
+        _ensure_market_quotes_table(conn.cursor())
+        rows = conn.execute(sql, tuple(params)).fetchall()
+    except Exception as exc:                       # lettura fallita
+        logger.warning("market_quotes: lettura fallita (%s)", exc)
+        return []
+    finally:
+        if own_conn:
+            conn.close()
+    return [_market_quote_from_row(row) for row in rows]
+
+
+def market_quote(fixture_id, market_type, selection, line_key=None,
+                 conn=None) -> Optional[dict]:
+    """La quota di un mercato ESATTO (lookup della finestra T-60).
+
+    None significa "non c'e' quella riga": il chiamante decide cosa farne —
+    qui non si inventa un prezzo.
+    """
+    rows = get_market_quotes(fixture_id=fixture_id, market_type=market_type,
+                             line_key="" if line_key is None else str(line_key),
+                             selection=selection, limit=1, conn=conn)
+    return rows[0] if rows else None
+
+
+def count_market_quotes(fixture_id=None, conn=None) -> int:
+    """Quante quote sono sul ledger (opzionalmente di una sola partita)."""
+    own_conn = conn is None
+    if own_conn:
+        conn = _get_conn()
+    try:
+        _ensure_market_quotes_table(conn.cursor())
+        if fixture_id is None:
+            row = conn.execute("SELECT COUNT(*) FROM market_quotes").fetchone()
+        else:
+            row = conn.execute("SELECT COUNT(*) FROM market_quotes WHERE fixture_id = ?",
+                               (fixture_id,)).fetchone()
+        return int(row[0] if row else 0)
+    except Exception as exc:
+        logger.warning("market_quotes: conteggio fallito (%s)", exc)
+        return 0
+    finally:
+        if own_conn:
+            conn.close()
+
+
+def prune_market_quotes(days=7, conn=None) -> int:
+    """Elimina le quote di partite giocate da oltre `days` giorni (default 7).
+
+    La tabella si aggiorna in upsert (quindi non cresce a ogni ciclo), ma i
+    fixture PASSATI resterebbero per sempre: senza potatura il volume cresce
+    comunque. Si guarda il kickoff e, per le righe che non lo portano,
+    l'istante di osservazione.
+
+    ⚠️ Ogni confronto di data e' avvolto in `datetime(...)` (regola del 17/09:
+    il ledger salva ISO con la 'T', il cutoff di SQLite usa lo spazio, e fra
+    stringhe il confronto sbaglia di ~un giorno).
+    """
+    window = f"-{max(1, int(days))} days"
+    own_conn = conn is None
+    if own_conn:
+        conn = _get_conn()
+    try:
+        _ensure_market_quotes_table(conn.cursor())
+        cur = conn.execute(
+            "DELETE FROM market_quotes "
+            "WHERE datetime(COALESCE(kickoff, observed_at)) < datetime('now', ?)",
+            (window,))
+        removed = int(cur.rowcount or 0)
+        if own_conn:
+            conn.commit()
+        return removed
+    except Exception as exc:
+        logger.warning("market_quotes: potatura fallita (%s)", exc)
+        return 0
+    finally:
+        if own_conn:
+            conn.close()
 
 
 def _decision_flat_row(record) -> dict:
@@ -796,6 +1215,42 @@ def _norm_team(name):
     return " ".join(w for w in s.split() if w not in ("fc", "cf"))
 
 
+#: Linea di default di un esito Over/Under senza numero esplicito: le righe
+#: OU saldate prima del multi-mercato (19/09) erano tutte Over/Under 2.5.
+OU_DEFAULT_LINE = 2.5
+
+
+def ou_line(esito, default: float = OU_DEFAULT_LINE) -> float:
+    """Linea di un esito Over/Under letta dal testo ('Over 3.5' -> 3.5).
+
+    Il formato del ledger e' 'Over 2.5' / 'Under 3.25' (vedi
+    `multi_market.ledger_esito`): si prende l'ULTIMO token numerico. Senza
+    numero si ricade su `OU_DEFAULT_LINE` (comportamento storico).
+    """
+    for token in reversed(str(esito or "").split()):
+        try:
+            return float(token.replace("+", ""))
+        except (TypeError, ValueError):
+            continue
+    try:
+        return float(default)
+    except (TypeError, ValueError):
+        return OU_DEFAULT_LINE
+
+
+def ou_won(side: str, total: float, line: float):
+    """(won, push) di un Over/Under con la sua linea.
+
+    Push solo sulle linee INTERE (total == line): li' la puntata e'
+    restituita e il P/L e' 0, non una perdita. Sulle linee .5 non esiste.
+    """
+    if total > line:
+        return side == "over", False
+    if total < line:
+        return side == "under", False
+    return None, True
+
+
 def _esito_won(esito, sh, sa):
     """True/False se l'esito e' vincente col risultato (sh, sa); None se non riconosciuto.
 
@@ -804,12 +1259,15 @@ def _esito_won(esito, sh, sa):
     sottostringa: 'Blackburn Rovers' contiene 'over' dentro 'Rovers' e
     veniva saldato come Over 2.5 (won con gol 1+2=3) invece che come
     sconfitta della squadra (bug pred #98).
+
+    Multi-mercato (19/09): la linea si legge dall'esito ('Over 3.5'), quindi
+    vale per QUALUNQUE linea e non solo per il 2.5.
     """
     el = str(esito or "").lower().strip()
     first = (el.split() or [""])[0]
     if first in ("over", "under"):
-        total = sh + sa
-        return total >= 3 if first == "over" else total <= 2
+        won, push = ou_won(first, sh + sa, ou_line(el))
+        return False if push else won
     if "btts" in el or "gol gol" in el:
         return sh > 0 and sa > 0
     if el == "1" or "casa" in el:
@@ -892,8 +1350,10 @@ def _esito_possible(mercato, esito, sh, sa, home=None, away=None):
     # 'Blackburn Rovers' contiene 'over' (in 'Rovers') ma e' un 1X2.
     first = (el.split() or [""])[0]
     if first in ("over", "under"):
-        total = sh + sa
-        return total >= 3 if first == "over" else total <= 2
+        won, push = ou_won(first, sh + sa, ou_line(el))
+        # Push (linea intera con total == linea): il verdetto 'push' non
+        # contraddice i gol, quindi l'esito non e' impossibile.
+        return True if push else won
     if "btts" in el or "gol gol" in el:
         return sh > 0 and sa > 0
     return None
@@ -1195,8 +1655,10 @@ def _prediction_outcome(mercato, esito, quota, sh, sa, home, away):
     # come Over 2.5 (bug 09/09, bloccato dal sanity check su pred #98).
     first = (el.split() or [""])[0]
     if first in ("over", "under"):
-        total = sh + sa
-        won = total >= 3 if first == "over" else total <= 2
+        line = ou_line(el)
+        won, push = ou_won(first, sh + sa, line)
+        if push:
+            return "push", 0.0
     elif "btts" in el or "gol gol" in el:
         won = (sh > 0 and sa > 0)
     elif el in ("draw", "pareggio", "x"):

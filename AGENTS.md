@@ -3787,3 +3787,419 @@ suo hash (`status ACTIVE`, punteggi `None` prima del fischio d'inizio),
 `sx_signals_job` ogni 15'. Con il fix si saldera' col **punteggio
 finale**: il percorso SX-native tace finche' l'evento non ha almeno 120'
 di gioco e il percorso the-odds-api non accetta piu' partite non concluse.
+
+### Contratto `WriteCLVCommand` + valutatore CLV puro (17/09/2026, sera)
+
+Direttiva del proprietario: il modulo di valutazione CLV deve calcolare la
+differenza di quota **in modo puro** e restituire all'orchestratore
+un'istanza di `WriteCLVCommand` (modello Pydantic immutabile) SENZA gestire
+la scrittura su database — stessa filosofia del Command pattern del 15/09:
+il motore emette comandi, i gateway eseguono.
+
+**1) IL CONTRATTO (`decision/commands.py`).** Nuova classe
+`WriteCLVCommand` (frozen, `model_config = {"frozen": True}`) con i soli
+campi richiesti: `signal_id`, `market_id` (l'id del match sul ledger, la
+chiave di `tracker.save_clv`), `signal_odds`, `closing_odds` (entrambe
+`> 1.0`), `timestamp`, `source`. E' il contratto RESTITUITO dal valutatore
+all'orchestratore; `WriteCLVPayload` e' il payload del comando generico
+(`Command(kind=WRITE_CLV)`) che il `Dispatcher` instrada, con i campi
+ricalcati sulla firma di `tracker.save_clv` piu' `outcome` e `source`.
+Nuovo `CommandKind.WRITE_CLV = "write_clv"` in CODA a `COMMAND_ORDER`
+(dopo le notifiche: il campione CLV e' audit, non denaro — nessun test
+preesistente dipende dalla posizione). Fabbrica `write_clv_command()` con
+`dedup_key` stabile per (match, esito, quote): lo stesso campione non si
+registra due volte. La differenza di quota NON e' un campo del comando: e'
+una MISURA (`clv_diff`), calcolata dal valutatore.
+
+**2) IL VALUTATORE PURO (`decision/clv.py`, nuovo).** `ClvInput`
+(osservazione, frozen) -> `evaluate_clv()` -> `ClvEvaluation` con
+`command` (l'istanza `WriteCLVCommand`) e `dispatch` (il `Command`
+per il dispatcher), costruiti INSIEME dagli stessi valori. **Zero DB, zero
+rete**: `clv_diff()` delega a `market_calib.clv_raw` (formula UNICA del
+progetto, import pigro — nessuna copia della formula). Esiti
+machine-readable:
+- `ok` -> comando emesso;
+- `skipped` -> niente da misurare ANCORA (closing assente = normale prima
+  del fischio; segnale assente): NON e' un errore, nessun comando;
+- `rejected` -> dati malformati (market_id vuoto, quote <= 1.0, payload
+  rifiutato dal contratto, esito vuoto): il comando NON nasce, mai corretto
+  in silenzio, MAI un'eccezione verso l'orchestratore.
+Flag `single_sample` quando closing == segnale (l'eco che il report esclude
+gia' dalle medie CLV). `evaluate_clv_many` fail-safe su lotti ostili
+(osservazione che esplode = `rejected`, non traceback). La valutazione
+funziona con `sqlite3.connect` avvelenato (tripwire nel test).
+
+**3) LA SCRITTURA STA NEL GATEWAY (`decision/gateways.ClvGateway`,
+nuovo).** Gestisce solo `WRITE_CLV`, `audit_only = True` (telemetria di
+mercato: il `Dispatcher` la esclude dal conteggio shadow). Writer
+iniettabile (i test girano senza DB); il default DELEGA a
+`tracker.save_clv` — l'esecutore di produzione gia' testato, mai
+reimplementato (stessa regola di `PlaceOrderGateway` verso
+`auto_bet._live_fill`), import PIGRO. Convenzione sulla firma a una quota
+di `save_clv`: closing == segnale -> `signal_started=True` (seme della
+quota segnale), altrimenti aggiorna la chiusura. Fail-safe: payload
+incompleto non arriva mai al writer, un writer che esplode diventa
+`CommandResult(ok=False)`, mai un'eccezione.
+
+**4) EXPORT (`decision/__init__.py`).** Aggiunti: `clv`,
+`WriteCLVCommand`, `WriteCLVPayload`, `write_clv_command`, `ClvGateway`,
+`evaluate_clv`, `evaluate_clv_many`, `ClvInput`, `ClvEvaluation`,
+`clv_diff`, `STATUS_OK/SKIPPED/REJECTED`.
+
+**5) TEST (`test_decision_clv.py`, 35 verdi, TUTTI offline).** Contratto:
+campi esatti, immutabilita' (frozen) del comando E dell'esito, JSON-safe.
+Purezza: sqlite3 avvelenato, `import decision.clv` non carica
+tracker/auto_bet/bot. Skip/reject: closing mancante, quote <= 1.0, market_id
+vuoto, esito vuoto -> `rejected` senza eccezioni; lotto ostile. Coerenza
+command/dispatch e dedup_key stabile. Gateway: writer iniettato, seme
+iniziale, fail-safe, `audit_only`, default writer verificato su ledger
+temporaneo (`temp_db` locale: `signal_quota` intatto + `closing_quota`
+aggiornata). Orchestratore: dispatch end-to-end (report `shadow=True` perche'
+il gateway e' audit-only, verifica voluta), shadow registra senza scrivere,
+`write_clv` senza gateway finisce negli errori (mai silenzioso).
+Regressioni verdi: `test_decision_commands`, `test_decision_shadow`,
+`test_decision_validation`, `test_clv`, `test_clv_vig_free`,
+`test_decision_pipeline`, `test_decision_adapters`, `test_decision_limits`,
+`test_decision_compare`, `test_decision_guards`,
+`test_decision_observability`, `test_decision_market`, `test_decision_feed`,
+`test_decision_review*`, `test_web_api`, `test_secret_hygiene`, `test_bot`,
+`test_auto_bet*`, `test_risk_guards`. `compileall` OK.
+
+**6) WIRING IN SHADOW MODE (17/09, stessa sera) — il percorso gira IN
+PARALLELO alla catena, mai al posto.** In `decision/shadow.run_shadow` (il
+punto dove la catena valuta gia' ogni giro) per OGNI segnale valutato gira
+anche il percorso laterale CLV: `evaluate_clv` (puro) -> esecuzione
+DIRETTA del comando sul `ClvGateway` + REGISTRAZIONE sullo stesso
+`ShadowGateway` del giro (il registro JSONL mostra il `write_clv` che
+sarebbe stato scritto, con dedup per `dedup_key`: un campione per misura).
+- **Scrittura**: il writer del gateway e' quello SHADOW (evento
+  `clv.shadow_sample` negli eventi di osservabilita') — MAI
+  `tracker.save_clv` da questo percorso: il ledger `clv_history` resta di
+  `fixture_engine` (verificato: 0 righe dopo giri con segnali). Il writer
+  REALE si passa solo esplicitamente (`clv_writer=`): e' la via per
+  collaudare offline la scrittura vera senza toccare la produzione.
+- **Closing**: la quota corrente del feed (lo snapshot in-process del
+  refresh forzato dalla catena). Senza feed (es. `DECISION_FEED_ENABLED=0`)
+  la valutazione e' `skipped` con motivo `closing_missing`: onesta', non
+  errore — il campione si prendera' nei giri col feed validato.
+- **Riepilogo**: `out["clv"]` = {enabled, ok, skipped, rejected,
+  dispatched, errors, avg_diff} — il confronto col percorso attuale resta
+  una MISURA leggibile a colpo d'occhio. Eventi `clv.lateral` (ok/skipped)
+  e `clv.lateral_error` con request/trace/span id; span `clv.write` per
+  l'esecuzione.
+- **Fail-safe**: un'eccezione dentro la valutazione diventa `rejected` +
+  `errors` contati — il giro shadow e il job di `auto_bet` non si rompono
+  mai per il CLV. Con le puntate ferme (kill switch) il percorso CLV non
+  gira affatto: il fail-fast della shadow resta la prima autorita'.
+- **Architettura**: niente Dispatcher finto per il percorso laterale — il
+  `Dispatcher` instrada PIANI (record + comandi); qui c'e' UN comando e UN
+  gateway audit-only, quindi esecuzione diretta `clv_gw.execute(...)`. La
+  registrazione nel registro e' delegata allo stesso `ShadowGateway` del
+  giro (stesso formato, stessa dedup): zero formato nuovo da mantenere.
+- **Interruttore**: `DECISION_CLV_SHADOW` (default ON, env letta a ogni
+  giro) oppure `clv_enabled=False` da codice; spento non aggiunge nulla al
+  riepilogo (`enabled: False`, contatori a zero).
+- **IaC**: `DECISION_CLV_SHADOW` dichiarata `preserve()` nel blocco
+  `decisionEnv` di `.railway/railway.ts` (solo servizio `api`).
+
+**7) TEST DEL WIRING (`test_decision_clv_wiring.py`, 14 verdi, TUTTI
+offline).** In parallelo mai al posto (0 righe su `clv_history` dopo un
+giro con comando emesso); campione nel registro (`by_kind.write_clv`);
+puntate ferme -> CLV spento; ok con closing dal feed (evento + diff
+esatta); skipped senza closing (motivo `closing_missing`);
+tracciabilita' (trace_id + request_id del giro); segnale ostile ->
+`rejected` senza traceback e giro intatto; interruttore flag/env; writer
+reale SOLO se iniettato esplicitamente; dedup del registro (2 giri -> 1
+`write_clv`); media `avg_diff` su piu' segnali. **Bug trovato durante lo
+smoke**: la prima versione chiamava un inesistente `dispatcher.execute`
+su un `CommandPlan` fabbricato ad hoc — sostituito dall'esecuzione
+diretta + registrazione (vedi punto 6): lo smoke ha fatto da prova del
+campo, non solo dei numeri.
+
+**8) SMOKE E PRODUZIONE.** Smoke end-to-end: i tre esiti tracciati con
+trace_id (ok dispatched con diff 0.0667; skipped con `closing_missing`;
+rejected su valutazione ostile), registro con `write_clv: 1` dedup.
+Percorso di produzione reale: `auto_bet._shadow_run(mode="live",
+bankroll=35.98)` su ledger temporaneo con un segnale aperto -> 1 segnale
+valutato, `clv.enabled True`, `skipped=1` (conftest offline senza feed),
+`errors=0`, **0 righe su `clv_history`**. **Nessuna regressione sul
+flusso `fixture_engine`**: `git diff` vuoto su `fixture_engine.py`/
+`sx_signals.py`/`tracker.py` (il `save_clv` di produzione resta in
+`fixture_engine._analyze_match`), suite verdi su value_filter/
+sx_signals/clv/market_calib/auto_bet*/bot + tutto il pacchetto `decision`.
+⚠️ In produzione il CLV ufficiale resta quello di `fixture_engine`:
+quello della catena e' la MISURA in parallelo (come la shadow) — la
+scrittura vera via `ClvGateway` partirà solo al passo 3 (percorso
+Command), dopo il confronto dei registri.
+
+### Scala lo scanner a TUTTI i mercati SX — passo 1: contratti 2.0 + ledger `market_quotes` (18/09/2026)
+
+Direttiva del proprietario: **lo scanner non deve piu' limitarsi al 1X2** — deve
+estrarre, salvare e analizzare tutte le opzioni di mercato offerte da SX Bet per
+ogni fixture, in tre passi (1 ingestion, 2 batching API, 3 Poisson
+multi-mercato). **Questo e' il passo 1**, con il gateway SQLite.
+
+**⚠️ PRIMA DI SCRIVERE: cosa SX pubblica DAVVERO (non a memoria).** Verificato
+sulla doc ufficiale (`docs.sx.bet/api-reference/market-types`, letta il 18/09)
+**e** con un probe reale su `GET /markets/active` (`sportIds=5`, lettura
+pubblica, zero crediti):
+
+| mercato richiesto | tipo SX | linee | attivo sul calcio (18/09) |
+|---|---|---|---|
+| 1X2 | **1** | no | ✅ 100 mercati |
+| Over/Under | **2** | sì (quarter-line) | ✅ 100 |
+| Asian Handicap | **3** | sì (quarter-line) | ✅ 100 |
+| **BTTS** | **17** | no | ⚠️ tipo ufficiale ESISTE, **0 mercati attivi** |
+| Double Chance | **non esiste** | — | derivabile dal 1X2 |
+| Risultato Esatto | **non esiste** | — | derivabile da Poisson (passo 3) |
+
+Vivi ma NON modellati (dichiarati in `SX_TYPES_NOT_MODELLED`, con il motivo):
+52 = "12 senza pareggio" (100 mercati, liquido — collide con l'alias legacy
+`"12"→1X2`, quindi NON modellato), 226, 835, 77, 63. **"Non modellato" non vuol
+dire "inesistente"**: chi legge il codice deve sapere cosa manca e perche', senza
+ri-scoprirlo. Conseguenza di progetto: OU/AH/BTTS sono **nativi**, DC e CS sono
+**derivati** — e il contratto pretende che la provenienza sia dichiarata, non
+inventata.
+
+**1) IL REGISTRO DEI MERCATI (`decision/market.py`, schema 2.0).**
+`MARKET_SCHEMA_VERSION` 1.0 → **2.0**. `MarketType` (str, Enum: `1X2`, `OU`,
+`AH`, `BTTS`, `DC`, `CS`) + `MarketTypeSpec` (frozen) con `selections`,
+`has_lines`, `quarter_line_eligible`, `line_bounds`, `native`,
+`source_type_ids` (es. `("sxbet", 3)`), `derivable_from`, `requires_score`.
+`MARKET_SPECS` e' la **tavola di dati** (niente `if` sparsi); `SUPPORTED_MARKETS`
+e `MARKET_SELECTIONS` sono **derivati dal registro** — una fonte sola, cosi' un
+mercato nuovo non puo' entrare in un posto e non nell'altro. `spec_for()`,
+`market_type_of()`, `SX_TYPE_IDS`, `SX_LINE_BEARING_TYPES`,
+`SX_QUARTER_LINE_TYPES` (per il passo 2: decidere `onlyMainLine` e normalizzare
+la linea).
+
+**2) `MarketQuote` — le aggiunte sostanziali.** `market_type` (tipizzata,
+coerente con `market`), **`line`** (2.5 / -0.75), `main_line`, **`origin`**
+(`native` | `derived`), `derived_from`. Due validatori nuovi: `_resolve_market`
+(prima dei tipi: `market` e `market_type` che si contraddicono →
+`market_type_mismatch`) e `_check_market_shape` (dopo: **linea obbligatoria dove
+serve, vietata dove non serve**; quarter-line solo se ammessa; bounds; gli esiti
+del Risultato Esatto validati come punteggio). Cross-check mercato/esito
+invariato e esteso ai mercati nuovi: e' la classe del caso 09/09 (`over` saldato
+su un 1X2).
+
+**3) `FixtureQuotes` — N mercati di UNA partita.** Contenitore con le
+INVARIANTI di gruppo: tutte le quote stesso `fixture_id`, kickoff coerente **fra
+loro** (non solo col contenitore: coerenza resa simmetrica durante i test),
+`fixture_id`/esiti derivabili, `as_rows()` per il ledger. E' l'oggetto che il
+feed produrra' per fixture nel passo 2.
+
+**4) `as_row()` / `MARKET_ROW_FIELDS` — il ponte verso il ledger.** 24 campi
+piatti, fra cui `line_key` (stringa canonica, `''` per i mercati senza linea),
+`ledger_esito` (`"Over 2.5"`, `"Home -0.75"` — **pronto per `ml_audit`**),
+`identity_key`, `quote_id`, `derived_from`.
+
+**5) IL LEDGER `tracker.market_quotes`.** Deve rispettare esattamente la
+granularita' di `as_row()`: **PRIMARY KEY (fixture_id, market_type, line_key,
+selection)** — e' cio' che rende possibili l'inserimento multi-mercato e gli
+**upsert continui** quando le quote fluttuano in finestra T-60.
+- `MARKET_QUOTE_COLUMNS` e' l'UNICA dichiarazione dello schema (CREATE TABLE,
+  migrazione e INSERT leggono tutte da li'); `MARKET_QUOTE_SOURCE` dichiara le
+  rinomine (`odds`→`price`, `depth_usdc`→`liquidity`, tuple/dict → JSON) e un
+  tripwire pretende che **ogni** campo di `MARKET_ROW_FIELDS` finisca in una
+  colonna: un campo nuovo del contratto non puo' sparire in silenzio.
+- **`_ensure_market_quotes_table` ordina tabella → colonne → indici** (lezione
+  del 14/09 su `decisions`): con gli indici prima delle colonne `_get_conn`
+  fallirebbe all'avvio e con lui il bot. La migrazione e' idempotente e le
+  colonne di chiave migrate prendono `NOT NULL DEFAULT ''` (⚠️ nella DDL le 4
+  colonne di chiave sono `NOT NULL`: **su SQLite un NULL non e' una chiave** —
+  i NULL sono distinti fra loro, quindi la tabella ammetterebbe righe "uguali"
+  all'infinito).
+- Due indici: `idx_market_quotes_lookup` (fixture+mercato+linea, come da
+  specifica: il lookup del ciclo auto-bet) **e** `idx_market_quotes_market`
+  (mercato+linea, che il composite della chiave non copre perche' comincia dal
+  fixture: serve all'audit "tutti gli OU 2.5").
+- `save_market_quotes(rows)` = **upsert** `ON CONFLICT(...) DO UPDATE SET` di
+  tutto tranne la chiave: una lettura ripetuta del palinsesto aggiorna
+  `price`/`updated_at` senza duplicare ne' sollevare violazioni PK. Ritorna
+  `{saved, skipped, fixtures, by_reason, error}` e **non solleva mai** (come il
+  feedback engine del 14/09: l'ingestione e' telemetria, non deve fermare il
+  giro). Difese: righe senza `fixture_id`/`market_type`/`selection`/prezzo
+  valido scartate e contate; **due linee MAI fuse nella stessa riga** (un OU 2.5
+  e un OU 3.5 collasserebbero sulla stessa chiave e si salderebbe l'esito di un
+  mercato col risultato di un altro); lotto ostile che non fa cadere il
+  salvataggio. Letture: `quotes_for_fixture()`, `count_market_quotes()`,
+  `prune_market_quotes(days)`.
+
+**6) DEVIZIONI DICHIARATE dallo schema proposto** (scelte, non dimenticanze):
+- **`price` non ha il vincolo NOT NULL.** Su SQLite un vincolo non si puo'
+  AGGIUNGERE a una tabella esistente, quindi su un DB gia' migrato il NOT NULL
+  varrebbe solo per i DB freschi: una garanzia che sembra piu' forte di quella
+  che e'. Il prezzo si valida al CONFINE (`_market_quote_row` scarta
+  `price_non_valido`), dove la difesa vale su ogni DB.
+- **`updated_at` e' TEXT con `DEFAULT CURRENT_TIMESTAMP`** (non TIMESTAMP):
+  regola del 17/09 — le date del ledger sono testo ISO e **ogni confronto SQL va
+  avvolto in `datetime(...)`**. Per le righe migrate da una tabella precedente
+  `updated_at` nasce vuoto (ALTER TABLE non accetta default non costanti) e si
+  riempie alla prima riscrittura.
+- Colonne in piu' rispetto alla specifica (nessuna in meno): `line`,
+  `selection_label`, `source`, `gateway_id`, `schema_version`, `observed_at`,
+  `kickoff`, `event_name`, `league`, `home`, `away`, `identity_key`, `quote_id`,
+  `extra_json` — servono al contratto e all'audit, e il ledger non e' un
+  sottoinsieme del contratto.
+- `main_line` e' **INTEGER** (0/1/NULL), non `BOOLEAN`: e' l'affinita' nativa di
+  SQLite e il valore arriva dal contratto gia' normalizzato a flag.
+- **La creazione idempotente e' agganciata a `_get_conn`** (riga accanto a
+  `_ensure_decisions_table`, quindi **all'avvio** del bot), non a un gateway: il
+  ledger e' di `tracker.py` come tutti gli altri e i gateway di `decision/`
+  restano dei semplici esecutori (il nome "CLVStorageGateway" della specifica
+  non esiste nel progetto: il gateway del CLV e' `ClvGateway`, e per le quote
+  `MarketQuotesGateway`).
+
+**7) IL COMANDO (`decision/commands.py`).** `CommandKind.SAVE_MARKET_QUOTES` +
+`SaveQuotesPayload` (almeno una riga: un upsert senza righe non e' un effetto e
+non deve nemmeno nascere) + `save_quotes_command(rows, ...)` con `dedup_key` che
+**cambia col PREZZO**: lo stesso palinsesto letto due volte non produce due
+comandi (il registro shadow non si riempie di ripetizioni), ma un movimento di
+quota in finestra T-60 si'.
+⚠️ **POSIZIONE CAMBIATA rispetto al CLV del 17/09.** `COMMAND_ORDER` ora e'
+`SAVE_MARKET_QUOTES → PERSIST_DECISION → PLACE_ORDER → NOTIFY_OPERATORS →
+WRITE_CLV`: la regola e' **"prima l'EVIDENZA, poi l'effetto"** (e' gia' il
+motivo per cui `persist_decision` precede `place_order`) e lo snapshot di
+mercato e' l'evidenza del PREZZO su cui la decisione e' stata presa. Il CLV, che
+si puo' misurare solo a cose fatte, **resta l'ultimo** (la scelta del 17/09 non
+cambia). Il tripwire che difende l'invariante e' `test_prima_evidenza_poi_effetto`
+(`test_market_quotes_store.py`), e i due test del 17/09 che assumevano
+`WRITE_CLV` in coda **restano verdi senza modifiche**.
+
+**8) IL GATEWAY (`decision/gateways.MarketQuotesGateway`).** Scrive su
+`market_quotes`; `audit_only = True` (sono **dati** di mercato, non un effetto
+sul mondo: il `Dispatcher` non le conta come esecuzione reale). `writer`
+iniettabile (i test girano senza DB) e il default DELEGA a
+`tracker.save_market_quotes` — l'esecutore di produzione gia' testato, mai
+reimplementato (stessa regola di `ClvGateway`→`save_clv` e
+`PlaceOrderGateway`→`auto_bet._live_fill`), con **import pigro** di `tracker`
+(il tripwire "`import decision` non carica la produzione" resta verde).
+⚠️ **NON e' collegato alla shadow mode**: la shadow gira ogni 60s e deve restare
+senza scritture; il writer reale si passa esplicitamente, come per il CLV
+laterale. Quindi in produzione **zero scritture** finche' il passo 2 non
+collega il feed.
+
+**9) TEST.** `test_market_quotes_store.py` (**34 verdi, tutti OFFLINE**: SQLite
+temporaneo via monkeypatch di `tracker.DB_PATH`, nessuna rete, nessun provider,
+zero crediti): schema/chiave composta/`NOT NULL`/indici, migrazione idempotente
+su tabella parziale, upsert che aggiorna senza duplicare, due linee mai fuse,
+lotto ostile, copertura di `MARKET_ROW_FIELDS`, gateway (scrittura, `audit_only`,
+shadow senza effetti), invariante dell'ordine dei comandi.
+`test_decision_market_multi.py` (**144 verdi**) copre il registro dei tipi, le
+validazioni incrociate, `FixtureQuotes` e le derivazioni dichiarate;
+`test_decision_market.py` (**120**) resta la suite del contratto 1.0→2.0.
+Regressioni verdi: **pacchetto `decision` = 812 test** (5'17"), `test_auto_bet*`
++ `test_favourites_only` + `test_sx_signals` + `test_t60_breakers` +
+`test_league_gate` (156), `test_bot` + `test_secret_hygiene` + `test_risk_guards`
++ `test_scores_parsing` + `test_sx_native_settlement` +
+`test_settlement_watchdog` + `test_liquidity_monitor` (129).
+`verify_guardrails.py`: **A–G tutti bloccano** (invariato). `compileall` OK, 0
+marker di conflitto. **Due bug reali trovati dai miei stessi test**: in `as_row`
+usavo `self.market.value` (refuso, doveva essere `self.market_type.value`) e la
+coerenza del kickoff fra quote sorelle non era simmetrica.
+
+**10) PASSO 1 COMPLETO — cosa resta.** Passo **2** (ottimizzazione API): il feed
+deve scaricare i book di TUTTI i mercati della partita rispettando i vincoli di
+SX — `betGroup` al posto di un `type` per chiamata (⚠️ `type` e `betGroup` sono
+**mutuamente esclusivi**), `onlyMainLine` per non scaricare 40 linee di OU,
+batching/parallelismo misurato (la `_books_parallel` di `sx_signals` e' il
+precedente da riusare, non da riscrivere). Passo **3** (motore matematico):
+derivare DC e CS dalla distribuzione di Poisson gia' in `poisson_engine`
+(correlazione di Dixon-Coles inclusa), con i mercati NATIVI (OU/AH/BTTS) presi
+dal mercato e i DERIVATI dichiarati `origin="derived"` + `derived_from`, cosi'
+un esito derivato non si confonde mai con uno osservato.
+
+### Multi-mercato OU/AH ATTIVO: AH live, OU in shadow (19/09/2026)
+
+Direttiva del proprietario: **niente attese** — implementare subito i mercati
+Over/Under e Asian Handicap collegando i calcoli di Poisson alla tabella
+`market_quotes` e all'executor degli ordini, con una configurazione asimmetrica:
+
+    ENABLE_LIVE_AH=1  -> l'Asian Handicap piazza ORDINI REALI subito;
+    ENABLE_LIVE_OU=0  -> l'Over/Under resta SHADOW/TELEMETRIA (il leak storico
+                         -6.8% su 924 bet va rimisurato sulla corsia nuova
+                         prima di rimetterci denaro).
+
+**Nuovo modulo `multi_market.py`** (top-level, come `sx_signals`), catena in 4 passi:
+
+1. **INGESTIONE** (`ingest`): discovery dei mercati SX **type 2 (OU)** e
+   **type 3 (AH)** dall'API PUBBLICA (zero chiavi, zero crediti, zero ordini),
+   order book taker con la STESSA lettura di `sx_signals` (`_books_parallel`),
+   righe validate dal **contratto 2.0** (`decision.market.parse_quote`) e
+   upsert su `tracker.save_market_quotes`. Il ledger `market_quotes` era vuoto:
+   senza questo passo il multi-mercato non avrebbe avuto nulla da analizzare.
+2. **ANALISI** (`analyze_fixture`): per ogni (mercato, linea) — devig a 2 esiti
+   (`market_implied`), prob. del modello **push-aware** e blend
+   (`adjusted_probability`) + `is_sane` (gli stessi gate del 1X2, con
+   `favourites_only=False` perche' il lato favorito e' selezionato prima:
+   mercato a 2 esiti, quota in fascia 1.30-1.80, EV >= 2%, edge >= 3pp,
+   libro abbastanza profondo).
+3. **LEDGER** (`scan`): le previsioni entrano in `predictions` con mercato
+   `OU`/`AH` ed esito in formato ledger (`Over 2.5`, `Home -0.75`), quindi il
+   settlement e la calibrazione per mercato li misurano. Vengono registrate SOLO
+   le linee che contano (la linea giocabile coi suoi due lati, altrimenti il
+   miglior candidato scartato): lo snapshot COMPLETO di tutti i mercati vive in
+   `market_quotes`, il ledger previsioni non va riempito di migliaia di righe.
+4. **ORDINI** (`live_picks` + `order_target`): `auto_bet.run_today_bets`
+   concatena `_today_value_picks()` (1X2) + `_multi_market_picks()`; tutti i
+   guardrail esistenti valgono identici (T-60, stop-loss, CB2, cap, gate di
+   mercato, dedup `bet_exists_open`). L'unica differenza tra le corsie e' il
+   **tipo id + la LINEA**, risolti da `execution_engine.resolve_market_for`.
+
+**Modello push-aware (`poisson_engine.ou_outcome_probs`, nuova)**: gemella di
+`ah_outcome_probs`. Ritorna (p_win, p_push, p_lose) e tratta il **push** (linea
+INTERA con totale esattamente uguale alla linea: puntata restituita, P/L 0) e le
+quarter line come due mezze puntate. L'EV e' esatto,
+`EV = p_win x (quota - 1) - p_lose` — non derivato da una probabilita'
+approssimata. La probabilita' "efficace" `p_win + 0.5 x p_push` serve solo al
+confronto con la prob. fair devigata (edge/blend).
+
+**Settlement OU line-aware (`tracker`)**: `_prediction_outcome`, `_esito_won` e
+`_esito_possible` leggevano il 2.5 FISSO; ora `ou_line(esito)` estrae la linea
+dal testo (`Over 3.25` -> 3.25, default 2.5 per le righe storiche) e `ou_won`
+distingue push (linea intera) da perdita. Comportamento sul 2.5 invariato
+(verificato dai test).
+
+**Resolver a linea (`execution_engine`)**: il 1X2 di SX e' 3 mercati binari
+type 1; OU/AH sono type 2/3 con LINEA. `SxBetProvider.list_market_catalogue`
+accetta ora `market_type_ids` e restituisce `market_type_id` e `line` (letta dal
+NOME dell'esito, la fonte piu' affidabile, con fallback sul campo se plausibile).
+Nuova `resolve_market_for(...)`: fail-closed su provider non sxbet, type non
+mappato, evento non univoco, **linea diversa** (un OU 3.5 non e' un OU 2.5) o
+lato non riconoscibile. Il grouping evento (nomi + kickoff) e' stato ESTRATTO in
+`_unique_event_markets` e riusato da `resolve_match_market`: due copie
+divergerebbero.
+
+**Job**: `bot.multi_market_job` ogni 15' (`MM_ENABLED=0` per spegnerlo), stesso
+intervallo dello scan 1X2.
+
+**BUG TROVATO DAI TEST (fixato)**: il refactor di `resolve_match_market` aveva
+lasciato l'uso di `hk`/`ak` senza la loro definizione -> `NameError` su OGNI
+ordine 1X2 live (`test_auto_bet_live` l'ha colto: 2 test rossi, poi verdi).
+
+**Diagnostica**: CLI `venv/bin/python multi_market.py ingest|scan|picks|report
+[--json]` (report = quote sul ledger + previsioni aperte/chiuse + ROI per
+mercato, zero crediti).
+
+**Env** (in `preserve()` di `.railway/railway.ts`; default di codice: AH ON, OU
+OFF, finestra 24h, 12 linee per mercato): `ENABLE_LIVE_AH`, `ENABLE_LIVE_OU`,
+`MM_ENABLED`, `MM_HOURS_AHEAD`, `MM_MAX_LINES_PER_MARKET`, `MM_MAX_RAW_MARKETS`,
+`MM_GATEWAY_ID`.
+
+**Test**: `test_multi_market.py` (35 verdi, TUTTI OFFLINE: SQLite temporaneo,
+provider e order book finti, zero rete/crediti/ordini) + regressioni verdi:
+`test_execution_engine`, `test_auto_bet*`, `test_favourites_only`,
+`test_risk_guards`, `test_t60_breakers`, `test_league_gate`,
+`test_market_quotes_store`, `test_sx_signals`, `test_bets`, `test_predictions`,
+`test_settlement_*`, `test_scores_parsing`, `test_value_filter`,
+`test_market_calib`, `test_web_api`, `test_reports`, `test_bot`,
+`test_ou_exclusion`, `test_secret_hygiene`; `verify_guardrails.py`:
+**A-G tutti bloccano**.
+
+⚠️ **Da sapere in produzione**: (a) l'AH ordina solo se il feed di mercato e'
+validato e se il pick e' in finestra T-60, e il floor/la liquidita' restano
+quelli di SX (con `STAKE_CAP_HARD=0` lo stake e' il floor 1 USDC); (b) l'OU non
+produce ordini finche' `ENABLE_LIVE_OU` resta 0 — i suoi segnali si misurano con
+`multi_market.py report`; (c) se `resolve_market_for` non trova la linea, l'ordine
+non parte e NON lascia righe sul ledger (fail-closed, nessun falso P/L).

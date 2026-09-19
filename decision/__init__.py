@@ -44,11 +44,20 @@ test (`test_decision_pipeline.py` confronta i gate con `value_filter.is_sane`).
 from __future__ import annotations
 
 from . import (
-    commands, compare, dispatcher, engine, feedback, feeds, gateways, guards,
-    kill_switch, market, middleware, review_telegram, risk_engine, shadow,
-    stake_engine, validation,
+    clv, commands, compare, dispatcher, engine, feedback, feeds, gateways,
+    guards, kill_switch, market, middleware, review_telegram, risk_engine,
+    shadow, stake_engine, validation,
 )
-from .commands import Command, CommandKind, CommandPlan
+from .commands import (
+    Command, CommandKind, CommandPlan, NotifyPayload, SaveQuotesPayload,
+    WriteCLVCommand, WriteCLVPayload, notify_command, persist_decision_command,
+    place_order_command, plan_for_record, save_quotes_command,
+    write_clv_command,
+)
+from .clv import (
+    ClvEvaluation, ClvInput, STATUS_OK, STATUS_REJECTED, STATUS_SKIPPED,
+    clv_diff, evaluate_clv, evaluate_clv_many,
+)
 from .compare import (
     AGREE_SKIP, BLOCKED_PLAYED, BOTH_PLAY, CELLS, UNOBSERVED, WOULD_PLAY_SKIPPED,
     chain_would_play, compare_enabled,
@@ -62,8 +71,8 @@ from .feeds import (
 )
 from .feedback import attach_order, persist, persist_many, snapshot
 from .gateways import (
-    LedgerGateway, NotifyGateway, PlaceOrderGateway, ShadowGateway,
-    ValidatingLedgerGateway,
+    ClvGateway, LedgerGateway, MarketQuotesGateway, NotifyGateway,
+    PlaceOrderGateway, ShadowGateway, ValidatingLedgerGateway,
 )
 from .guards import (
     STAGE_BETTING, STAGE_SETTLEMENT, SAFETY_CHAIN, SafetyBlock, SafetyBlockError,
@@ -71,10 +80,14 @@ from .guards import (
 )
 from .limits import RiskLimits, limits_from_env
 from .market import (
-    MARKET_SCHEMA_VERSION, MARKET_SELECTIONS, MIN_ODDS, SUPPORTED_MARKETS,
-    SUPPORTED_SCHEMA_VERSIONS, MarketQuote, MarketQuoteError, QuoteBatch,
-    QuoteErrorCode, QuoteIssue, QuoteRejection, log_issues, parse_quote,
-    prepare_payload, validate_batch,
+    MARKET_ROW_FIELDS, MARKET_SCHEMA_VERSION, MARKET_SELECTIONS, MARKET_SPECS,
+    MIN_ODDS, QUOTE_ORIGINS, SUPPORTED_MARKETS, SUPPORTED_SCHEMA_VERSIONS,
+    SX_LINE_BEARING_TYPES, SX_QUARTER_LINE_TYPES, SX_TYPE_IDS,
+    SX_TYPES_NOT_MODELLED, FixtureQuoteBatch, FixtureQuotes, MarketQuote,
+    MarketQuoteError, MarketType, MarketTypeSpec, QuoteBatch, QuoteErrorCode,
+    QuoteIssue, QuoteRejection, line_required, log_issues, market_accepts_lines,
+    market_type_of, parse_quote, prepare_payload, spec_for, validate_batch,
+    validate_fixture_quotes,
 )
 from .middleware import Observability, TraceContext, sink_from_env
 from .models import (
@@ -108,13 +121,18 @@ __all__ = [
     # orchestrazione
     "decide", "decide_many", "resolve_review", "pending", "summary",
     # persistenza per il feedback engine (import pigro di tracker)
-    "feedback", "persist", "persist_many", "attach_order", "snapshot",
-    # Command pattern: il motore emette comandi, i gateway eseguono
+    "feedback", "persist", "persist_many", "attach_order", "snapshot",    # Command pattern: il motore emette comandi, i gateway eseguono
     "commands", "engine", "gateways", "dispatcher", "shadow", "middleware",
-    "guards", "Command", "CommandKind", "CommandPlan", "build_plan",
+    "guards", "clv", "Command", "CommandKind", "CommandPlan", "WriteCLVCommand",
+    "WriteCLVPayload", "write_clv_command", "SaveQuotesPayload",
+    "save_quotes_command", "MarketQuotesGateway",
+    "evaluate_clv", "evaluate_clv_many",
+    "ClvInput", "ClvEvaluation", "clv_diff", "STATUS_OK", "STATUS_SKIPPED",
+    "STATUS_REJECTED", "build_plan",
     "emit_many", "Dispatcher", "DispatchReport", "LedgerGateway",
     "NotifyGateway", "PlaceOrderGateway", "ShadowGateway",
-    "ValidatingLedgerGateway", "validation", "ValidationOutcome", "validate_row",
+    "ValidatingLedgerGateway", "ClvGateway", "validation", "ValidationOutcome",
+    "validate_row",
     "DECISION_STATUSES", "DECISION_STATUS_PENDING", "DECISION_STATUS_VALIDATED",
     "DECISION_STATUS_REJECTED", "DecisionStatus",
     # fail-fast sui blocchi di sicurezza
@@ -133,6 +151,12 @@ __all__ = [
     "prepare_payload", "log_issues", "MARKET_SCHEMA_VERSION",
     "SUPPORTED_SCHEMA_VERSIONS", "MIN_ODDS", "MARKET_SELECTIONS",
     "SUPPORTED_MARKETS",
+    # multi-mercato (schema 2.0): registro dei tipi, linee, fixture
+    "MarketType", "MarketTypeSpec", "MARKET_SPECS", "spec_for", "market_type_of",
+    "line_required", "market_accepts_lines", "SX_TYPE_IDS", "SX_LINE_BEARING_TYPES",
+    "SX_QUARTER_LINE_TYPES", "SX_TYPES_NOT_MODELLED", "QUOTE_ORIGINS",
+    "FixtureQuotes", "FixtureQuoteBatch", "validate_fixture_quotes",
+    "MARKET_ROW_FIELDS",
     # coda revisioni
     "ReviewQueue", "default_path", "format_report", "STATUS_PENDING",
     "STATUS_APPROVED", "STATUS_REJECTED", "STATUS_EXPIRED",

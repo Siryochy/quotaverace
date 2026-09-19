@@ -59,7 +59,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import requests
 
@@ -920,62 +920,80 @@ class SxBetProvider(ExecutionProvider):
 
     def list_market_catalogue(self, event_type_ids: tuple = ("5",),
                               market_type: str = "1X2",
-                              max_results: int = 20) -> List[Dict]:
-        """Discovery 1X2 calcio: i mercati binari type 1 ("X vs Not X").
+                              max_results: int = 20,
+                              market_type_ids: Optional[tuple] = None) -> List[Dict]:
+        """Discovery calcio per TYPE ID SX: i mercati binari "X vs Not X".
 
         `event_type_ids` = id sport SX (default ("5",) = Soccer; vedi
-        GET /sports); `market_type` e' accettato per compatibilita' e
-        ignorato (il 1X2 di SX e' sempre il type 1). Pagina da 100 con
-        `nextKey`, fermandosi a `max_results`.
+        GET /sports); `market_type` e' accettato per compatibilita' (il tipo
+        vero si sceglie con `market_type_ids`: 1 = 1X2, 2 = Over/Under,
+        3 = Asian Handicap). Pagina da 100 con `nextKey`, fermandosi a
+        `max_results`.
+
+        Multi-mercato (19/09/2026): aggiunti `market_type` e `line` in uscita.
+        La linea si legge dal NOME dell'esito quando c'e' ("Over 2.5" /
+        "Cagliari -0.75"), che sull'API pubblica e' la fonte piu' affidabile,
+        e in fallback dal campo `line` della fonte se plausibile.
         """
         sport_ids = ",".join(str(s) for s in (event_type_ids or ("5",)))
+        types = tuple(str(t) for t in (market_type_ids or ("1",)))
         out: List[Dict] = []
-        pagination_key: Optional[str] = None
-        while len(out) < max_results:
-            params: Dict = {"sportIds": sport_ids, "type": "1",
-                            "pageSize": 100}
-            if pagination_key:
-                params["paginationKey"] = pagination_key
-            try:
-                data = self._get("markets/active", params=params)
-            except Exception as e:
-                logger.warning("sxbet: discovery mercati fallita: %s", e)
-                break
-            d = data.get("data") if isinstance(data, dict) else {}
-            markets = (d or {}).get("markets") or []
-            for m in markets:
-                if len(out) >= max_results:
+        for type_id in types:
+            pagination_key: Optional[str] = None
+            while len(out) < max_results:
+                params: Dict = {"sportIds": sport_ids, "type": type_id,
+                                "pageSize": 100}
+                if pagination_key:
+                    params["paginationKey"] = pagination_key
+                try:
+                    data = self._get("markets/active", params=params)
+                except Exception as e:
+                    logger.warning("sxbet: discovery mercati (type %s) "
+                                   "fallita: %s", type_id, e)
                     break
-                game_time = m.get("gameTime")
-                open_date = (datetime.fromtimestamp(
-                    int(game_time), tz=timezone.utc).isoformat()
-                    if game_time else None)
-                out.append({
-                    "market_id": m.get("marketHash"),
-                    "market_name": "1X2 - " + str(m.get("outcomeOneName")),
-                    "event_name": f"{m.get('teamOneName')} vs "
-                                  f"{m.get('teamTwoName')}",
-                    "event_id": m.get("sportXeventId"),
-                    "country_code": None,
-                    "open_date": open_date,
-                    "total_matched": None,
-                    # Nomi squadre/esiti del market (per la risoluzione
-                    # match -> mercato in auto_bet: su SX il 1X2 e' spezzato
-                    # in 3 mercati binari "X vs Not X" — uno per esito).
-                    "team_one_name": m.get("teamOneName"),
-                    "team_two_name": m.get("teamTwoName"),
-                    "outcome_one_name": m.get("outcomeOneName"),
-                    "outcome_two_name": m.get("outcomeTwoName"),
-                    "runners": [
-                        {"selection_id": 1,
-                         "name": m.get("outcomeOneName")},
-                        {"selection_id": 2,
-                         "name": m.get("outcomeTwoName")},
-                    ],
-                })
-            pagination_key = (d or {}).get("nextKey")
-            if not pagination_key or not markets:
-                break
+                d = data.get("data") if isinstance(data, dict) else {}
+                markets = (d or {}).get("markets") or []
+                for m in markets:
+                    if len(out) >= max_results:
+                        break
+                    game_time = m.get("gameTime")
+                    open_date = (datetime.fromtimestamp(
+                        int(game_time), tz=timezone.utc).isoformat()
+                        if game_time else None)
+                    out.append({
+                        "market_id": m.get("marketHash"),
+                        "market_name": (f"{_TYPE_LABELS.get(type_id, 'type' + type_id)}"
+                                         f" - {m.get('outcomeOneName')}"),
+                        "event_name": f"{m.get('teamOneName')} vs "
+                                      f"{m.get('teamTwoName')}",
+                        "event_id": m.get("sportXeventId"),
+                        "country_code": None,
+                        "open_date": open_date,
+                        "total_matched": None,
+                        # TYPE ID e LINEA: senza questi due campi un mercato a
+                        # linea non e' distinguibile da un altro (OU 2.5 vs OU
+                        # 3.5) e la risoluzione d'ordine non puo' essere
+                        # fail-closed.
+                        "market_type_id": type_id,
+                        "line": _catalogue_line(m),
+                        "main_line": bool(m.get("mainLine")),
+                        # Nomi squadre/esiti del market (per la risoluzione
+                        # match -> mercato in auto_bet: su SX il 1X2 e' spezzato
+                        # in 3 mercati binari "X vs Not X" — uno per esito).
+                        "team_one_name": m.get("teamOneName"),
+                        "team_two_name": m.get("teamTwoName"),
+                        "outcome_one_name": m.get("outcomeOneName"),
+                        "outcome_two_name": m.get("outcomeTwoName"),
+                        "runners": [
+                            {"selection_id": 1,
+                             "name": m.get("outcomeOneName")},
+                            {"selection_id": 2,
+                             "name": m.get("outcomeTwoName")},
+                        ],
+                    })
+                pagination_key = (d or {}).get("nextKey")
+                if not pagination_key or not markets:
+                    break
         return out[:max_results]
 
     def get_market_book(self, market_id: str) -> Dict:
@@ -1284,6 +1302,50 @@ def build_provider() -> ExecutionProvider:
 _TIE_LABELS = {"tie", "draw", "the draw", "pareggio", "x"}
 
 
+#: Etichette leggibili dei type id SX (1 = 1X2, 2 = Over/Under,
+#: 3 = Asian Handicap): il label deve restare umano per la diagnosi.
+_TYPE_LABELS = {"1": "1X2", "2": "Over/Under", "3": "Asian Handicap"}
+
+#: Linea di un mercato del catalogo: dal NOME dell'esito quando c'e'
+#: ('Over 2.5' / 'Cagliari -0.75' — la fonte piu' affidabile osservata), in
+#: fallback dal campo della fonte se plausibile (|v| <= 12: SX potrebbe
+#: esprimerla in unita' scalate). Zero e' una linea VALIDA (handicap pari).
+_CATALOGUE_LINE_MAX = 12.0
+
+
+def _catalogue_line(m: Mapping) -> Optional[float]:
+    """Linea di un mercato del catalogo SX (None se il mercato non ne ha una)."""
+    import re as _re
+    pattern = _re.compile(r"[-+]?\d+(?:\.\d+)?")
+    for key in ("outcomeOneName", "outcomeTwoName"):
+        match = pattern.search(str(m.get(key) or ""))
+        if match:
+            try:
+                return float(match.group(0))
+            except ValueError:
+                continue
+    for key in ("line", "lineValue", "line_value", "handicap"):
+        raw = m.get(key)
+        if raw is None:
+            continue
+        match = pattern.search(str(raw))
+        if not match:
+            continue
+        try:
+            value = float(match.group(0))
+        except ValueError:
+            continue
+        if abs(value) <= _CATALOGUE_LINE_MAX:
+            return value
+    return None
+
+
+def _catalogue_line_clean(name: object) -> str:
+    """Nome squadra senza la linea attaccata ('Cagliari -0.75' -> 'Cagliari')."""
+    import re as _re
+    return _re.sub(r"[-+]?\d+(?:\.\d+)?", " ", str(name or "")).strip(" -+")
+
+
 def _name_key(s: object) -> str:
     """Normalizza un nome per il confronto: minuscolo, accent-fold, solo
     alfanumerici (es. 'CA Osasuna' -> 'ca osasuna', 'Nueva Chicago' ->
@@ -1316,6 +1378,65 @@ def _name_sim(a: object, b: object) -> float:
         return 0.92
     from difflib import SequenceMatcher
     return SequenceMatcher(None, ka, kb).ratio()
+
+
+def _parse_kickoff(kickoff_iso: Optional[str]) -> Optional[datetime]:
+    """Kickoff naive-UTC da ISO del ledger (None se non leggibile)."""
+    if not kickoff_iso:
+        return None
+    try:
+        return datetime.fromisoformat(
+            str(kickoff_iso).replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+def _unique_event_markets(markets: Sequence[Dict], home: str, away: str,
+                          kick: Optional[datetime], *,
+                          window_hours: float = 6.0) -> Optional[List[Dict]]:
+    """I mercati di UN solo evento (squadre allineate + kickoff nella finestra).
+
+    Estratto da `resolve_match_market` (19/09/2026) perche' il resolver a
+    linea (OU/AH) deve applicare ESATTAMENTE la stessa logica: due copie
+    divergerebbero, ed e' il modo classico in cui un percorso nuovo si
+    allontana da quello in produzione.
+
+    Fail-closed: None se l'evento non e' univoco (0 o piu' gruppi), cosi' il
+    chiamante non ordina mai su un mercato ambiguo.
+    """
+    hk, ak = _name_key(home), _name_key(away)
+    events: Dict[tuple, list] = {}
+    for m in markets:
+        t1, t2 = _name_key(m.get("team_one_name")), _name_key(m.get("team_two_name"))
+        if not (t1 and t2):
+            continue
+        if _name_sim(t1, hk) < 0.82 or _name_sim(t2, ak) < 0.82:
+            continue
+        # Finestra kickoff: il mercato dell'exchange deve riferirsi alla
+        # stessa partita del segnale (stesso orario, tolleranza finestra).
+        od_bin = None
+        if kick is not None:
+            od = m.get("open_date")
+            if od:
+                try:
+                    dt = datetime.fromisoformat(
+                        str(od).replace("Z", "+00:00")).replace(tzinfo=None)
+                    if abs((dt - kick).total_seconds()) > window_hours * 3600:
+                        continue
+                    # Bin temporale (minuti): i mercati dello STESSO evento
+                    # hanno lo stesso gameTime e finiscono nello stesso
+                    # gruppo; due eventi con gli stessi nomi ma kickoff
+                    # diversi restano SEPARATI (=> ambiguo).
+                    od_bin = dt.replace(second=0, microsecond=0)
+                except Exception:
+                    pass
+        events.setdefault((t1, t2, od_bin), []).append(m)
+    if len(events) != 1:
+        if events:
+            logger.warning("resolve: %d eventi candidati per %s vs %s, "
+                           "salto (ambiguo)", len(events), home, away)
+        return None
+    return next(iter(events.values()))
 
 
 def resolve_match_market(provider, home: str, away: str, esito_key: str,
@@ -1366,41 +1487,14 @@ def resolve_match_market(provider, home: str, away: str, esito_key: str,
     if not markets:
         return None
 
-    hk, ak = _name_key(home), _name_key(away)
-    events: Dict[tuple, list] = {}
-    for m in markets:
-        t1, t2 = _name_key(m.get("team_one_name")), _name_key(m.get("team_two_name"))
-        if not (t1 and t2):
-            continue
-        if _name_sim(t1, hk) < 0.82 or _name_sim(t2, ak) < 0.82:
-            continue
-        # Finestra kickoff: il mercato dell'exchange deve riferirsi alla
-        # stessa partita del segnale (stesso orario, tolleranza finestra).
-        od_bin = None
-        if kick is not None:
-            od = m.get("open_date")
-            if od:
-                try:
-                    dt = datetime.fromisoformat(
-                        str(od).replace("Z", "+00:00")).replace(tzinfo=None)
-                    if abs((dt - kick).total_seconds()) > window_hours * 3600:
-                        continue
-                    # Bin temporale (minuti): le tre binario dello STESSO
-                    # evento hanno lo stesso gameTime e finiscono nello
-                    # stesso gruppo; due eventi con gli stessi nomi ma
-                    # kickoff diversi restano SEPARATI (=> ambiguo).
-                    od_bin = dt.replace(second=0, microsecond=0)
-                except Exception:
-                    pass
-        events.setdefault((t1, t2, od_bin), []).append(m)
-
-    if len(events) != 1:
-        if events:
-            logger.warning("resolve_match_market: %d eventi candidati per "
-                           "%s vs %s, salto (ambiguo)", len(events), home, away)
+    event_markets = _unique_event_markets(markets, home, away, kick,
+                                         window_hours=window_hours)
+    if event_markets is None:
         return None
-
-    event_markets = next(iter(events.values()))
+    # Chiavi dei nomi per la scelta dell'esito (il grouping le usa dentro
+    # `_unique_event_markets`, qui servono di nuovo: bug trovato dai test del
+    # 19/09 — senza questa riga ogni ordine 1X2 falliva con NameError).
+    hk, ak = _name_key(home), _name_key(away)
     es = str(esito_key or "").strip().lower()
     for m in event_markets:
         o1 = _name_key(m.get("outcome_one_name"))
@@ -1415,6 +1509,86 @@ def resolve_match_market(provider, home: str, away: str, esito_key: str,
                 return {"market_id": m["market_id"], "selection_id": 1,
                         "event_name": m.get("event_name"), "label": es,
                         "provider": pname}
+    return None
+
+
+def resolve_market_for(provider, home: str, away: str, market_type: str,
+                       line: float, side: str,
+                       kickoff_iso: Optional[str] = None,
+                       window_hours: float = 6.0,
+                       max_results: int = 400) -> Optional[Dict]:
+    """Mercato a LINEA (OU/AH) dell'evento, per il piazzamento reale.
+
+    `market_type` = "OU" | "AH"; `line` e' dal punto di vista di teamOne (per
+    l'OU il totale, per l'AH l'handicap di teamOne); `side` = "over"/"under"
+    per l'OU oppure "home"/"away" per l'AH.
+
+    Fail-closed (nessun ordine se qualcosa non torna): provider non sxbet,
+    type id non mappato, evento non univoco, LINEA diversa da quella richiesta
+    (un OU 3.5 non e' un OU 2.5), lato non riconoscibile dal nome dell'esito.
+    """
+    pname = str(getattr(provider, "name", "")).lower()
+    if pname != "sxbet":
+        logger.warning("resolve_market_for: provider '%s' non supportato "
+                       "(solo sxbet)", pname or "?")
+        return None
+    wanted_type = str(market_type or "").upper()
+    type_id = {"OU": "2", "AH": "3"}.get(wanted_type)
+    if type_id is None or line is None:
+        return None
+    try:
+        target_line = float(line)
+    except (TypeError, ValueError):
+        return None
+    kick = _parse_kickoff(kickoff_iso)
+    try:
+        markets = provider.list_market_catalogue(
+            event_type_ids=("5",), market_type_ids=(type_id,),
+            max_results=max_results)
+    except Exception as e:
+        logger.warning("resolve_market_for: discovery type %s fallita: %s",
+                       type_id, e)
+        return None
+    if not markets:
+        return None
+    event_markets = _unique_event_markets(markets, home, away, kick,
+                                          window_hours=window_hours)
+    if event_markets is None:
+        return None
+    side_key = str(side or "").lower()
+    for m in event_markets:
+        if str(m.get("market_type_id") or "") != type_id:
+            continue
+        mline = m.get("line")
+        if mline is None:
+            continue
+        try:
+            if abs(float(mline) - target_line) > 1e-6:
+                continue
+        except (TypeError, ValueError):
+            continue
+        outcome_one = str(m.get("outcome_one_name") or "")
+        if wanted_type == "OU":
+            low = outcome_one.strip().lower()
+            if low.startswith("over"):
+                selection = 1 if side_key == "over" else 2
+            elif low.startswith("under"):
+                selection = 2 if side_key == "over" else 1
+            else:
+                continue
+        else:
+            clean = _catalogue_line_clean(outcome_one)
+            if _name_sim(_name_key(clean), _name_key(home)) >= 0.82:
+                selection = 1 if side_key == "home" else 2
+            elif _name_sim(_name_key(clean), _name_key(away)) >= 0.82:
+                selection = 2 if side_key == "home" else 1
+            else:
+                continue
+        return {"market_id": m["market_id"], "selection_id": selection,
+                "event_name": m.get("event_name"),
+                "label": f"{wanted_type} {float(mline):g}",
+                "market_type": wanted_type, "line": float(mline),
+                "provider": pname}
     return None
 
 

@@ -963,6 +963,31 @@ def _today_value_picks() -> list[dict]:
     return out
 
 
+def _multi_market_picks() -> list[dict]:
+    """Pick OU/AH dal ledger multi-mercato (solo i mercati con ordini ACCESI).
+
+    Corsia definita in `multi_market.live_picks`: **AH live** (ordini reali),
+    **OU shadow** (telemetria: ENABLE_LIVE_OU=0 di default). Gate di lega,
+    fascia quota, lato favorito e riconoscibilita' del mercato a linea sono
+    ripetuti la' dentro (difesa in profondita'), quindi qui non si riapplica
+    nulla: un'unica implementazione, un solo posto da controllare.
+
+    Fail-safe: qualunque errore ritorna [] — la corsia multi-mercato non deve
+    poter fermare il giro 1X2 in produzione.
+    """
+    try:
+        import multi_market
+        picks = multi_market.live_picks()
+    except Exception as e:
+        logger.warning("auto_bet: corsia multi-mercato non disponibile (%s)", e)
+        return []
+    if picks:
+        logger.info("auto_bet: %d pick multi-mercato dalle corsie live (%s)",
+                    len(picks), ", ".join(multi_market.live_markets())
+                    or "nessuna")
+    return picks
+
+
 def _too_close_to_start(start_time: str | None) -> bool:
     if not start_time:
         return False
@@ -1357,10 +1382,31 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
         return None
     prov = engine.provider
 
+    # Multi-mercato (19/09/2026): OU e AH non vivono nel catalogo 1X2 (3
+    # mercati binari "X vs Not X"): servono TYPE ID e LINEA, quindi un
+    # resolver dedicato. Fail-closed: se il pick non e' riconducibile a un
+    # mercato a linea NON si indovina — nessun ordine.
+    target = None
+    if str(pick.get("mercato") or "").upper() in ("OU", "AH"):
+        try:
+            from multi_market import order_target
+            target = order_target(pick)
+        except Exception:
+            target = None
+        if target is None or target.get("line") is None:
+            logger.info("auto_bet: %s (%s) mercato a linea non "
+                        "riconoscibile, salto", pick.get("match_id"),
+                        pick.get("esito_key"))
+            return None
     try:
-        mkt = ee.resolve_match_market(
-            prov, pick["home"], pick["away"], pick["esito_key"],
-            pick.get("commence"))
+        if target is not None:
+            mkt = ee.resolve_market_for(
+                prov, pick["home"], pick["away"], target["market_type"],
+                target["line"], target["side"], pick.get("commence"))
+        else:
+            mkt = ee.resolve_match_market(
+                prov, pick["home"], pick["away"], pick["esito_key"],
+                pick.get("commence"))
     except Exception as e:
         logger.warning("auto_bet: risoluzione mercato %s fallita: %s",
                        pick.get("match_id"), e)
@@ -1599,10 +1645,21 @@ def run_today_bets(stake_eur: float | None = None,
     logger.info("auto_bet: strategia favoriti netti (EV_MIN=%.0f%%, ODDS "
                 "%.2f-%.2f, edge >= +%.0fpp, adaptive Kelly)",
                 EV_MIN * 100, ODDS_MIN, ODDS_MAX, MARKET_EDGE_MIN * 100)
+    try:
+        import multi_market as _mm
+        logger.info("auto_bet: corsie multi-mercato -> %s (AH live, OU "
+                    "shadow di default; ENABLE_LIVE_AH=%s, ENABLE_LIVE_OU=%s)",
+                    ", ".join(_mm.live_markets()) or "nessuna",
+                    _mm.ENABLE_LIVE_AH, _mm.ENABLE_LIVE_OU)
+    except Exception:
+        pass
 
     # --- FASE 1: costruisci i candidati (guardie + stake, senza salvare) ---
     candidates: list[dict] = []
-    for pick in _today_value_picks():
+    # Corsia multi-mercato (19/09/2026): AH con ordini reali, OU in shadow.
+    # Gli stessi guardrail valgono per tutti i pick (T-60, stop-loss, cap,
+    # feed, dedup): la differenza tra le corsie e' solo l'INTERRUTTORE live.
+    for pick in _today_value_picks() + _multi_market_picks():
         if bet_exists_open(pick["match_id"], pick["esito_key"]):
             logger.info("auto_bet: puntata gia' aperta per %s (%s), salto",
                         pick["match_id"], pick["esito_key"])

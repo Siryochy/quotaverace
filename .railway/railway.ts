@@ -65,6 +65,19 @@ export default defineRailway(() => {
     T60_MAX_ODDS: preserve(),
     T60_KILL_WALLET_USDC: preserve(),
     T60_ORDER_VALIDATION: preserve(),
+    // Multi-mercato OU/AH (19/09): ENABLE_LIVE_AH=1 -> l'Asian Handicap
+    // piazza ORDINI REALI; ENABLE_LIVE_OU=0 (default di codice) -> l'Over/Under
+    // resta in shadow/telemetria (il leak storico -6.8% sul mercato OU va
+    // rimisurato sulla corsia nuova prima di rimetterci denaro). preserve()
+    // perche' `railway config apply` non deve spegnere l'AH per sbaglio.
+    ENABLE_LIVE_AH: preserve(),
+    ENABLE_LIVE_OU: preserve(),
+    // Finestra/limiti della corsia multi-mercato (default di codice: 24h,
+    // 12 linee per mercato, 400 mercati per discovery).
+    MM_HOURS_AHEAD: preserve(),
+    MM_MAX_LINES_PER_MARKET: preserve(),
+    MM_MAX_RAW_MARKETS: preserve(),
+    MM_GATEWAY_ID: preserve(),
     // Pausa settlement (11/09): con SETTLEMENT_PAUSED=1 (o il flag su volume
     // data/execution/settlement_paused.json) i settle non chiudono nulla e
     // _update_results non scarica risultati (zero crediti).
@@ -162,6 +175,12 @@ export default defineRailway(() => {
     // codice OFF: senza dichiarazione, un `config apply` la distruggerebbe (e
     // con essa la scelta, in entrambe le direzioni).
     DECISION_SHADOW_PERSIST: preserve(),
+    // Percorso CLV laterale (17/09/2026): `evaluate_clv` -> `WriteCLVCommand` ->
+    // `ClvGateway` in parallelo alla catena, writer sul registro shadow (ZERO
+    // scritture su `clv_history`: il CLV di produzione resta di fixture_engine).
+    // `DECISION_CLV_SHADOW=0` lo spegne. Default di codice ON (misura senza
+    // effetti); la dichiarazione protegge la scelta in entrambe le direzioni.
+    DECISION_CLV_SHADOW: preserve(),
     // Confronto shadow catena ↔ corsia (16/09/2026): job ogni 6h che mette a
     // confronto il ledger delle decisioni con quello delle puntate (sola
     // lettura, zero costi). `DECISION_COMPARE_ENABLED=0` spegne il job;

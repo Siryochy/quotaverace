@@ -56,6 +56,41 @@ def prob_over_under(lam_h: float, lam_a: float, threshold: float = 2.5, max_goal
     p_over = sum(p for (hg, ag), p in m.items() if hg + ag > threshold)
     return p_over, 1.0 - p_over
 
+def ou_outcome_probs(lam_h: float, lam_a: float, threshold: float,
+                     side: str = "over", max_goals: int = 10):
+    """Probabilita' (p_win, p_push, p_lose) a stake pieno per un Over/Under.
+
+    Gemella di `ah_outcome_probs` per il multi-mercato (19/09/2026): serve a
+    distinguere il push (linea INTERA con totale esattamente uguale alla
+    linea: la puntata viene restituita, il P/L e' 0) dalla perdita. Sulle
+    linee .5 il push non esiste (p_push = 0).
+
+    Le quarter line (.25/.75) valgono come due mezze puntate, come nell'AH:
+    il push di una meta' viene pesato mezzo.
+    """
+    m = _probs_matrix(lam_h, lam_a, max_goals)
+    if abs(float(threshold) * 2) % 1 != 0:  # quarter line -> due mezze puntate
+        lo = math.floor(float(threshold) * 2) / 2.0
+        halves = (lo, lo + 0.5)
+        share = 0.5
+    else:
+        halves = (float(threshold),)
+        share = 1.0
+    p_win = p_push = p_lose = 0.0
+    for hline in halves:
+        for (hg, ag), p in m.items():
+            total = hg + ag
+            if total > hline:
+                p_win += share * p
+            elif total == hline:
+                p_push += share * p
+            else:
+                p_lose += share * p
+    if side == "under":
+        p_win, p_lose = p_lose, p_win
+    return p_win, p_push, p_lose
+
+
 def prob_btts(lam_h: float, lam_a: float, max_goals: int = 10) -> float:
     m = _probs_matrix(lam_h, lam_a, max_goals)
     return sum(p for (hg, ag), p in m.items() if hg >= 1 and ag >= 1)

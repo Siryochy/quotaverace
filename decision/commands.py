@@ -49,13 +49,22 @@ class CommandKind(str, Enum):
     PERSIST_DECISION = "persist_decision"    # scrive la riga sul ledger
     PLACE_ORDER = "place_order"              # ordine sull'exchange (SOLO live)
     NOTIFY_OPERATORS = "notify_operators"    # Telegram a admin/iscritti
+    #: Quote multi-mercato sul ledger (`market_quotes`): dati di ingresso,
+    #: non un effetto sul mondo — vanno scritti PRIMA della decisione che
+    #: su quei prezzi e' stata presa.
+    SAVE_MARKET_QUOTES = "save_market_quotes"
+    #: Campione CLV sul ledger (`clv_history`): MISURA a cose fatte, in coda.
+    WRITE_CLV = "write_clv"
 
 
 #: Ordine di esecuzione dei comandi quando il motore ne emette piu' di uno.
-#: L'ordine e' deliberato: prima si registra la decisione (audit), poi si
-#: esegue l'ordine, poi si avvisa. Un fallimento a valle non cancella l'audit.
-COMMAND_ORDER = (CommandKind.PERSIST_DECISION, CommandKind.PLACE_ORDER,
-                 CommandKind.NOTIFY_OPERATORS)
+#: La regola e' "prima l'EVIDENZA, poi l'effetto": lo snapshot di mercato
+#: (le quote su cui si e' deciso) apre, la riga di decisione segue, l'ordine
+#: viene DOPO l'audit; notifiche e misure chiudono. Un fallimento a valle non
+#: cancella cio' che e' stato scritto prima.
+COMMAND_ORDER = (CommandKind.SAVE_MARKET_QUOTES,
+                 CommandKind.PERSIST_DECISION, CommandKind.PLACE_ORDER,
+                 CommandKind.NOTIFY_OPERATORS, CommandKind.WRITE_CLV)
 
 
 def _digest(*parts: Any) -> str:
@@ -101,6 +110,37 @@ class NotifyPayload(BaseModel):
     text: str
     dedup_key: str = ""
     targets: list[str] = Field(default_factory=list)
+
+
+class WriteCLVPayload(BaseModel):
+    """Campione CLV per il ledger `clv_history` (niente logica, solo dati).
+
+    I campi ricalcano la firma di `tracker.save_clv` — l'esecutore reale —
+    piu' `source` (provenienza del campione) e `signal_odds`/`closing_odds`
+    che portano la MISURA (la differenza di quota non va ricalcolata a valle).
+    """
+
+    match_id: str = Field(..., min_length=1)
+    outcome: str = Field(..., min_length=1)
+    signal_odds: float = Field(..., gt=1.0)
+    closing_odds: float = Field(..., gt=1.0)
+    timestamp: datetime
+    source: str = ""
+
+
+class SaveQuotesPayload(BaseModel):
+    """Righe di quote multi-mercato per il ledger `market_quotes`.
+
+    `rows` sono righe GIA' serializzate da `MarketQuote.as_row()` (o da
+    `FixtureQuotes.as_rows()`): il contratto resta l'unico posto in cui una
+    quota viene VALIDATA, il comando si limita a trasportarla. Almeno una riga:
+    un upsert senza righe non e' un effetto e non deve nemmeno nascere.
+    """
+
+    rows: list[dict[str, Any]] = Field(..., min_length=1)
+    fixture_id: str = ""
+    gateway_id: str = ""
+    source: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +231,57 @@ def place_order_command(record: DecisionRecord, *, provider: str = "",
     )
 
 
+def write_clv_command(*, match_id: str, outcome: str, signal_odds: float,
+                      closing_odds: float, timestamp: Optional[datetime] = None,
+                      source: str = "", signal_id: str = "",
+                      mode: Mode = "sim") -> Command:
+    """Comando che registra un campione CLV sul ledger (`clv_history`).
+
+    Emissione tipica: il valutatore CLV (`decision/clv.py`) calcola la
+    differenza di quota in modo PURO e restituisce questo comando
+    all'orchestratore, che lo instrada a un gateway di scrittura. Il valutatore
+    non tocca il DB.
+    """
+    payload = WriteCLVPayload(
+        match_id=match_id, outcome=outcome,
+        signal_odds=signal_odds, closing_odds=closing_odds,
+        timestamp=timestamp or utcnow(), source=source)
+    return Command(
+        kind=CommandKind.WRITE_CLV,
+        payload=payload.model_dump(mode="json"),
+        dedup_key=_digest("clv", match_id, outcome, signal_odds, closing_odds),
+        signal_id=signal_id,
+        mode=mode,
+    )
+
+
+def save_quotes_command(rows, *, fixture_id: str = "", gateway_id: str = "",
+                        source: str = "", mode: Mode = "sim") -> Command:
+    """Comando che persiste le quote multi-mercato sul ledger.
+
+    La `dedup_key` cambia quando cambia il PREZZO: lo stesso palinsesto letto
+    due volte non produce due comandi (il registro shadow non si riempie di
+    ripetizioni), ma un movimento di quota in finestra T-60 si'. L'upsert a
+    valle e' comunque idempotente per chiave, quindi ri-eseguire non duplica.
+    """
+    payload = SaveQuotesPayload(
+        rows=[dict(row) for row in rows], fixture_id=fixture_id,
+        gateway_id=gateway_id, source=source)
+    keys = []
+    for row in payload.rows:
+        identity = row.get("identity_key")
+        if not identity:
+            identity = "|".join(str(row.get(key) or "") for key in
+                                ("fixture_id", "market_type", "line_key", "selection"))
+        keys.append(f"{identity}:{row.get('odds')}")
+    return Command(
+        kind=CommandKind.SAVE_MARKET_QUOTES,
+        payload=payload.model_dump(mode="json"),
+        dedup_key=_digest("quotes", fixture_id, *sorted(keys)),
+        mode=mode,
+    )
+
+
 def notify_command(record: DecisionRecord, *, kind: str, text: str,
                    targets: Optional[list[str]] = None,
                    scope: str = "") -> Command:
@@ -220,6 +311,31 @@ def notify_command(record: DecisionRecord, *, kind: str, text: str,
 # ---------------------------------------------------------------------------
 # Piano
 # ---------------------------------------------------------------------------
+
+class WriteCLVCommand(BaseModel):
+    """Contratto IMMUTABILE del comando CLV (alias tipizzato di `Command`).
+
+    Il valutatore CLV (`decision/clv.py`) restituisce all'orchestratore
+    l'istanza con i soli campi del contratto: `signal_id`, `market_id`,
+    `signal_odds`, `closing_odds`, `timestamp`, `source`. E' un record
+    Pydantic congelato: niente logica, nessun side effect, la scrittura su DB
+    spetta al gateway (`decision/gateways.ClvGateway`).
+
+    `market_id` e' l'id del match sul ledger (`matches.match_id`, es.
+    `sx-L…`): e' la chiave che `tracker.save_clv` si aspetta in `match_id`.
+    La differenza di quota NON e' un campo: e' una MISURA calcolata dal
+    valutatore (`clv_diff`), non parte del comando che la richiede.
+    """
+
+    model_config = {"frozen": True}
+
+    signal_id: str = ""
+    market_id: str = Field(..., min_length=1)
+    signal_odds: float = Field(..., gt=1.0)
+    closing_odds: float = Field(..., gt=1.0)
+    timestamp: datetime
+    source: str = ""
+
 
 class CommandPlan(BaseModel):
     """L'uscita del motore: un record + i comandi che lo traducono in effetti.
@@ -285,6 +401,8 @@ def plan_for_record(record: DecisionRecord, commands: list[Command], *,
 
 __all__ = [
     "COMMAND_ORDER", "Command", "CommandKind", "CommandPlan", "NotifyPayload",
-    "PersistDecisionPayload", "PlaceOrderPayload", "notify_command",
+    "PersistDecisionPayload", "PlaceOrderPayload", "SaveQuotesPayload",
+    "WriteCLVCommand", "WriteCLVPayload", "notify_command",
     "persist_decision_command", "place_order_command", "plan_for_record",
+    "save_quotes_command", "write_clv_command",
 ]

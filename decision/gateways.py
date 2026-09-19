@@ -327,6 +327,134 @@ class PlaceOrderGateway(BaseGateway):
 
 
 # ---------------------------------------------------------------------------
+# CLV (scrittura del campione: l'UNICO punto che tocca il DB)
+# ---------------------------------------------------------------------------
+
+class ClvGateway(BaseGateway):
+    """Scrive il campione CLV sul ledger `clv_history` (via `tracker.save_clv`).
+
+    E' il controparte ESECUTIVA del valutatore puro `decision/clv.py`: il
+    valutatore calcola la differenza di quota e RESTITUISCE il comando, qui —
+    e solo qui — avviene la scrittura su DB. `writer` e' iniettabile (i test
+    girano senza DB); il default delega a `tracker.save_clv`, l'esecutore di
+    produzione gia' testato (mai reimplementato, stessa regola di
+    `PlaceOrderGateway` verso `auto_bet._live_fill`).
+
+    Convenzione del default writer (firma di `tracker.save_clv`, un solo
+    `quota` per chiamata): se `closing_odds == signal_odds` il campione E' il
+    segnale -> `signal_started=True` (seme della quota segnale); altrimenti
+    aggiorna la chiusura (`signal_started=False`). Il payload completo passa
+    comunque al writer iniettabile, cosi' uno store piu' ricco (timestamp,
+    source) puo' usarli senza toccare questo gateway.
+
+    `audit_only = True`: la scrittura e' telemetria di mercato, non un effetto
+    sul mondo — il `Dispatcher` la esclude dal conteggio "shadow".
+    """
+
+    name = "clv"
+    kinds = (CommandKind.WRITE_CLV,)
+    audit_only = True
+
+    def __init__(self, writer: Optional[Callable[[dict], dict]] = None) -> None:
+        self._writer = writer
+
+    @staticmethod
+    def _default_writer(payload: dict) -> dict:
+        """Il percorso di produzione: `tracker.save_clv` (import PIGRO)."""
+        import tracker                                    # pigro (pesante)
+        signal_odds = float(payload.get("signal_odds") or 0.0)
+        closing_odds = float(payload.get("closing_odds") or 0.0)
+        seeded = closing_odds > 0 and signal_odds > 0 \
+            and closing_odds == signal_odds
+        tracker.save_clv(payload.get("match_id"), payload.get("outcome"),
+                         closing_odds, signal_started=seeded)
+        return {"saved": True, "seeded": seeded}
+
+    def _run(self, command: Command, *, ctx, obs) -> CommandResult:
+        payload = dict(command.payload)
+        match_id = str(payload.get("match_id") or "")
+        outcome = str(payload.get("outcome") or "")
+        closing = float(payload.get("closing_odds") or 0.0)
+        if not match_id or closing <= 1.0:
+            return CommandResult(kind=command.kind, ok=False, status="error",
+                                 detail="payload CLV incompleto (match_id o closing_odds)")
+        writer = self._writer or self._default_writer
+        out = writer(payload) or {}
+        if not out.get("saved", True):
+            return CommandResult(kind=command.kind, ok=False, status="error",
+                                 detail=out.get("error") or "scrittura CLV fallita",
+                                 data={"match_id": match_id})
+        return CommandResult(kind=command.kind, ok=True, status="executed",
+                             detail="campione CLV registrato",
+                             data={"match_id": match_id, "outcome": outcome,
+                                   "signal_odds": payload.get("signal_odds"),
+                                   "closing_odds": closing,
+                                   "seeded": bool(out.get("seeded"))})
+
+
+# ---------------------------------------------------------------------------
+# Quote di mercato multi-mercato (scrittura sul ledger `market_quotes`)
+# ---------------------------------------------------------------------------
+
+class MarketQuotesGateway(BaseGateway):
+    """Scrive le quote multi-mercato sul ledger (`tracker.save_market_quotes`).
+
+    E' l'UNICO punto che tocca il DB per l'INGESTIONE: il feed produce righe
+    gia' validate dal contratto (`MarketQuote.as_row()`), il comando le
+    trasporta, qui si persistono in upsert — la chiave
+    (fixture, mercato, linea, esito) rende ripetibile la lettura del palinsesto
+    senza duplicare niente. `writer` e' iniettabile (i test girano senza DB);
+    il default delega a `tracker.save_market_quotes`, l'esecutore di
+    produzione gia' testato — mai reimplementato (stessa regola di `ClvGateway`
+    verso `tracker.save_clv`).
+
+    `audit_only = True`: sono DATI di mercato, non un effetto sul mondo — il
+    `Dispatcher` non le conta come esecuzione reale.
+
+    ⚠️ Non e' collegato da solo alla shadow mode: la shadow deve restare
+    senza scritture (gira ogni 60s) e il writer reale si passa esplicitamente,
+    come per il CLV laterale.
+    """
+
+    name = "market_quotes"
+    kinds = (CommandKind.SAVE_MARKET_QUOTES,)
+    audit_only = True
+
+    def __init__(self, writer: Optional[Callable[[list], dict]] = None) -> None:
+        self._writer = writer
+
+    @staticmethod
+    def _default_writer(rows: list) -> dict:
+        """Il percorso di produzione: `tracker.save_market_quotes` (import PIGRO)."""
+        import tracker                                    # pigro (pesante)
+        return dict(tracker.save_market_quotes(rows) or {})
+
+    def _run(self, command: Command, *, ctx, obs) -> CommandResult:
+        rows = list(dict(command.payload).get("rows") or [])
+        if not rows:
+            return CommandResult(kind=command.kind, ok=False, status="error",
+                                 detail="comando senza righe di mercato")
+        writer = self._writer or self._default_writer
+        out = dict(writer(rows) or {})
+        saved = int(out.get("saved") or 0)
+        data = {"rows": len(rows), "saved": saved,
+                "skipped": int(out.get("skipped") or 0),
+                "fixtures": int(out.get("fixtures") or 0),
+                "by_reason": out.get("by_reason") or {}}
+        if out.get("error"):
+            return CommandResult(kind=command.kind, ok=False, status="error",
+                                 detail=str(out["error"]), data=data)
+        if not saved:
+            # Nessuna riga accettata = ingestione fallita, non un successo
+            # silenzioso: i motivi sono in `by_reason`.
+            return CommandResult(kind=command.kind, ok=False, status="error",
+                                 detail="nessuna quota accettata dal ledger",
+                                 data=data)
+        return CommandResult(kind=command.kind, ok=True, status="executed",
+                             detail=f"{saved} quote sul ledger", data=data)
+
+
+# ---------------------------------------------------------------------------
 # Notifiche
 # ---------------------------------------------------------------------------
 
@@ -481,7 +609,8 @@ class ShadowGateway(BaseGateway):
 
 
 __all__ = [
-    "AUDIT_ONLY_ATTR", "BaseGateway", "CommandResult", "Gateway", "LedgerGateway",
-    "NotifyGateway", "PlaceOrderGateway", "SHADOW_LOG_ENV", "ShadowGateway",
-    "ValidatingLedgerGateway", "admin_targets", "shadow_log_path",
+    "AUDIT_ONLY_ATTR", "BaseGateway", "ClvGateway", "CommandResult", "Gateway",
+    "LedgerGateway", "MarketQuotesGateway", "NotifyGateway", "PlaceOrderGateway",
+    "SHADOW_LOG_ENV", "ShadowGateway", "ValidatingLedgerGateway", "admin_targets",
+    "shadow_log_path",
 ]

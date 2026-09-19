@@ -53,7 +53,9 @@ from typing import Any, Iterable, Optional, Sequence
 from . import engine, guards, kill_switch as kill_switch_mod
 from .commands import CommandKind
 from .dispatcher import Dispatcher
-from .feeds import feed_enabled as feeds_enabled, feed_from_env
+from .feeds import (
+    MarketFeed, FeedSnapshot, feed_enabled as feeds_enabled, feed_from_env,
+)
 from .gateways import ShadowGateway, shadow_log_path
 from .limits import RiskLimits
 from .middleware import Observability, TraceContext
@@ -65,6 +67,22 @@ logger = logging.getLogger("decision.shadow")
 SHADOW_ENABLED_ENV = "DECISION_SHADOW"
 REVIEWS_ENABLED_ENV = "DECISION_REVIEWS"
 SHADOW_PERSIST_ENV = "DECISION_SHADOW_PERSIST"
+#: Percorso CLV laterale (17/09/2026): `evaluate_clv` -> `WriteCLVCommand` ->
+#: `ClvGateway` IN PARALLELO alla catena, mai al posto di
+#: `fixture_engine -> tracker.save_clv`. Il writer del gateway e' di default il
+#: registro shadow: ZERO scritture sul ledger `clv_history` (l'unico writer
+#: reale e' quello iniettato esplicitamente, es. dai test). La misura corre
+#: comunque: esiti ok/skipped/rejected finiscono nel riepilogo e negli eventi,
+#: cosi' il confronto con il percorso attuale e' misurabile prima di deciderlo.
+CLV_ENV = "DECISION_CLV_SHADOW"
+
+
+def clv_shadow_enabled(value: Optional[str] = None) -> bool:
+    """Percorso CLV laterale attivo? Default SI': misura e registra, non scrive."""
+    raw = os.getenv(CLV_ENV) if value is None else value
+    if raw is None or not str(raw).strip():
+        return True
+    return str(raw).strip().lower() not in ("0", "false", "no", "off")
 
 
 def shadow_enabled(value: Optional[str] = None) -> bool:
@@ -110,7 +128,9 @@ def run_shadow(*, signals: Optional[Sequence[Signal]] = None, bankroll: float = 
                feed: Optional[Any] = None, feed_required: Optional[bool] = None,
                review_queue: Optional[Any] = None,
                reviews: Optional[bool] = None,
-               persist: Optional[bool] = None) -> dict:
+               persist: Optional[bool] = None,
+               clv_enabled: Optional[bool] = None,
+               clv_writer: Optional[Any] = None) -> dict:
     """Valuta i segnali aperti in shadow mode. NON esegue nulla, non solleva.
 
     Il **feed di mercato** (`decision/feeds.py`) e' la sorgente primaria dei
@@ -122,6 +142,15 @@ def run_shadow(*, signals: Optional[Sequence[Signal]] = None, bankroll: float = 
     **Shadow Validation**: la valutazione viene scritta sul ledger con stato
     `pending` e poi convalidata, e l'ordine che ne deriva resta registrato (mai
     eseguito) solo a convalida positiva.
+
+    **Percorso CLV laterale** (`clv_enabled`, default ambiente
+    `DECISION_CLV_SHADOW`, ON): per ogni segnale valutato gira anche
+    `decision.clv.evaluate_clv` (puro) e il comando `WriteCLVCommand` emesso
+    viene instradato a un dispatcher dedicato con SOLO il `ClvGateway`, col
+    writer agganciato al registro shadow (default) — nessuna scrittura su
+    `clv_history`. Il riepilogo porta `clv` = {enabled, ok, skipped, rejected,
+    dispatched, errors, avg_diff}: il confronto col percorso attuale
+    (`fixture_engine -> tracker.save_clv`) resta una misura, non un'opinione.
     """
     obs = observability or Observability()
     ctx = obs.new_trace(request_id=request_id)
@@ -130,7 +159,10 @@ def run_shadow(*, signals: Optional[Sequence[Signal]] = None, bankroll: float = 
                            "market": None, "market_blocked": None, "errors": [],
                            "reviews_queued": 0, "persisted": 0,
                            "persist_enabled": False, "persisted_duplicates": 0,
-                           "order_blocked": 0}
+                           "order_blocked": 0,
+                           "clv": {"enabled": False, "ok": 0, "skipped": 0,
+                                   "rejected": 0, "dispatched": 0, "errors": 0,
+                                   "avg_diff": None}}
     try:
         status = kills or kill_switch_mod.status()
 
@@ -196,11 +228,41 @@ def run_shadow(*, signals: Optional[Sequence[Signal]] = None, bankroll: float = 
             gateways = [ValidatingLedgerGateway(), ShadowGateway(shadow_path)]
             already_persisted = row_exists_for_signal
 
+        # Percorso CLV laterale (17/09): il comando va DIRETTAMENTE al gateway
+        # CLV (audit-only) col writer shadow di default — MAI il writer reale
+        # di `tracker.save_clv` da questo percorso (il CLV di produzione resta
+        # di `fixture_engine`) — e viene REGISTRATO dallo stesso ShadowGateway
+        # del giro (dedup per dedup_key: un campione per misura). Nessun
+        # Dispatcher-finto: un comando, un gateway, esecuzione diretta.
+        clv_on = clv_shadow_enabled() if clv_enabled is None else bool(clv_enabled)
+        clv_gw = shadow_gw = None
+        if clv_on:
+            from .gateways import ClvGateway
+            out["clv"]["enabled"] = True
+            try:
+                shadow_gw = next(g for g in gateways if isinstance(g, ShadowGateway))
+            except StopIteration:
+                shadow_gw = None
+
+            def _shadow_clv_writer(payload: dict) -> dict:
+                # Writer del percorso shadow: il campione finisce negli eventi
+                # ( misura, non esecuzione). Mai `tracker.save_clv` qui.
+                obs.event("clv.shadow_sample", stage="clv",
+                          match_id=payload.get("match_id"),
+                          outcome=payload.get("outcome"),
+                          signal_odds=payload.get("signal_odds"),
+                          closing_odds=payload.get("closing_odds"),
+                          source=payload.get("source"))
+                return {"saved": True, "shadow": True}
+
+            clv_gw = ClvGateway(writer=clv_writer or _shadow_clv_writer)
+
         dispatcher = Dispatcher(gateways, observability=obs, require_persist=persist_enabled)
         obs.event("shadow.start", ctx=ctx, signals=len(signals), mode=mode,
                   bankroll=bankroll, path=str(shadow_path or shadow_log_path()),
-                  advisories=advisories, persist=persist_enabled)
+                  advisories=advisories, persist=persist_enabled, clv=clv_on)
 
+        clv_diffs: list[float] = []
         for signal in signals:
             # Un segnale -> una riga: senza questo controllo il job ogni 60s
             # riscriverebbe la stessa opportunita' mille volte al giorno.
@@ -222,6 +284,23 @@ def run_shadow(*, signals: Optional[Sequence[Signal]] = None, bankroll: float = 
                                      review_queue=review_queue,
                                      feed=market_feed, feed_required=required)
             report = dispatcher.dispatch(plan, ctx=plan_trace)
+            if clv_gw is not None:
+                # Closing del percorso CLV: la quota corrente del feed (lo
+                # snapshot in-process del refresh forzato dalla catena). Senza
+                # quote disponibili la valutazione e' `skipped`, onestamente.
+                snapshot_ref = None
+                if isinstance(market_feed, FeedSnapshot):
+                    snapshot_ref = market_feed
+                elif isinstance(market_feed, MarketFeed):
+                    try:
+                        snapshot_ref = market_feed.last_snapshot()
+                    except Exception:
+                        snapshot_ref = None
+                diff = _run_clv_lateral(signal, clv_gw=clv_gw, shadow_gw=shadow_gw,
+                                        out=out, obs=obs, ctx=plan_trace,
+                                        snapshot=snapshot_ref)
+                if diff is not None:
+                    clv_diffs.append(diff)
             verdict = plan.record.risk.verdict
             if verdict == "review" and review_queue is not None:
                 out["reviews_queued"] += 1
@@ -263,6 +342,8 @@ def run_shadow(*, signals: Optional[Sequence[Signal]] = None, bankroll: float = 
             out["errors"].extend(report.errors)
             out["evaluated"] += 1
 
+        if clv_diffs:
+            out["clv"]["avg_diff"] = round(sum(clv_diffs) / len(clv_diffs), 4)
         obs.event("shadow.end", ctx=ctx, outcome="ok" if not out["errors"] else "error",
                   evaluated=out["evaluated"], verdicts=out["by_verdict"],
                   commands=out["by_command"], errors=len(out["errors"]),
@@ -271,7 +352,8 @@ def run_shadow(*, signals: Optional[Sequence[Signal]] = None, bankroll: float = 
                   persist_enabled=out["persist_enabled"],
                   persisted=out["persisted"],
                   persisted_duplicates=out["persisted_duplicates"],
-                  order_blocked=out["order_blocked"], **(out["market"] or {}))
+                  order_blocked=out["order_blocked"],
+                  clv=dict(out["clv"]), **(out["market"] or {}))
         return out
     except Exception as exc:                       # la shadow non rompe mai il job
         logger.warning("shadow: valutazione fallita (%s)", exc)
@@ -279,6 +361,100 @@ def run_shadow(*, signals: Optional[Sequence[Signal]] = None, bankroll: float = 
         obs.event("shadow.error", ctx=ctx, outcome="error",
                   error=f"{type(exc).__name__}: {exc}")
         return out
+
+
+# ---------------------------------------------------------------------------
+# Percorso CLV laterale: valutazione -> comando -> gateway (audit-only)
+# ---------------------------------------------------------------------------
+
+def _clv_closing(snapshot: Any, signal: Signal) -> Optional[float]:
+    """Closing line del percorso CLV: la quota corrente del feed per l'esito.
+
+    RESTITUISCE solo una quota (puo' essere None), non eccezioni mai: e' un
+    arricchimento della valutazione, non un prerequisito. La selezione e'
+    deterministica: stesso `event_id`, mercato 1X2, stessa selezione (`quote_
+    for` del feed). Con lo snapshot riusato dalla finestra (6oo secondi) la
+    quota e' comunque dentro il limite di freschezza del gate.
+    """
+    if snapshot is None:
+        return None
+    try:
+        quote = snapshot.quote_for(signal.match_id, "1X2", signal.outcome)
+    except Exception:
+        return None
+    if quote is None:
+        return None
+    try:
+        value = float(quote.odds)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 1.0 else None
+
+
+def _run_clv_lateral(signal: Signal, *, clv_gw: Any, shadow_gw: Any, out: dict,
+                     obs: Observability, ctx: TraceContext,
+                     snapshot: Any = None) -> Optional[float]:
+    """Valutazione CLV per UN segnale: puro -> comando -> gateway audit-only.
+
+    Esecuzione DIRETTA sul `ClvGateway` (un comando, un gateway: il dispatcher
+    instrada piani, qui non c'e' niente da instradare) e REGISTRAZIONE del
+    comando sullo stesso `ShadowGateway` del giro, cosi' il registro JSONL
+    mostra anche cio' che il percorso CLV avrebbe scritto. Contatore in
+    `out["clv"]` (ok/skipped/rejected/dispatched/errors) e span con
+    tracciabilita' (request/trace/span id). NON tocca mai `clv_history`: il
+    writer del gateway, in questo percorso, e' quello shadow. Ritorna la
+    differenza di quota se misurata (per la media del riepilogo).
+    """
+    from .clv import ClvInput, evaluate_clv
+    try:
+        evaluation = evaluate_clv(ClvInput(
+            signal_id=signal.signal_id,
+            market_id=signal.match_id,
+            outcome=signal.outcome,
+            signal_odds=float(signal.price),
+            closing_odds=_clv_closing(snapshot, signal),
+            source="decision-shadow",
+        ))
+    except Exception as exc:                       # mai rompere il giro shadow
+        out["clv"]["rejected"] += 1
+        out["clv"]["errors"] += 1
+        obs.event("clv.lateral_error", ctx=ctx, stage="clv", outcome="error",
+                  error=f"{type(exc).__name__}: {exc}")
+        return None
+
+    status = evaluation.status
+    key = "ok" if status == "ok" else status
+    if key in out["clv"]:
+        out["clv"][key] += 1
+    if not evaluation.emitted:
+        obs.event("clv.lateral", ctx=ctx, stage="clv", outcome=status,
+                  reason=evaluation.reason, detail=evaluation.detail,
+                  signal_id=signal.signal_id, match_id=signal.match_id)
+        return None
+
+    with obs.span("clv.write", ctx=ctx, stage="clv", outcome="ok",
+                  signal_id=signal.signal_id, match_id=signal.match_id,
+                  source="decision-shadow") as span:
+        result = clv_gw.execute(evaluation.dispatch, ctx=span, obs=obs)
+        # Registrazione nel registro shadow (dedup per dedup_key): e' il
+        # "sarebbe stato scritto" che si confronta a fine fase. Fail-safe:
+        # un registro non scrivibile non invalida la misura.
+        if shadow_gw is not None:
+            try:
+                shadow_gw.execute(evaluation.dispatch, ctx=span, obs=obs)
+            except Exception as exc:
+                logger.warning("clv: registrazione shadow fallita (%s)", exc)
+    dispatched = bool(result.ok and result.status == "executed")
+    if dispatched:
+        out["clv"]["dispatched"] += 1
+    else:
+        out["clv"]["errors"] += 1
+    obs.event("clv.lateral", ctx=span, stage="clv", outcome="ok" if dispatched else "error",
+              reason=evaluation.reason, dispatched=dispatched,
+              gateway=result.gateway, status=result.status,
+              clv_diff=evaluation.clv_diff, flags=list(evaluation.flags),
+              detail=result.detail)
+    return evaluation.clv_diff
 
 
 # ---------------------------------------------------------------------------
@@ -363,8 +539,9 @@ def format_report(summary_or_path: Any = None) -> str:
 
 
 __all__ = [
-    "REVIEWS_ENABLED_ENV", "SHADOW_ENABLED_ENV", "SHADOW_PERSIST_ENV",
-    "format_report", "iter_shadow_commands", "reviews_enabled", "run_shadow",
-    "shadow_enabled", "shadow_persist_enabled", "shadow_summary",
+    "CLV_ENV", "REVIEWS_ENABLED_ENV", "SHADOW_ENABLED_ENV", "SHADOW_PERSIST_ENV",
+    "clv_shadow_enabled", "format_report", "iter_shadow_commands",
+    "reviews_enabled", "run_shadow", "shadow_enabled",
+    "shadow_persist_enabled", "shadow_summary",
 ]
 

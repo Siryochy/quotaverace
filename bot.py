@@ -2285,6 +2285,39 @@ async def sx_signals_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("sx_signals_job: %d nuovi segnali value", len(signals))
 
 
+async def multi_market_job(context: ContextTypes.DEFAULT_TYPE):
+    """Corsia multi-mercato OU/AH (19/09): ingest SX + Poisson + ledger.
+
+    Legge i mercati a LINEA (type 2 = Over/Under, type 3 = Asian Handicap)
+    dall'API PUBBLICA di SX Bet (zero chiavi, zero crediti the-odds-api),
+    valida le quote col contratto 2.0 e le salva in `market_quotes`, calcola
+    i candidati con Poisson (push-aware) e li registra in `predictions`.
+
+    Da li' il giro auto-bet (ogni minuto) legge i pick: **AH con ordini
+    reali** (ENABLE_LIVE_AH=1), **OU in shadow** (ENABLE_LIVE_OU=0): i
+    segnali OU si generano e si misurano, ma non diventano ordini.
+    Silenzioso se non ci sono segnali giocabili. MM_ENABLED=0 per spegnerlo.
+    """
+    if os.getenv("MM_ENABLED", "1") != "1":
+        return
+    loop = asyncio.get_running_loop()
+
+    def _pass():
+        import multi_market
+        return multi_market.scan()
+
+    try:
+        found = await loop.run_in_executor(_scan_executor, _pass)
+    except Exception as e:
+        logger.error("multi_market_job: %s", e)
+        return
+    if not found:
+        return
+    live_n = sum(1 for f in found if f.get("live"))
+    logger.info("multi_market_job: %d segnali giocabili (%d corsie live)",
+                len(found), live_n)
+
+
 async def history_sync_job(context: ContextTypes.DEFAULT_TYPE):
     """Sincronizzazione risultati storici (API-Football) + ricalcolo rating.
 
@@ -2410,9 +2443,43 @@ async def backup_data_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"backup_data_job: {e}")
 
 
+def send_telegram_message_direct(text: str) -> None:
+    """Invia un messaggio Telegram usando le credenziali di config."""
+    import requests
+    # Prova prima TELEGRAM_TOKEN (signals-mvp .env), poi QUOTAVERACE_BOT_TOKEN (Railway)
+    token = os.getenv("TELEGRAM_TOKEN") or os.getenv("QUOTAVERACE_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID_FALLBACK", "")
+    if not token or not chat_id:
+        logger.warning("Token o chat_id Telegram mancanti, messaggio non inviato")
+        return
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+        resp = requests.post(url, json=payload, timeout=10)
+        if not resp.ok:
+            logger.warning(f"Telegram errore HTTP {resp.status_code}: {resp.text}")
+    except Exception as e:
+        logger.error(f"Errore invio Telegram: {e}")
+
 def main() -> None:
     if not TOKEN: raise ValueError("Token non configurato.")
     init_db()
+    from auto_bet import kill_switch_status, _execution_mode, t60_window
+    from decision.models import Mode
+    mode = os.getenv("AUTO_BET_MODE", "sim").strip().lower()
+    bankroll = get_bankroll()
+    ks = kill_switch_status()
+    summary = (
+        f"🤖 <b>Bot avviato in modalità {mode.upper()}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>Stato circuito:</b> {ks.get('effective', 'unknown')}\n"
+        f"🔧 <b>Modalità esecuzione:</b> {_execution_mode()}\n"
+        f"⏰ <b>Finestra T-60:</b> {t60_window(None)}\n"
+        f"💰 <b>Bankroll:</b> {bankroll:.2f} USDC\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"✅ Sistema pronto. Primo ciclo T-60 tra 60s."
+    )
+    send_telegram_message_direct(summary)
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("test_segnale", cmd_test_segnale))
     application.add_handler(CommandHandler("segnale", cmd_segnale))
@@ -2514,6 +2581,12 @@ def main() -> None:
         _sx_min = max(5, int(os.getenv("SX_SCAN_INTERVAL_MIN", "15")))
         job_queue.run_repeating(sx_signals_job, interval=_sx_min * 60,
                                 first=90,
+                                job_kwargs={"max_instances": 1})
+        # Corsia multi-mercato OU/AH (19/09): stesso intervallo dello scan
+        # 1X2 (default 15'), ingest + analisi Poisson + ledger. AH live, OU
+        # shadow. MM_ENABLED=0 per spegnerla senza toccare il 1X2.
+        job_queue.run_repeating(multi_market_job, interval=_sx_min * 60,
+                                first=150,
                                 job_kwargs={"max_instances": 1})
         # Revisioni umane (15/09): i verdetti `review` della catena diventano
         # prompt Telegram con bottoni. Frequenza 5 min (non c'e' fretta: il
