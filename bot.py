@@ -115,7 +115,16 @@ FILTRI_TXT = (f"EV {EV_MIN*100:.0f}%-{EV_MAX*100:.0f}% | "
 
 chat_bankrolls: dict[int, float] = {}
 
-def get_bankroll(chat_id: int) -> float:
+def get_bankroll(chat_id: int | None = None) -> float:
+    """Bankroll del chat (BANKROLL_DEFAULT se non impostato).
+
+    `chat_id` e' FACOLTATIVO di proposito: il messaggio di stato all'avvio non
+    ha un chat. Senza default la chiamata a `bot.main()` sollevava
+    `TypeError: get_bankroll() missing 1 required positional argument` e la
+    PRODUZIONE andava in crash-loop (bug trovato in produzione il 19/09/2026).
+    """
+    if chat_id is None:
+        return BANKROLL_DEFAULT
     return chat_bankrolls.get(chat_id, BANKROLL_DEFAULT)
 
 def set_bankroll(chat_id: int, amount: float) -> None:
@@ -2467,7 +2476,13 @@ def main() -> None:
     from auto_bet import kill_switch_status, _execution_mode, t60_window
     from decision.models import Mode
     mode = os.getenv("AUTO_BET_MODE", "sim").strip().lower()
-    bankroll = get_bankroll()
+    # Bankroll del messaggio di avvio: la cassa reale se disponibile, altrimenti
+    # il default. MAI `get_bankroll()` senza argomento (crash-loop del 19/09).
+    try:
+        from adaptive_staking import bankroll_stats
+        bankroll = float(bankroll_stats().get("current") or BANKROLL_DEFAULT)
+    except Exception:
+        bankroll = BANKROLL_DEFAULT
     ks = kill_switch_status()
     summary = (
         f"🤖 <b>Bot avviato in modalità {mode.upper()}</b>\n"

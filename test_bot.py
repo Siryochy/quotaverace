@@ -213,3 +213,28 @@ class TestHandlerTelegram:
         assert kwargs.get("parse_mode") == "Markdown"
 
 
+
+
+class TestBankrollAvvio:
+    """Tripwire del crash-loop del 19/09/2026.
+
+    `bot.main()` chiamava `get_bankroll()` senza argomento mentre la firma
+    richiedeva `chat_id`: OGNI avvio del container moriva con TypeError e la
+    produzione restava in 502. Il test blocca il ritorno di quella forma.
+    """
+
+    def test_get_bankroll_senza_argomento_usa_il_default(self):
+        import bot
+        assert bot.get_bankroll() == bot.BANKROLL_DEFAULT
+        assert bot.get_bankroll(None) == bot.BANKROLL_DEFAULT
+
+    def test_main_non_chiama_get_bankroll_senza_argomenti(self):
+        import ast
+        import pathlib
+        import bot
+        tree = ast.parse(pathlib.Path(bot.__file__).read_text(encoding="utf-8"))
+        offese = [node.lineno for node in ast.walk(tree)
+                  if isinstance(node, ast.Call)
+                  and getattr(node.func, "id", "") == "get_bankroll"
+                  and not node.args and not node.keywords]
+        assert offese == [], f"get_bankroll() senza chat_id alle righe {offese}"
