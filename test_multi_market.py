@@ -115,6 +115,10 @@ class TestFormati:
     def test_linea_zero_e_valida_per_l_ah(self):
         assert mm.parse_line("Home 0") == 0.0
         assert mm.line_key(0.0) == "0"
+        # Handicap pari: mai 'Away +-0' (visto in produzione il 19/09).
+        assert mm.ledger_esito("AH", "2", 0) == "Away 0"
+        assert mm.ledger_esito("AH", "1", 0) == "Home 0"
+        assert mm.sx_line_of_esito("Away 0") == 0.0
 
     def test_outcome_sides(self):
         assert mm.outcome_sides("OU", "Over 2.5", HOME, AWAY) == ("over", "under")

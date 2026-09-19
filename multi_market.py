@@ -200,7 +200,11 @@ def ledger_esito(market_type: str, selection: str, line: Any) -> str:
         return f"{side} {value:g}"
     home = str(selection) == "1"
     side_line = value if home else -value
-    sign = "+" if side_line >= 0 else ""
+    if abs(side_line) < 1e-9:
+        # Handicap pari: senza questa normalizzazione l'Away diventava
+        # 'Away +-0' (verificato in produzione il 19/09 sulle righe a linea 0).
+        side_line = 0.0
+    sign = "+" if side_line > 0 else ""
     return f"{'Home' if home else 'Away'} {sign}{side_line:g}"
 
 
