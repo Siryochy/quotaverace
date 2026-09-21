@@ -12,7 +12,8 @@ from poisson_engine import expected_goals, prob_1x2, ah_outcome_probs
 from value_filter import (compute_ev, kelly_fraction, kelly_euro, is_sane,
                            combined_quota, combined_probability, multipla_stake,
                            adjusted_probability, get_pro_stake,
-                           eligible_favourites, favourites_gate_reason)
+                           eligible_favourites, favourites_gate_reason,
+                           EV_MIN, EV_MAX, ODDS_MIN, ODDS_MAX, MARKET_EDGE_MIN)
 from market_calib import market_implied, MARKET_EDGE_STRONG
 from tracker import (save_match, get_today_matches, save_analysis, get_analysis_for_match,
                       clear_old_matches, save_clv, save_prediction)
@@ -592,7 +593,9 @@ def format_schedina(picks: List[Dict], bankroll: float = 100.0) -> str:
             f"*{i}. {p['evento']}*\n"
             f"   🎯 {p['esito']} @ {p['quota']:.2f} ({p['bookmaker']})\n"
             f"   📈 EV: +{p['ev']*100:.1f}%{mkt_txt} | Stake: €{stake:.2f} ({pro['stake_pct_of_bankroll']:.1f}% bankroll)\n"
-            f"   🛡 Filtri: Kelly 1/4 | Cap 1-2% | EV 2-15% | Odds 1.30-1.80 | Edge ≥ +3pp | Mercato: devig power\n\n"
+            f"   🛡 Filtri: Kelly 1/4 | Cap 1-2% | EV {EV_MIN*100:.0f}-{EV_MAX*100:.0f}% | "
+            f"Odds {ODDS_MIN:.2f}-{ODDS_MAX:.2f} | Edge ≥ +{MARKET_EDGE_MIN*100:.0f}pp | "
+            f"Mercato: devig power\n\n"
         )
     msg += f"💵 *Investimento totale:* €{total_stake:.2f} ({(total_stake/bankroll*100):.1f}% bankroll)\n"
     msg += f"💰 *Bankroll di riferimento:* €{bankroll:.2f}\n\n"

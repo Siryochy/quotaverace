@@ -12,8 +12,8 @@ Valida lo stack di produzione corrente su 4 stagioni di calcio europeo
   5. ENSEMBLE: XGBoost (o Logistic) calibrato con PAVA (ml_ensemble +
      probability_calibration), retrain periodico walk-forward sulle sole
      partite gia' chiuse.
-  6. FILTRO VALUE: is_sane (EV 2-15%, quota 1.30-1.80, edge >= +3pp,
-     strong_value >= +5pp).
+  6. FILTRO VALUE: is_sane (EV 2-15%, quota 1.30-1.80, edge >= +2pp,
+     strong_value >= +4pp — soglie lette da market_calib, 21/09/2026).
   7. ANTI-OVERCONFIDENCE (04/09): shrink ASIMMETRICO verso il mercato
      (solo sopra quota SHRINK_ODDS_MIN, i favoriti restano pieni),
      cap sull'edge e sotto-peso dei pareggi (vedi costanti SHRINK_LONG_SHOT /

@@ -79,8 +79,8 @@ class TestMarketEdge:
         assert market_edge(0.62, None) is None
 
     def test_beating_market_soglia(self):
-        assert is_beating_market(0.62, 0.565) is True    # +5.5pp >= 3pp
-        assert is_beating_market(0.58, 0.565) is False   # +1.5pp < 3pp
+        assert is_beating_market(0.62, 0.565) is True    # +5.5pp >= soglia
+        assert is_beating_market(0.58, 0.565) is False   # +1.5pp < soglia
         assert is_beating_market(0.565, 0.565) is False  # zero edge
 
     def test_beating_market_senza_mercato(self):

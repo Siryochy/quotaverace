@@ -18,7 +18,8 @@ from tracker import (init_db, log_signal, get_signals, get_performance_summary,
 from odds_ingest import load_odds
 from value_filter import (compute_ev, kelly_fraction, kelly_euro,
                           filter_value_bets, is_sane, get_pro_stake,
-                          EV_MIN, EV_MAX, ODDS_MIN, ODDS_MAX, MARKET_EDGE_MIN)
+                          EV_MIN, EV_MAX, ODDS_MIN, ODDS_MAX,
+                          MARKET_EDGE_MIN, MARKET_EDGE_STRONG)
 from surebet_scanner import scan_surebets
 from backtest import run_backtest
 from football_hist import run_sync
@@ -483,8 +484,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/campionati` – elenco squadre\n"
         "`/ai <pertanyaan>` – Comandante AI (Gemini)\n\n"
         "🛡 *Filtri Pro attivi (solo favoriti netti):*\n"
-        "• Quota: 1.30–1.80 | EV: +2% to +15%\n"
-        "• Edge vs mercato: +3pp (value) / +5pp (strong)\n"
+        f"• Quota: {ODDS_MIN:.2f}–{ODDS_MAX:.2f} | EV: +{EV_MIN*100:.0f}% to +{EV_MAX*100:.0f}%\n"
+        f"• Edge vs mercato: +{MARKET_EDGE_MIN*100:.0f}pp (value) / +{MARKET_EDGE_STRONG*100:.0f}pp (strong)\n"
         "• Kelly frazionato | Cap: 1% value, 2% strong\n"
         "• Stop-loss giornaliero: -5% → 24h"
     )

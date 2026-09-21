@@ -111,8 +111,9 @@ cd webapp && npm run build            # build Next.js
 2. **Il modello è corretto ORA** (fix 31/08): rating con shrink su `n` reale
    (il bug `wsum` collassava tutte le squadre a 1.0). Non "sistemare" la formula
    senza capire questo.
-3. **Edge = battere il mercato devigato** (min +3pp value, +5pp strong_value),
-   EV sulla probabilità blend modello+mercato. Vedere `STRATEGY.md`.
+3. **Edge = battere il mercato devigato** (min +2pp value, +4pp strong_value
+   dal 21/09/2026 — era +3pp/+5pp), EV sulla probabilità blend
+   modello+mercato. Vedere `STRATEGY.md`.
 4. **Mai cancellare `~/.npm-global`** (contiene CLI railway e vercel).
 5. **Python**: usare sempre `venv/bin/python`, mai `python` nudo.
 6. **DB**: migrazioni schema con ALTER TABLE idempotente in `tracker.py`
@@ -4203,3 +4204,84 @@ quelli di SX (con `STAKE_CAP_HARD=0` lo stake e' il floor 1 USDC); (b) l'OU non
 produce ordini finche' `ENABLE_LIVE_OU` resta 0 — i suoi segnali si misurano con
 `multi_market.py report`; (c) se `resolve_market_for` non trova la linea, l'ordine
 non parte e NON lascia righe sul ledger (fail-closed, nessun falso P/L).
+
+### Volume di scommesse: edge a +2pp, finestra T-120, OU ancora shadow (21/09/2026)
+
+Direttiva del proprietario: **aumentare il volume di puntate giornaliere** (il
+sistema e' troppo rigido: 1-2 ordini a settimana) con cinque modifiche
+"in sequenza". Prima di applicarle sono state riportate le misure gia' in
+questo file: 3 delle 5 contraddicono un dato registrato. Le scelte sono state
+confermate esplicitamente dal proprietario con quattro domande.
+
+**1) ✅ APPLICATO — soglia di edge +3pp/+5pp -> +2pp/+4pp** (`market_calib.py`:
+`MARKET_EDGE_MIN` e `MARKET_EDGE_MODERATE` 0.03 -> **0.02**, `MARKET_EDGE_STRONG`
+0.05 -> **0.04**). `value_filter.DEFAULT_LEAGUE_STRATEGY.min_edge` allineato a
+0.02 (era l'unico posto ancora a 3pp). ⚠️ E' la **direzione opposta** alla
+prudenza dell'11/09, che era stata ripristinata il 13/09 dopo il commit
+"FREQUENZA boost": qui la scelta e' **tracciata e voluta**, non un guadagno
+tecnico. Il caso `is_sane(prob .62, quota 1.65, market_prob .60)` (edge +2pp)
+passa **ora** e veniva respinto prima.
+- **Tripwire riallineato di proposito**: `test_risk_guards.TestFasciaFavoriti`
+  ora asserisce **uguaglianza esatta** (`== 0.02` / `== 0.04`) e
+  `test_edge_sotto_2pp_bocciato` (+1pp respinto, +2pp passa); `test_value_filter`
+  due assert aggiornati. L'uguaglianza e' la protezione: un ulteriore
+  abbassamento deve essere una decisione tracciata qui, non un silenzio.
+- **Telemetria/testi derivati dalle costanti** (lezione 13/09 sui testi
+  stantii): `performance_report._edge_analysis` legge i bucket da
+  `MARKET_EDGE_STRONG`/`MARKET_EDGE_MODERATE` (erano 0.05/0.03 in SQL) e il
+  report stampa le soglie reali; `backtest._edge_split` usa `MARKET_EDGE_MIN`
+  (era 0.03); `bot.py` (blocco 🛡 Filtri Pro), `fixture_engine.py` (riga filtri
+  schedina), `liquidity_impact.py` (sensibilita' + marcatore "attuale" + testo
+  finale), `STRATEGY.md` e le due pagine webapp aggiornati.
+- **Test**: `test_performance_report.TestEdgeAnalysis` derivava gli edge dei
+  bucket da valori fissi (0.08/0.04/0.01) e **sarebbe scaduto in silenzio** al
+  cambio di soglia: ora li calcola dalle costanti (stessa lezione delle date
+  relative del 15/09).
+- **NON toccato**: `market_diagnose.GAP_PP` resta 3.0 — e' la soglia di rumore
+  ROI-vs-EV (diagnosi), non il gate di edge: il commento ora lo dichiara.
+
+**2) ⛔ NON applicato — `ENABLE_LIVE_OU=1` (OU resta SHADOW).** Il proprietario
+ha scelto di **rimisurare prima**: il leak storico e' **-6.8% su 924 bet**
+(06/09) e il backtest del 12/09 da' `by_market` OU **-6.85%**; la direttiva del
+19/09 imponeva lo shadow "prima di rimetterci denaro". I segnali OU continuano a
+generarsi e registrarsi (telemetria misurabile con `multi_market.py report`).
+
+**3) ⛔ NON applicato — liquidita' AH 25 -> 10 USDC (resta 25 su TUTTE le
+corsie).** La misura dell'11/09 con `liquidity_impact.py` dice che a **25 USDC
+passa il 100% dei favoriti (42/42)** e a 50 USDC 41/42 (size al floor: p10 102,
+p50 263, p90 986 USDC): abbassare a 10 darebbe **guadagno di volume zero**
+togliendo la protezione da slippage. In piu' `SX_MIN_EXEC_DEPTH_USDC` e' **una
+sola env** condivisa da `sx_signals` (scan), `auto_bet` (ordine),
+`multi_market` e `decision.limits`: la si abbasserebbe anche per il 1X2 e per
+la catena `decision`, non solo per l'AH.
+
+**4) ⚠️ DA APPLICARE IN PRODUZIONE — finestra esecutiva T-60 -> T-120**
+(`T60_WINDOW_MIN_MIN=120`, chiusura `T60_WINDOW_MAX_MIN=50` invariata). E' la
+sola delle cinque con effetto reale sul volume senza indebolire un guardrail
+misurato: il verdetto `missed` e' fail-closed e `sx_signals_job` (ogni 15',
+~4-5 min per giro) con `max_instances=1` puo' far saltare la finestra di 10
+minuti. Parametro **solo env** (gia' in `preserve()`), nessuna modifica di
+codice; in locale valgono i default 60/50 e `test_t60_breakers` resta verde.
+
+**5) ⚠️ DA ESEGUIRE — scansione `multi_market.py`** per contare i pick
+giocabili sbloccati. ⚠️ Va eseguita **sul container**: il DB locale ha 0 righe
+in `team_ratings` (i rating vivono sul volume Railway), quindi il gate modello
+qui misura il profilo NEUTRO e non e' rappresentativo (caveat del misuratore,
+11/09).
+
+**Il vero collo di bottiglia NON sono queste soglie.** Per "1-2 ordini a
+settimana" la misura del 15/09 indicava: **gate leghe** (`STRATEGY_LEAGUES`, 5
+campionati) → **0 pick giocabili nelle leghe ammesse** su 72h, con le 5
+giocabili tutte in leghe vietate; e il **tetto CB1 `T60_MAX_STAKE_USDC=1.00`**
+(con `STAKE_CAP_HARD=0` il floor 1 USDC prevale). Se l'obiettivo e' la
+**crescita del capitale**, il volume di pick a 1 USDC non la cambia: le leve
+sono il gate leghe e la dimensione per ordine, non la liquidita'/edge.
+
+**Verifica locale eseguita**: 400 test verdi nei due lotti mirati
+(`test_risk_guards`, `test_value_filter`, `test_market_calib`,
+`test_performance_report`, `test_decision_pipeline`, `test_decision_limits`,
+`test_multi_market`, `test_t60_breakers`, `test_league_gate`, `test_bot`,
+`test_sx_signals`, `test_backtest`, `test_liquidity_impact`, `test_auto_bet*`,
+`test_favourites_only`, `test_secret_hygiene`, `test_tier`),
+`verify_guardrails.py` **A-G tutti bloccano** (exit 0), 0 marker di conflitto,
+`compileall` OK.

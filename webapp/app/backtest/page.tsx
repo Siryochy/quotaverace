@@ -71,7 +71,7 @@ export default function Backtest() {
         </p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="bg-emerald-900/30 border border-emerald-500/30 p-4 rounded-lg">
-            <div className="text-gray-400 text-sm">✅ Batte il mercato (edge ≥ +3pp)</div>
+            <div className="text-gray-400 text-sm">✅ Batte il mercato (edge ≥ +2pp)</div>
             <div className="text-2xl font-bold text-emerald-400">{beats ? `${beats.roi >= 0 ? '+' : ''}${beats.roi.toFixed(2)}%` : 'n.d.'}</div>
             <div className="text-sm text-gray-400">{beats ? `${beats.n} segnali` : 'nessun dato'}</div>
           </div>

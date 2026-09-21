@@ -47,8 +47,8 @@ WALLET_EQUITY_17_09 = 36.0
 BANKROLL_GRID = (25.0, 36.0, 50.0, 75.0, 100.0, 150.0, 250.0, 500.0)
 TIERS = ("value", "moderate", "strong_value")
 # Parametri rappresentativi dei segnali che la strategia produce (favoriti
-# netti 1.30-1.80, edge >= +3pp, EV >= 2%): servono a descrivere la forma,
-# non a inventare un campione.
+# netti 1.30-1.80, edge >= +2pp dal 21/09, EV >= 2%): servono a descrivere
+# la forma, non a inventare un campione.
 DEFAULT_PRICE = 1.70
 DEFAULT_EDGE = 0.03
 DEFAULT_EV = 0.05

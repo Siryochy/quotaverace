@@ -1640,8 +1640,8 @@ def run_today_bets(stake_eur: float | None = None,
                                 EV_MIN, ODDS_MIN, ODDS_MAX, MARKET_EDGE_MIN)
 
     # --- Soglie lette dalle costanti di value_filter: il log non puo'
-    # divergere dalla strategia reale (guardrail prudenti ripristinati il
-    # 13/09: favoriti netti 1.30-1.80 ed edge minimo +3pp sul mercato). ---
+    # divergere dalla strategia reale (favoriti netti 1.30-1.80; edge minimo
+    # +2pp sul mercato dal 21/09, era +3pp). ---
     logger.info("auto_bet: strategia favoriti netti (EV_MIN=%.0f%%, ODDS "
                 "%.2f-%.2f, edge >= +%.0fpp, adaptive Kelly)",
                 EV_MIN * 100, ODDS_MIN, ODDS_MAX, MARKET_EDGE_MIN * 100)

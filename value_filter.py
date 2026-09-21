@@ -6,7 +6,7 @@ from market_calib import (
     blend_probability,
     favourite_longshot_adjust,
     market_edge as _market_edge,
-    MARKET_EDGE_MIN,  # ri-esportata: soglia +3pp sul mercato (11/09)
+    MARKET_EDGE_MIN,  # ri-esportata: soglia +2pp sul mercato (21/09)
     MARKET_EDGE_MODERATE,
     MARKET_EDGE_STRONG,
     LEAGUE_EFFICIENCY,
@@ -85,10 +85,10 @@ STRATEGY_LEAGUES = {
 }
 
 # Fallback per leghe non in STRATEGY_LEAGUES (vietate per default)
-# NB: min_edge allineato al guardrail 11/09 (+3pp): il fallback si applica
-# solo ai segnali con lega VUOTA — le leghe note ma non in STRATEGY_LEAGUES
-# vengono rifiutate prima da league_allowed.
-DEFAULT_LEAGUE_STRATEGY = {"min_edge": 0.03, "kelly_mult": 0.5, "max_stake": 0.005}
+# NB: min_edge allineato alla soglia di edge corrente (+2pp dal 21/09): il
+# fallback si applica solo ai segnali con lega VUOTA — le leghe note ma non in
+# STRATEGY_LEAGUES vengono rifiutate prima da league_allowed.
+DEFAULT_LEAGUE_STRATEGY = {"min_edge": 0.02, "kelly_mult": 0.5, "max_stake": 0.005}
 
 FAVOURITES_ONLY = True   # mantenere: evita sfavorite ad alta quota
 MIN_FAVOURITE_MARKET_PROB = 0.50   # prob. di mercato minima del favorito

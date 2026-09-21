@@ -129,12 +129,14 @@ def backtest(bets: List[Dict]) -> Dict:
     ev_total = sum(r["ev"] for r in records)
 
     # Split per edge sul mercato (ricerca 2026): i segnali che BATTONO la
-    # closing line (market_edge >= 3pp) dovrebbero performare meglio di
-    # quelli che non la battono. E' il test decisivo della calibrazione.
+    # closing line dovrebbero performare meglio di quelli che non la battono.
+    # E' il test decisivo della calibrazione. La soglia e' QUELLA DEL GATE
+    # REALE (MARKET_EDGE_MIN), non un numero copiato: dal 21/09 e' +2pp.
+    from market_calib import MARKET_EDGE_MIN as _edge_gate
     beats = [r for r in records if r.get("market_edge") is not None
-             and r["market_edge"] >= 0.03]
+             and r["market_edge"] >= _edge_gate]
     no_beats = [r for r in records if r.get("market_edge") is not None
-                and r["market_edge"] < 0.03]
+                and r["market_edge"] < _edge_gate]
 
     def _roi(group):
         if not group:

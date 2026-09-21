@@ -119,19 +119,26 @@ class TestStreaks:
 
 class TestEdgeAnalysis:
     def test_edge_counts(self, temp_db):
+        from market_calib import MARKET_EDGE_MODERATE, MARKET_EDGE_STRONG
+        # I bucket sono DERIVATI dalle soglie reali della strategia: un test
+        # con edge fissi (0.08/0.04/0.01) scadeva in silenzio al primo cambio
+        # di soglia (verificato il 21/09, quando il minimo e' passato a +2pp).
+        over_strong = MARKET_EDGE_STRONG + 0.03
+        in_value = MARKET_EDGE_MODERATE + 0.01
+        under_min = MARKET_EDGE_MODERATE - 0.01
         # 3 previsioni con edge diverso
         tracker.save_result("m0", "L", "A", "B", 2, 0,
                             datetime.now().isoformat())
         _seed_prediction("m0", "1X2", "1", 2.00, 0.55, 0.10, "won",
-                         market_edge=0.08)
+                         market_edge=over_strong)
         tracker.save_result("m1", "L", "C", "D", 0, 2,
                             datetime.now().isoformat())
         _seed_prediction("m1", "1X2", "1", 2.00, 0.55, 0.10, "won",
-                         market_edge=0.04)
+                         market_edge=in_value)
         tracker.save_result("m2", "L", "E", "F", 2, 0,
                             datetime.now().isoformat())
         _seed_prediction("m2", "1X2", "1", 2.00, 0.55, 0.10, "won",
-                         market_edge=0.01)
+                         market_edge=under_min)
         res = performance_report.get_performance(days=30)
         e = res["edge"]
         assert e["strong_value_n"] == 1

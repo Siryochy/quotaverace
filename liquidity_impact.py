@@ -457,9 +457,13 @@ def analyse(rows: List[dict], with_model: bool = False) -> dict:
             for lg, v in sorted(_by_lg.items(), key=lambda kv: -len(kv[1]))]
 
         # Sensibilita' del gate: quanti favoriti passerebbero con una soglia
-        # di edge diversa (l'EV_MIN resta quello di produzione).
+        # di edge diversa (l'EV_MIN resta quello di produzione). La soglia
+        # ATTUALE entra SEMPRE nella griglia e si legge dalla strategia: e'
+        # il riferimento del report (era 0.03, dal 21/09 e' 0.02).
         from value_filter import is_sane
-        for edge_min in (0.0, 0.02, 0.03, 0.05):
+        from market_calib import MARKET_EDGE_MIN as _cur_edge
+        _grid = sorted({0.0, 0.02, 0.03, 0.05, round(float(_cur_edge), 4)})
+        for edge_min in _grid:
             ok = 0
             for r in favs:
                 if r.get("best_prob") is None:
@@ -639,8 +643,10 @@ def format_report(data: dict) -> str:
                 L.append("         Il numero di segnali value NON e' "
                          "rappresentativo della produzione.")
         if data.get("gate_sensitivity"):
+            from market_calib import MARKET_EDGE_MIN as _cur_edge
             for g in data["gate_sensitivity"]:
-                star = "  <- attuale" if abs(g["edge_min"] - 0.03) < 1e-9 else ""
+                star = ("  <- attuale"
+                        if abs(g["edge_min"] - float(_cur_edge)) < 1e-9 else "")
                 L.append(f"        edge >= {g['edge_min']*100:>4.0f}pp -> "
                          f"{g['signals']:>3}/{g['tested']} segnali "
                          f"({g['pct']:.1f}%){star}")
@@ -717,18 +723,23 @@ def verdict(data: dict) -> List[str]:
     mg = data.get("model_gate") or {}
     if f.get("value_signals", 0) == 0:
         if mg.get("measurable"):
-            out.append("Zero segnali value con il GATE MODELLO attuale (EV +3pp): "
-                       "il collo di bottiglia NON e' la liquidita'. "
+            from market_calib import MARKET_EDGE_MIN as _cur_edge
+            _pp = f"{float(_cur_edge)*100:.0f}pp"
+            out.append(f"Zero segnali value con il GATE MODELLO attuale "
+                       f"(edge +{_pp}): il collo di bottiglia NON e' la "
+                       "liquidita'. "
                        f"Edge mediano del modello sul favorito di mercato: "
                        f"{_fmt_med(mg.get('fav_edge_all'))}.")
             gs = data.get("gate_sensitivity") or []
-            cur = next((g for g in gs if abs(g["edge_min"] - 0.03) < 1e-9), None)
-            loose = next((g for g in gs if abs(g["edge_min"] - 0.02) < 1e-9), None)
-            if cur and loose:
-                out.append(f"Con edge >=3pp (attuale) i segnali sono "
-                           f"{cur['signals']}/{cur['tested']}; con l'edge >=2pp "
-                           f"del 10/09 sarebbero {loose['signals']}/"
-                           f"{loose['tested']} ({loose['pct']:.1f}%).")
+            cur = next((g for g in gs
+                        if abs(g["edge_min"] - float(_cur_edge)) < 1e-9), None)
+            loose = min(gs, key=lambda g: g["edge_min"], default=None)
+            if cur and loose is not None and loose is not cur:
+                out.append(f"Con edge >= {_pp} (attuale) i segnali sono "
+                           f"{cur['signals']}/{cur['tested']}; con l'edge "
+                           f">= {loose['edge_min']*100:.0f}pp sarebbero "
+                           f"{loose['signals']}/{loose['tested']} "
+                           f"({loose['pct']:.1f}%).")
         else:
             out.append("GATE MODELLO NON MISURABILE in questo ambiente: nel DB "
                        "locale non c'e' nessun rating (0 righe team_ratings), "

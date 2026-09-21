@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from tracker import _get_conn
+from market_calib import MARKET_EDGE_MODERATE, MARKET_EDGE_STRONG
 
 
 def _safe_float(v, default=0.0) -> float:
@@ -351,17 +352,21 @@ def _by_league(conn, start: str, end: str) -> Dict:
 
 def _edge_analysis(conn, start: str, end: str) -> Dict:
     """Analisi edge vs mercato."""
+    # Le soglie dei bucket sono i valori REALI della strategia (non numeri
+    # copiati): se la soglia di edge cambia, il report segue senza restare
+    # indietro (lezione del 13/09 sui testi operativi stantii).
     c = conn.cursor()
     rows = c.execute(
         "SELECT "
-        "  SUM(CASE WHEN market_edge >= 0.05 THEN 1 ELSE 0 END) as strong, "
-        "  SUM(CASE WHEN market_edge >= 0.03 AND market_edge < 0.05 THEN 1 ELSE 0 END) as value, "
-        "  SUM(CASE WHEN market_edge < 0.03 THEN 1 ELSE 0 END) as weak, "
+        "  SUM(CASE WHEN market_edge >= ? THEN 1 ELSE 0 END) as strong, "
+        "  SUM(CASE WHEN market_edge >= ? AND market_edge < ? THEN 1 ELSE 0 END) as value, "
+        "  SUM(CASE WHEN market_edge < ? THEN 1 ELSE 0 END) as weak, "
         "  AVG(market_edge) as avg_edge "
         "FROM predictions "
         "WHERE settled_at >= ? AND settled_at <= ? "
         "  AND esito_finale IS NOT NULL",
-        (start, end + "T23:59:59")).fetchone()
+        (MARKET_EDGE_STRONG, MARKET_EDGE_MODERATE, MARKET_EDGE_STRONG,
+         MARKET_EDGE_MODERATE, start, end + "T23:59:59")).fetchone()
 
     strong, value, weak, avg_edge = (rows or (0, 0, 0, 0))
     return {
@@ -459,9 +464,9 @@ def _report(res: Dict) -> str:
     if total_edge > 0:
         lines.extend([
             "🎯 *EDGE VS MERCATO*",
-            f"   Strong value (+5pp): {edge['strong_value_n']}",
-            f"   Value (+3pp): {edge['value_n']}",
-            f"   Weak (<3pp): {edge['weak_n']}",
+            f"   Strong value (+{MARKET_EDGE_STRONG*100:.0f}pp): {edge['strong_value_n']}",
+            f"   Value (+{MARKET_EDGE_MODERATE*100:.0f}pp): {edge['value_n']}",
+            f"   Weak (<{MARKET_EDGE_MODERATE*100:.0f}pp): {edge['weak_n']}",
             f"   Edge medio: {edge['avg_edge_pp']:+.1f}pp",
         ])
 

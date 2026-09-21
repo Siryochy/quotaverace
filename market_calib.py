@@ -34,12 +34,20 @@ from typing import Dict, List, Optional
 
 # --- Soglie di mercato (ricerca: servono almeno 3-5 punti percentuali
 # --- di edge vs la closing line perche' il valore non sia rumore)
-# Edge minimo vs mercato (11/09): il modello deve stimare una prob. di
-# vittoria SUPERIORE a quella devigata dei bookmaker di almeno +3pp;
-# +5pp per "strong_value". Non si scommette mai il favorito "alla cieca".
-MARKET_EDGE_MIN = 0.03          # +3pp vs mercato (guardrail 11/09)
-MARKET_EDGE_MODERATE = 0.03     # +3pp per moderate
-MARKET_EDGE_STRONG = 0.05       # +5pp vs mercato (strong_value)
+# Edge minimo vs mercato (ABBASSATO il 21/09/2026 su direttiva del
+# proprietario, per aumentare il volume di pick): il modello deve stimare
+# una prob. di vittoria SUPERIORE a quella devigata dei bookmaker di almeno
+# +2pp; +4pp per "strong_value". Non si scommette mai il favorito "alla
+# cieca".
+# ⚠️ Direzione OPPOSTA alla prudenza dell'11/09 (+3pp/+5pp), che era stata
+# ripristinata il 13/09 dopo il commit "FREQUENZA boost": la soglia e' una
+# SCELTA di strategia del proprietario, non un guadagno tecnico. Il tripwire
+# `test_risk_guards.TestFasciaFavoriti` e' stato riallineato di conseguenza
+# (prima asseriva >= 0.03): la protezione e' la DECISIONE tracciata qui, non
+# un numero che si puo' cambiare in silenzio.
+MARKET_EDGE_MIN = 0.02          # +2pp vs mercato (direttiva 21/09/2026)
+MARKET_EDGE_MODERATE = 0.02     # +2pp per moderate
+MARKET_EDGE_STRONG = 0.04       # +4pp vs mercato (strong_value)
 
 # Peso del modello nel blending modello+mercato (0.5 = pari peso).
 # Il mercato e' quasi sempre piu' calibrato del modello: non superare 0.6.

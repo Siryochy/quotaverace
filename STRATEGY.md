@@ -32,7 +32,7 @@ lungo periodo — CLV è il segnale, il record vittorie/sconfitte è rumore.
 - `tracker.py` → `clv_history`: confronta la quota del segnale con la quota
   di chiusura del mercato (media CLV mostrata in `/stats`).
 - `backtest.py` → split ROI tra segnali che **battono il mercato** (edge
-  ≥ +3pp) e quelli che non lo battono.
+  ≥ +2pp) e quelli che non lo battono.
 
 ## Devigging: la probabilità "vera" è quella del mercato privata del margine
 
@@ -77,8 +77,8 @@ viene calcolato su questa probabilità blend.
                         con correzione longshot sopra quota 3.5.
 4. EV                 → calcolato sulla probabilità blend.
 5. BEATING THE MARKET → il segnale è valore SOLO se il modello batte il
-                        mercato di almeno +3pp (MARKET_EDGE_MIN);
-                        strong_value richiede EV>8% e edge ≥ +5pp.
+                        mercato di almeno +2pp (MARKET_EDGE_MIN, dal 21/09);
+                        strong_value richiede edge ≥ +4pp (MARKET_EDGE_STRONG).
 ```
 
 ## Gestione del bankroll (Kelly frazionario)

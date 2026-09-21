@@ -31,7 +31,9 @@ from typing import Dict, List, Optional
 # Soglie di default, coerenti con STRATEGY.md:
 # - MIN_TOTAL: primo segnale affidabile da ~100 previsioni chiuse;
 # - MIN_PER_MARKET: sotto 10 chiusi per mercato e' solo rumore;
-# - GAP_PP: soglia coerente con MARKET_EDGE_MIN (+3pp) usata dal filtro value;
+# - GAP_PP: rumore ammesso tra ROI realizzato ed EV atteso (3pp). E' una
+#   soglia di DIAGNOSI, indipendente dal gate di edge di value_filter (che
+#   dal 21/09 vale +2pp): non va allineata a quella.
 # - PROB_GAP_PP: overconfidence se hit rate < prob media di almeno 5pp.
 MIN_TOTAL = 100
 MIN_PER_MARKET = 10

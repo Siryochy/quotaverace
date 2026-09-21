@@ -1,7 +1,8 @@
 """Test dei guardrail di rischio aggiunti l'11/09/2026.
 
 1. Quota minima: fascia favoriti 1.30-1.80 (ODDS_MIN 1.30).
-2. Filtro di edge: +3pp minimo vs mercato (MARKET_EDGE_MIN), +5pp strong.
+2. Filtro di edge: +2pp minimo vs mercato (MARKET_EDGE_MIN), +4pp strong
+   (direttiva del proprietario, 21/09/2026: era +3pp/+5pp).
 3. Stop-loss giornaliero: -5% dal bankroll di inizio giornata -> puntate
    bloccate per 24h (stato persistente sul volume).
 4. Filtro liquidita' SX Bet: niente segnali/ordini su mercati sottili
@@ -43,9 +44,13 @@ class TestFasciaFavoriti:
                                   MARKET_EDGE_STRONG)
         assert vf.ODDS_MIN == 1.30
         assert vf.ODDS_MAX == 1.80         # favoriti netti (niente "pantano")
-        assert MARKET_EDGE_MIN >= 0.03     # +3pp minimo vs mercato
-        assert MARKET_EDGE_MODERATE >= 0.03
-        assert MARKET_EDGE_STRONG >= 0.05  # +5pp per strong_value
+        # Direttiva 21/09/2026: soglia di edge abbassata a +2pp (strong +4pp)
+        # per aumentare il volume di pick. Uguaglianza ESATTA di proposito:
+        # un ulteriore abbassamento e' una decisione di strategia, non un
+        # dettaglio — va tracciata in AGENTS.md, non fatto in silenzio.
+        assert MARKET_EDGE_MIN == 0.02     # +2pp minimo vs mercato
+        assert MARKET_EDGE_MODERATE == 0.02
+        assert MARKET_EDGE_STRONG == 0.04  # +4pp per strong_value
 
     def test_quota_sotto_il_minimo_bocciata(self):
         from value_filter import is_sane
@@ -55,15 +60,16 @@ class TestFasciaFavoriti:
         ok, _ = is_sane(0.80, 1.31, 0.048, market_prob=0.75)
         assert ok
 
-    def test_edge_sotto_3pp_bocciato(self):
+    def test_edge_sotto_2pp_bocciato(self):
         from value_filter import is_sane
-        # Guardrail 11/09: +3pp minimo vs mercato (il fallback
-        # DEFAULT_LEAGUE_STRATEGY e' allineato a +3pp).
+        # Direttiva 21/09/2026: +2pp minimo vs mercato (il fallback
+        # DEFAULT_LEAGUE_STRATEGY e' allineato a +2pp).
         ok, reason = is_sane(0.61, 1.65, 0.02, market_prob=0.60)   # +1pp
         assert not ok and "non batte il mercato" in reason
+        # +2pp: OK (con la soglia a +3pp questo caso era respinto)
         ok, reason = is_sane(0.62, 1.65, 0.03, market_prob=0.60)   # +2pp
-        assert not ok and "non batte il mercato" in reason
-        # +3pp: OK
+        assert ok, reason
+        # +4pp (fascia strong_value): OK
         ok, _ = is_sane(0.64, 1.65, 0.05, market_prob=0.60)
         assert ok
 
