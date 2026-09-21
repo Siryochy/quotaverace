@@ -4396,11 +4396,26 @@ verso the-odds-api**, indipendentemente dalla rotazione ridotta
 `_get_odds` (rotazione quote → ritorna `[], 0`) e `fetch_scores` (settlement →
 ritorna i punteggi GIA' in cache, mai dati inventati). Fail-open sull'assenza di
 telemetria (nessuna cache `toa_*.json`), stessa direzione di `should_query_sport`;
-il warning esce UNA volta per processo. Test in `test_odds_api.py`:
+il warning esce UNA volta per processo. **Secondo fail-safe — telemetria
+VECCHIA**: una cache sotto soglia piu' vecchia di `CREDIT_HARD_STOP_MAX_AGE_H`
+(env `ODDS_CREDIT_PROBE_HOURS`, default 6h) NON blocca. La cache si aggiorna
+solo con una chiamata e le chiamate sono bloccate: senza questa via d'uscita
+una **chiave sostituita o il reset del 1° ottobre resterebbero invisibili per
+sempre** (blocco eterno). Passa UN probe, che la risposta 429 riporta a costo
+ZERO crediti. Telemetria senza timestamp -> non si blocca (eta' ignota). Test in `test_odds_api.py`:
 soglia (4 → blocco, 5 → no, telemetria assente → no), costante configurabile,
 rotazione bloccata + controprova a 50 crediti, settlement su cache +
 controprova. ⚠️ `surebet_engine.py` resta **INDIPENDENTE per design** (tripwire:
 mai import da tracker/bot): ha la sua guardia `SUREBET_MIN_REMAINING` (50).
+
+**Stato crediti verificato sul container il 21/09 (sera)**: `ODDS_API_KEY` e'
+ANCORA quella vecchia (len 32, sha12 `5c483976d988`, invariata dal 12/09) → la
+chiave di backup annunciata dal proprietario **NON e' arrivata sul servizio
+`api`** (`railway variables --service api --set ODDS_API_KEY=...`). La
+telemetria piu' recente e' del **20/09 15:32** (Eliteserien, `remaining: 1`):
+e' ~29h vecchia, quindi con il hard stop scatta la regola di PROBE (vedi
+sopra) e il sistema non resta mai cieco. ⚠️ Senza la regola di probe la chiave
+nuova non sarebbe MAI stata vista (la cache non si aggiorna senza chiamate).
 
 **Template Telegram "BOT - TRADING - CRYPTO"**: **NON esiste in questo repo**.
 Le uniche uscite Telegram sono messaggi costruiti nel codice (nessun

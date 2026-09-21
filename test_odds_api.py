@@ -507,6 +507,43 @@ def test_credits_hard_stop_segue_la_costante(monkeypatch, tmp_path):
     assert odds_api.credits_hard_stopped() is True
 
 
+def test_telemetria_vecchia_sotto_soglia_non_blocca(monkeypatch, tmp_path):
+    """Una telemetria sotto soglia ma VECCHIA non blocca: la cache si aggiorna
+    solo con una chiamata e le chiamate sono bloccate, quindi senza il probe
+    una chiave sostituita o il reset mensile resterebbero invisibili per
+    sempre (blocco eterno).
+    """
+    import time
+    odds_api = _credit_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(odds_api, "_credit_stop_logged", False)
+    monkeypatch.setattr(odds_api, "_credit_probe_logged", False)
+    _credit_cache(
+        tmp_path, "soccer_epl", 1,
+        time.time() - odds_api.CREDIT_HARD_STOP_MAX_AGE_H * 3600 - 60)
+    assert odds_api.credits_hard_stopped() is False
+
+
+def test_telemetria_fresca_sotto_soglia_blocca(monkeypatch, tmp_path):
+    """Controprova: la stessa telemetria FRESCA blocca davvero."""
+    import time
+    odds_api = _credit_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(odds_api, "_credit_stop_logged", False)
+    monkeypatch.setattr(odds_api, "_credit_probe_logged", False)
+    _credit_cache(tmp_path, "soccer_epl", 1, time.time())
+    assert odds_api.credits_hard_stopped() is True
+
+
+def test_telemetria_senza_timestamp_non_blocca(monkeypatch, tmp_path):
+    """Formato vecchio senza timestamp: eta' ignota -> non si blocca (non si
+    puo' sapere se il valore e' obsoleto)."""
+    import json
+    odds_api = _credit_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(odds_api, "_credit_probe_logged", False)
+    (tmp_path / "toa_soccer_epl.json").write_text(json.dumps(
+        {"payload": [], "remaining": 2}))
+    assert odds_api.credits_hard_stopped() is False
+
+
 def test_hard_stop_blocca_la_rotazione_quote(monkeypatch, tmp_path):
     """La rotazione ridotta NON basta: a 4 crediti `_get_odds` non chiama
     l'API (nessun 429 nei log) e ritorna vuoto come fa `should_query_sport`."""

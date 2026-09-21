@@ -28,14 +28,21 @@ CREDIT_EMERGENCY = 15     # sotto 15: solo Serie A, PL, La Liga
 # le 3 leghe "di emergenza" brucerebbero l'ultimo credito riempiendo i log di
 # errori: da qui in giu' si usano SOLO le cache gia' presenti.
 CREDIT_HARD_STOP = int(os.getenv("ODDS_CREDIT_HARD_STOP", "5"))
+# ...ma una telemetria VECCHIA non e' una telemetria VALIDA: la cache si
+# aggiorna solo con una chiamata, e le chiamate sono bloccate — una chiave
+# sostituita o il reset mensile del piano non si vedrebbero MAI (blocco
+# eterno). Oltre questa finestra la cache sotto soglia non basta piu' a
+# bloccare: si lascia passare UN probe (la risposta 429 non consuma crediti e
+# riporta il contatore fresco).
+CREDIT_HARD_STOP_MAX_AGE_H = float(os.getenv("ODDS_CREDIT_PROBE_HOURS", "6"))
 
 CORE_LEAGUES_HIGH = {"soccer_italy_serie_a", "soccer_england_pl", "soccer_spain_la_liga",
                       "soccer_germany_bundesliga", "soccer_france_ligue_one",
                       "soccer_efl_champ"}
 CORE_LEAGUES_EMERGENCY = {"soccer_italy_serie_a", "soccer_england_pl", "soccer_spain_la_liga"}
 
-def _latest_credits():
-    """(crediti_residui, n_cache) secondo la lettura PIU' RECENTE.
+def _latest_credits_detail():
+    """(crediti, ts_lettura, n_cache) della lettura PIU' RECENTE.
 
     Ogni risposta dell'API riporta lo stesso contatore autoritativo
     (`x-requests-remaining`), quindi vale l'ULTIMA lettura per data — non il
@@ -47,7 +54,9 @@ def _latest_credits():
     Si usa `remaining_ts` (istante della LETTURA del credito) quando presente,
     altrimenti `ts`: in `fetch_scores` il `ts` della cache puo' essere
     preservato da un giro precedente, mentre `remaining_ts` e' sempre il
-    momento della chiamata che ha prodotto quel valore.
+    momento della chiamata che ha prodotto quel valore. `ts_lettura` e' None
+    per le cache di formato vecchio (senza timestamp): il chiamante che ha
+    bisogno dell'ETA' (il blocco crediti) deve saperlo.
     """
     best = None            # (timestamp lettura credito, remaining)
     fallback = []
@@ -69,10 +78,16 @@ def _latest_credits():
             except Exception:
                 continue
     if best is not None:
-        return best[1], n
+        return best[1], best[0], n
     if fallback:
-        return min(fallback), n
-    return None, 0
+        return min(fallback), None, n
+    return None, None, 0
+
+
+def _latest_credits():
+    """(crediti_residui, n_cache) secondo la lettura PIU' RECENTE."""
+    rem, _ts, n = _latest_credits_detail()
+    return rem, n
 
 
 def get_remaining() -> int:
@@ -114,6 +129,7 @@ def should_query_sport(sport_key: str) -> bool:
 
 
 _credit_stop_logged = False
+_credit_probe_logged = False
 
 
 def credits_hard_stopped() -> bool:
@@ -126,25 +142,43 @@ def credits_hard_stopped() -> bool:
     Da qui in giu' NESSUNA chiamata HTTP verso the-odds-api: quote e
     punteggi vengono serviti solo dalle cache gia' presenti.
 
-    Fail-open sull'assenza di telemetria (nessuna cache `toa_*.json`): senza
-    sapere quanto resta non si ferma tutto — stessa direzione di
-    `should_query_sport`. Il warning esce UNA volta per processo (rotazione e
-    watchdog passano di qui di continuo).
+    Due fail-safe sull'INFORMAZIONE, opposte al blocco:
+    - nessuna telemetria (nessuna cache `toa_*.json`, o senza timestamp) ->
+      non si blocca: senza sapere quanto resta non si ferma tutto (stessa
+      direzione di `should_query_sport`).
+    - telemetria sotto soglia ma PIU' VECCHIA di `CREDIT_HARD_STOP_MAX_AGE_H`
+      (default 6h) -> non si blocca: il valore puo' essere obsoleto (chiave
+      sostituita o reset mensile) e con il blocco attivo nessuna chiamata
+      aggiornerebbe mai la cache (blocco eterno). Passa UN probe, che la
+      risposta 429 riporta al costo di zero crediti.
+
+    I warning escono UNA volta per processo (rotazione e watchdog passano di
+    qui di continuo).
     """
-    global _credit_stop_logged
-    rem = get_remaining()
+    global _credit_stop_logged, _credit_probe_logged
+    rem, ts, _n = _latest_credits_detail()
     if rem is None:
         return False
-    if rem < CREDIT_HARD_STOP:
-        if not _credit_stop_logged:
+    if rem >= CREDIT_HARD_STOP:
+        _credit_stop_logged = False
+        _credit_probe_logged = False
+        return False
+    age_h = None if ts is None else (time.time() - ts) / 3600.0
+    if age_h is None or age_h > CREDIT_HARD_STOP_MAX_AGE_H:
+        if not _credit_probe_logged:
             logger.warning(
-                "the-odds-api: crediti %s < soglia %s — TUTTE le chiamate "
-                "HTTP bloccate (solo cache) fino al reset",
-                rem, CREDIT_HARD_STOP)
-            _credit_stop_logged = True
-        return True
-    _credit_stop_logged = False
-    return False
+                "the-odds-api: crediti %s < soglia %s ma telemetria vecchia "
+                "(%s) — un PROBE per rileggere i crediti (chiave o piano "
+                "possono essere cambiati)", rem, CREDIT_HARD_STOP,
+                "mai letta" if age_h is None else f"{age_h:.1f}h")
+            _credit_probe_logged = True
+        return False
+    if not _credit_stop_logged:
+        logger.warning(
+            "the-odds-api: crediti %s < soglia %s — TUTTE le chiamate HTTP "
+            "bloccate (solo cache) fino al reset", rem, CREDIT_HARD_STOP)
+        _credit_stop_logged = True
+    return True
 
 
 def _cache_is_stale_for_settlement(payload: list) -> bool:
