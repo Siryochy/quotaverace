@@ -16,6 +16,74 @@ from bot import (
 )
 
 
+class TestInvioDirettoTelegram:
+    """Il messaggio di avvio non veniva MAI consegnato in produzione.
+
+    `send_telegram_message_direct` cercava il destinatario solo in
+    TELEGRAM_CHAT_ID / TELEGRAM_CHAT_ID_FALLBACK (variabili del vecchio
+    "signals-mvp" locale): su Railway esiste ADMIN_CHAT_ID, quindi a ogni
+    deploy il warning "Token o chat_id Telegram mancanti" e il messaggio
+    perso (21/09/2026).
+    """
+
+    def _capture(self, monkeypatch):
+        import requests
+        inviati = {}
+
+        class _Resp:
+            ok = True
+            status_code = 200
+            text = ""
+
+        def _post(url, json=None, timeout=None):
+            inviati["url"] = url
+            inviati["payload"] = json or {}
+            return _Resp()
+
+        monkeypatch.setattr(requests, "post", _post)
+        return inviati
+
+    def test_fallback_su_admin_chat_id(self, monkeypatch):
+        import bot
+        monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+        monkeypatch.delenv("TELEGRAM_CHAT_ID_FALLBACK", raising=False)
+        monkeypatch.setenv("ADMIN_CHAT_ID", "7718157436")
+        monkeypatch.setenv("QUOTAVERACE_BOT_TOKEN", "fake/test-token")
+        inviati = self._capture(monkeypatch)
+        bot.send_telegram_message_direct("avvio")
+        assert inviati.get("payload", {}).get("chat_id") == 7718157436
+        assert "fake/test-token" in inviati.get("url", "")
+
+    def test_admin_chat_id_con_virgole_usa_il_primo(self, monkeypatch):
+        import bot
+        monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+        monkeypatch.delenv("TELEGRAM_CHAT_ID_FALLBACK", raising=False)
+        monkeypatch.setenv("ADMIN_CHAT_ID", "111, 222")
+        monkeypatch.setenv("QUOTAVERACE_BOT_TOKEN", "fake/test-token")
+        inviati = self._capture(monkeypatch)
+        bot.send_telegram_message_direct("avvio")
+        assert inviati.get("payload", {}).get("chat_id") == 111
+
+    def test_env_locali_hanno_precedenza(self, monkeypatch):
+        import bot
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "999")
+        monkeypatch.setenv("ADMIN_CHAT_ID", "7718157436")
+        monkeypatch.setenv("QUOTAVERACE_BOT_TOKEN", "fake/test-token")
+        inviati = self._capture(monkeypatch)
+        bot.send_telegram_message_direct("avvio")
+        assert inviati.get("payload", {}).get("chat_id") == "999"
+
+    def test_senza_destinatario_non_invia(self, monkeypatch):
+        import bot
+        monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+        monkeypatch.delenv("TELEGRAM_CHAT_ID_FALLBACK", raising=False)
+        monkeypatch.delenv("ADMIN_CHAT_ID", raising=False)
+        monkeypatch.setenv("QUOTAVERACE_BOT_TOKEN", "fake/test-token")
+        inviati = self._capture(monkeypatch)
+        bot.send_telegram_message_direct("avvio")
+        assert inviati == {}
+
+
 class TestComputeEv:
     def test_ev_positivo(self):
         assert compute_ev(0.50, 2.20) == pytest.approx(0.10)

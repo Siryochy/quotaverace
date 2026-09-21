@@ -160,6 +160,14 @@ def setup(level: int = logging.INFO) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    # APScheduler a WARNING (21/09/2026): a INFO logga OGNI avvio e OGNI fine
+    # di ogni job ("Running job ..." / "Job ... executed successfully") piu'
+    # l'elenco "Adding job tentatively" all'avvio. Con ~15 job registrati e
+    # i job da 60s erano ~il 45% di TUTTO il volume di log del container, e
+    # affogavano i messaggi operativi (puntate, settlement, scarti). I
+    # WARNING restano visibili: "skipped: maximum number of running
+    # instances" e gli errori di job sono segnali reali, non rumore.
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 
 def refresh_secrets() -> None:

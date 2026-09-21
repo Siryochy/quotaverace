@@ -2458,7 +2458,14 @@ def send_telegram_message_direct(text: str) -> None:
     import requests
     # Prova prima TELEGRAM_TOKEN (signals-mvp .env), poi QUOTAVERACE_BOT_TOKEN (Railway)
     token = os.getenv("TELEGRAM_TOKEN") or os.getenv("QUOTAVERACE_BOT_TOKEN", "")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID_FALLBACK", "")
+    # Il chat di destinazione: su Railway NON esistono TELEGRAM_CHAT_ID* (le
+    # variabili locali del vecchio signals-mvp), esiste ADMIN_CHAT_ID. Senza
+    # questo fallback il messaggio di avvio non e' MAI stato consegnato in
+    # produzione (21/09/2026: warning ripetuto a ogni deploy, messaggio perso).
+    _admins = _admin_chat_ids()
+    chat_id = (os.getenv("TELEGRAM_CHAT_ID")
+               or os.getenv("TELEGRAM_CHAT_ID_FALLBACK")
+               or (_admins[0] if _admins else ""))
     if not token or not chat_id:
         logger.warning("Token o chat_id Telegram mancanti, messaggio non inviato")
         return

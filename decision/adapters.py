@@ -407,7 +407,11 @@ def iter_signals(*, conn=None, now: Optional[datetime] = None, hours: float = 24
             )
             if signal is not None:
                 signals.append(signal)
-        logger.info("adapter: %d segnali aperti su %d righe di ledger", len(signals), len(rows))
+        # INFO solo se ha trovato qualcosa: "0 segnali aperti" ripetuto a ogni
+        # giro del job (60s) e' rumore puro (21/09/2026).
+        logger.log(logging.INFO if signals else logging.DEBUG,
+                   "adapter: %d segnali aperti su %d righe di ledger",
+                   len(signals), len(rows))
         return signals
     finally:
         if own_conn:

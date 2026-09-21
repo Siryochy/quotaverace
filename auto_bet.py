@@ -1706,15 +1706,18 @@ def run_today_bets(stake_eur: float | None = None,
     # --- Soglie lette dalle costanti di value_filter: il log non puo'
     # divergere dalla strategia reale (favoriti netti 1.30-1.80; edge minimo
     # +2pp sul mercato dal 21/09, era +3pp). ---
-    logger.info("auto_bet: strategia favoriti netti (EV_MIN=%.0f%%, ODDS "
-                "%.2f-%.2f, edge >= +%.0fpp, adaptive Kelly)",
-                EV_MIN * 100, ODDS_MIN, ODDS_MAX, MARKET_EDGE_MIN * 100)
+    # A DEBUG di proposito (21/09/2026): sono CONFIGURAZIONE, identiche a ogni
+    # giro. Ripetute a INFO ogni 60s affogavano il log operativo. Le soglie
+    # reali restano leggibili con `/autobet` e qui sopra nel report.
+    logger.debug("auto_bet: strategia favoriti netti (EV_MIN=%.0f%%, ODDS "
+                 "%.2f-%.2f, edge >= +%.0fpp, adaptive Kelly)",
+                 EV_MIN * 100, ODDS_MIN, ODDS_MAX, MARKET_EDGE_MIN * 100)
     try:
         import multi_market as _mm
-        logger.info("auto_bet: corsie multi-mercato -> %s (AH live, OU "
-                    "shadow di default; ENABLE_LIVE_AH=%s, ENABLE_LIVE_OU=%s)",
-                    ", ".join(_mm.live_markets()) or "nessuna",
-                    _mm.ENABLE_LIVE_AH, _mm.ENABLE_LIVE_OU)
+        logger.debug("auto_bet: corsie multi-mercato -> %s (AH live, OU "
+                     "shadow di default; ENABLE_LIVE_AH=%s, ENABLE_LIVE_OU=%s)",
+                     ", ".join(_mm.live_markets()) or "nessuna",
+                     _mm.ENABLE_LIVE_AH, _mm.ENABLE_LIVE_OU)
     except Exception:
         pass
 
@@ -1725,8 +1728,8 @@ def run_today_bets(stake_eur: float | None = None,
     # feed, dedup): la differenza tra le corsie e' solo l'INTERRUTTORE live.
     for pick in _today_value_picks() + _multi_market_picks():
         if bet_exists_open(pick["match_id"], pick["esito_key"]):
-            logger.info("auto_bet: puntata gia' aperta per %s (%s), salto",
-                        pick["match_id"], pick["esito_key"])
+            logger.debug("auto_bet: puntata gia' aperta per %s (%s), salto",
+                         pick["match_id"], pick["esito_key"])
             continue
 
         # SIM: quota del segnale, nessun catalogo.
@@ -1970,7 +1973,14 @@ def run_today_bets(stake_eur: float | None = None,
             logger.warning("auto_bet: salvataggio sim %s: %s", cand["match_id"], e)
 
     _shadow_run(mode=mode, bankroll=_bankroll, placed=len(placed))
-    logger.info("auto_bet: %d puntate piazzate (%s)", len(placed), mode)
+    # Heartbeat del giro: UNA riga per ciclo anche a giro vuoto (21/09/2026).
+    # E' cio' che permette di vedere dal log che il job gira senza dover
+    # leggere la configurazione ripetuta.
+    if placed:
+        logger.info("auto_bet: %d puntate piazzate (%s)", len(placed), mode)
+    else:
+        logger.info("auto_bet: nessuna puntata (%s) — 0 candidati giocabili",
+                    mode)
     return placed
 
 
@@ -2016,12 +2026,17 @@ def _shadow_run(*, mode: str, bankroll: float, placed: int = 0) -> dict | None:
         if summary.get("market_blocked"):
             logger.warning("auto_bet shadow: gate di mercato -> %s "
                            "(nessuna valutazione di rischio)", summary["market_blocked"])
-        logger.info("auto_bet shadow: %d segnali valutati %s | %d comandi "
-                    "registrati (0 ordini reali, esecuzione invariata) | %d "
-                    "revisioni in coda per l'umano",
-                    summary.get("evaluated", 0), summary.get("by_verdict") or {},
-                    sum((summary.get("by_command") or {}).values()),
-                    summary.get("reviews_queued", 0))
+        # A INFO solo quando c'e' qualcosa da dire (un segnale valutato o un
+        # comando emesso): a giro vuoto il riepilogo shadow e' una riga di
+        # rumore identica ogni 60s (21/09/2026).
+        _evaluated = summary.get("evaluated", 0)
+        _commands = sum((summary.get("by_command") or {}).values())
+        logger.log(logging.INFO if (_evaluated or _commands) else logging.DEBUG,
+                   "auto_bet shadow: %d segnali valutati %s | %d comandi "
+                   "registrati (0 ordini reali, esecuzione invariata) | %d "
+                   "revisioni in coda per l'umano",
+                   _evaluated, summary.get("by_verdict") or {}, _commands,
+                   summary.get("reviews_queued", 0))
         return summary
     except Exception as exc:
         logger.warning("auto_bet shadow: valutazione saltata (%s)", exc)

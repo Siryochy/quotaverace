@@ -4,6 +4,7 @@ Dal 04/09 auto_bet è SIM-only permanente: nessun client Exchange, nessun
 catalogo di scansione — le puntate sono simulate con la quota del segnale
 (mode='sim') e registrate in `bets` per ledger/ML.
 """
+import logging
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -515,3 +516,38 @@ class TestClvWiring:
         conn.close()
         calls = self._run_con_stub(monkeypatch, temp_db, avg_clv=0.1)
         assert calls["has_clv_positive"] is True
+
+
+class TestRumoreLog:
+    """Pulizia dei log (21/09/2026).
+
+    Il giro di `auto_bet` gira OGNI 60s: a INFO ripeteva la CONFIGURAZIONE
+    (strategia e corsie multi-mercato) a ogni ciclo — insieme ai log di
+    APScheduler era la voce piu' rumorosa del container e affogava i
+    messaggi operativi (puntate, settlement, scarti).
+
+    Regola: la configurazione sta a DEBUG (resta leggibile con `/autobet`),
+    e a giro VUOTO esce UNA riga di heartbeat. Dal log si deve vedere che il
+    job gira, non leggere 6 righe identiche al minuto.
+    """
+
+    @staticmethod
+    def _messaggi(caplog, level):
+        return [r.getMessage() for r in caplog.records if r.levelno == level]
+
+    def test_giro_vuoto_non_ripete_la_configurazione(self, temp_db, caplog):
+        with caplog.at_level(logging.DEBUG, logger="auto_bet"):
+            auto_bet.run_today_bets(stake_eur=5.0)
+        infos = self._messaggi(caplog, logging.INFO)
+        assert not any("strategia favoriti netti" in m for m in infos)
+        assert not any("corsie multi-mercato" in m for m in infos)
+        # L'heartbeat invece c'e' sempre: dice che il giro e' girato davvero.
+        assert any("nessuna puntata" in m or "puntate piazzate" in m
+                   for m in infos)
+
+    def test_la_configurazione_resta_leggibile_a_debug(self, temp_db, caplog):
+        with caplog.at_level(logging.DEBUG, logger="auto_bet"):
+            auto_bet.run_today_bets(stake_eur=5.0)
+        debug = self._messaggi(caplog, logging.DEBUG)
+        assert any("strategia favoriti netti" in m for m in debug)
+        assert any("corsie multi-mercato" in m for m in debug)

@@ -82,6 +82,23 @@ def test_setup_httpx_a_warning():
     assert logging.getLogger("httpx").level == logging.WARNING
 
 
+def test_setup_apscheduler_a_warning():
+    """APScheduler a INFO loggava OGNI avvio e OGNI fine di OGNI job
+    ("Running job ..." / "Job ... executed successfully"): con ~15 job e
+    quelli da 60s era ~il 45% del volume di log del container (misurato
+    il 21/09/2026) e affogava i messaggi operativi.
+    """
+    setup()
+    assert logging.getLogger("apscheduler").level == logging.WARNING
+    # I child (executors/jobstores) EREDITANO: un INFO non passa piu'.
+    assert not logging.getLogger("apscheduler.executors.default").isEnabledFor(
+        logging.INFO)
+    # ...ma i WARNING restano visibili: "skipped: maximum number of running
+    # instances" e' un segnale reale (job sovrapposti), non rumore.
+    assert logging.getLogger("apscheduler.scheduler").isEnabledFor(
+        logging.WARNING)
+
+
 def test_setup_idempotente_handler_root():
     root = logging.getLogger()
     n_before = len(root.handlers)

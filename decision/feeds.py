@@ -741,9 +741,12 @@ class MarketFeed:
             if not from_process and reused.accepted:
                 # Riuso dallo stato: il contatore dice che c'erano quote, ma il
                 # file non le conserva (per non trasformarlo in un archivio).
-                logger.info("feed: riuso dello stato per %s (%d quote non "
-                            "disponibili in questo processo)",
-                            self.gateway_id, reused.accepted)
+                # DEBUG: e' il funzionamento NORMALE (il job gira ogni 60s e
+                # il refresh e' forzato solo ogni DECISION_FEED_REFRESH_MIN_SEC);
+                # a INFO era una riga identica a ogni giro (21/09/2026).
+                logger.debug("feed: riuso dello stato per %s (%d quote non "
+                             "disponibili in questo processo)",
+                             self.gateway_id, reused.accepted)
             obs.event("feed.reused", ctx=scope, stage="market",
                       gateway_id=self.gateway_id, source=previous.source,
                       schema_version=previous.schema_version,
