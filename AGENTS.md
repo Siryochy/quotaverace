@@ -4661,3 +4661,101 @@ con il vecchio `budget 2` se ne sarebbero analizzate **2** (e le core
 Bundesliga/Ligue 1/Eredivisie sarebbero state rinviate a domani); con budget 8
 entrano tutte e 5. Il KPI da guardare domani e' `matches`/`match_analysis`
 per giorno (l'obiettivo e' tornare verso le ~100-140 partite/giorno del 19-20/09).
+
+### Verifica flusso + pulizia log (21/09/2026, notte)
+
+**1) VERIFICA DEL FLUSSO IN PRODUZIONE (tutto in sola lettura).**
+- **Crediti**: `GET /api/credits` -> **remaining 456**, `days_to_reset` 9 (reset
+  01/10), `sustainable_daily` **50.7/giorno**: la chiave nuova e' arrivata e il
+  ritmo sostenibile non e' piu' il collo di bottiglia. `estimated_daily_consumption`
+  resta `consumption_source: heuristic` (il ritmo MISURATO e' `None`: la cache
+  e' stata riscritta con la chiave nuova e servono alcune ore di rotazione).
+  **Zero `429`/`403`/traceback** nei log: la crisi crediti e' chiusa.
+- **Settlement**: `settlement.open` = **0 bet** e 132 previsioni,
+  `overdue_orphans` **0**, `estimated_credits` **0**, `leagues_to_query: []`.
+  Motivi del residuo: `league_unmapped` 72, `awaiting_result` 50,
+  `not_started` 8, `no_match_row` 2. Il referto gira a costo ZERO e la coda di
+  scadenza automatica non ha ritardi.
+- **Corsia ordini**: `auto_bet` gira ogni 60s, bankroll `equity 33.55 USDC`
+  (disponibile 33.55 + in gioco 0.00), **0 puntate** — e NON e' un blocco:
+  `_today_value_picks()` + `_multi_market_picks()` = 0 candidati. Il kill switch
+  e' `live`, il feed di mercato e' validato, lo stop-loss e' azzerato.
+- **Multi-mercato**: `multi_market_job` ogni 15' -> ingest **95 mercati -> 121
+  quote salvate** (6 fixture), 0 segnali giocabili (nessuna linea in fascia
+  nelle fixture del momento).
+- **Tennis sandbox**: 24 segnali paper, 0 settlement (gira, non tocca il
+  bankroll reale).
+- **Shadow compare** (`decision_compare`): catena 4 righe (avrebbe giocato 2) |
+  corsia 3 puntate | entrambe giocano 1 | bloccate-ma-giocate 1 |
+  giocate-ma-saltate 1 | non confrontabili 1. E' il dato della fase di
+  confronto: campione ancora minuscolo, nessuna conclusione.
+- **Copertura analisi OGGI: 26 partite** (26/09/2026), contro 137 il 20/09 e
+  104 il 19/09 — ma e' il numero della rotazione delle **04:00 UTC con
+  `ODDS_DAILY_BUDGET=2`**, cioe' PRIMA del deploy del budget 8: le leghe
+  analizzate oggi sono tutte fuori whitelist (Serie B, La Liga, Argentina
+  Primera, Primera Nacional, LigaPro, Brazil Serie B, Primera A, Liga MX) e le
+  35 previsioni di oggi sono **tutte `rejected`**, coerente col gate. Il KPI
+  vero (partite/giorno) si legge alla rotazione delle **04:00 UTC del 22/09**,
+  che e' la prima con budget 8.
+
+**2) BUG REALE TROVATO DURANTE LA VERIFICA — l'avviso di avvio non veniva MAI
+consegnato.** Nei log compariva a ogni deploy
+`bot - WARNING - Token o chat_id Telegram mancanti, messaggio non inviato`:
+`send_telegram_message_direct` cercava il destinatario SOLO in
+`TELEGRAM_CHAT_ID` / `TELEGRAM_CHAT_ID_FALLBACK` (variabili del vecchio
+signals-mvp locale). **Su Railway quelle variabili non esistono**, esiste
+`ADMIN_CHAT_ID` — quindi il messaggio "Bot avviato in modalita' ..." con stato
+circuito, finestra T-60 e bankroll e' stato perso a OGNI deploy.
+Fix: fallback su `_admin_chat_ids()` (la funzione che esisteva gia': niente
+helper duplicato), con la precedenza alle env locali gia' rispettata. Verificato
+sul container: `ADMIN_CHAT_ID: True`, fallback presente nel sorgente, e **0
+occorrenze** del warning nei log del deploy nuovo (l'avviso e' partito).
+
+**3) PULIZIA LOG (`a821e04`, deploy `8b7090ae` SUCCESS, health 200).** Misurato
+con la coda del log del container: su una finestra di ~2,5 minuti il volume era
+dominato da rumore ripetitivo:
+
+| sorgente | righe/finestra | quota |
+|---|---|---|
+| `apscheduler.executors.default` (avvio/fine di OGNI job) | 104 | 30% |
+| `auto_bet` (configurazione + riepiloghi a OGNI ciclo di 60s) | 75 | 22% |
+| `apscheduler.scheduler` (registrazione job + "skipped") | 67 | 19% |
+| tennis_sandbox / decision.feeds / decision.adapters / bot | 67 | 19% |
+
+Interventi:
+- **`secure_logging.setup()`**: **APScheduler a WARNING**. A INFO loggava ogni
+  avvio e ogni fine di ogni job (".Running job ..." / "... executed
+  successfully") piu' l'elenco "Adding job tentatively" all'avvio: ~45% di
+  TUTTO il volume. I **WARNING restano visibili** ("skipped: maximum number of
+  running instances" e gli errori di job sono segnali reali, non rumore).
+- **`auto_bet`**: "strategia favoriti netti" e "corsie multi-mercato" a DEBUG
+  (sono CONFIGURAZIONE identica a ogni giro; restano leggibili con `/autobet`);
+  il riepilogo shadow passa a INFO **solo** se c'e' un segnale valutato o un
+  comando emesso; "puntata gia' aperta, salto" a DEBUG; e soprattutto **una
+  riga di HEARTBEAT per ciclo** (`nessuna puntata (live) — 0 candidati
+  giocabili`) cosi' dal log si vede che il job gira senza leggere il blocco di
+  configurazione.
+- **`decision/feeds.py`** ("riuso dello stato") e **`decision/adapters.py`**
+  ("0 segnali aperti su N righe") a DEBUG: sono il funzionamento NORMALE
+  ripetuto a ogni giro.
+- Verifica POST-DEPLOY sulla stessa finestra: **0 righe APScheduler**, `auto_bet`
+  **2 righe per ciclo** (bankroll + heartbeat) e le righe operative FINALMENTE
+  visibili (i `rejected` per partita di `sx_signals`, il settlement, gli
+  scarti). Riduzione misurata della finestra: ~345 -> ~25 righe.
+- **Tripwire nuovi**: `test_secure_logging.test_setup_apscheduler_a_warning`
+  (livello + child che ereditano + WARNING ancora visibile),
+  `test_bot.TestInvioDirettoTelegram` (4 test: fallback `ADMIN_CHAT_ID`,
+  `ADMIN_CHAT_ID` con virgole -> primo, env locali con precedenza, nessun
+  destinatario -> non invia) e `test_auto_bet.TestRumoreLog` (2 test: a giro
+  vuoto NIENTE configurazione a INFO ma l'heartbeat si', e la configurazione
+  resta leggibile a DEBUG).
+
+**4) Verifiche pre-push**: 115 test verdi (`test_auto_bet*`, `test_bot`,
+`test_secure_logging`, `test_secret_hygiene`), 122 verdi sul pacchetto
+`decision` toccato (`feed`/`adapters`/`shadow`/`clv_wiring`),
+`verify_guardrails.py` **A-G tutti bloccano** (exit 0), 0 marker di conflitto,
+`compileall` OK. Nessuna env nuova -> nessuna modifica a `.railway/railway.ts`.
+
+**5) Da guardare domani**: il KPI della copertura (rotazione 04:00 UTC con
+budget 8) e i Tier-2 in probation da leggere sul ledger per lega con
+`market_diagnose.py` prima di qualunque promozione al core.
