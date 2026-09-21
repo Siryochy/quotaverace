@@ -4285,3 +4285,126 @@ sono il gate leghe e la dimensione per ordine, non la liquidita'/edge.
 `test_favourites_only`, `test_secret_hygiene`, `test_tier`),
 `verify_guardrails.py` **A-G tutti bloccano** (exit 0), 0 marker di conflitto,
 `compileall` OK.
+
+#### Esito del deploy + scansione (21/09/2026, 01:53 UTC)
+
+**Deploy verificato**: commit `d98889c` → deployment `6251b209-00d6-498f-852a-fb5487b1cbf4`
+**SUCCESS**, `/api/health` 200. Sul container i parametri sono ATTIVI:
+`MARKET_EDGE_MIN 0.02` / `MODERATE 0.02` / `STRONG 0.04`, fallback lega 0.02,
+`T60_WINDOW_MIN_MIN 120 -> MAX 50` con `exec_only True`, `ENABLE_LIVE_OU False`
+(shadow, come deciso), `ENABLE_LIVE_AH True`, `MIN_EXEC_DEPTH_USDC 25.0`
+(invariata). `ENABLE_LIVE_OU` e `SX_MIN_EXEC_DEPTH_USDC` **non sono impostate**
+su Railway → valgono i default di codice.
+
+**Scansione `multi_market.py` sul container** (`ingest` → `scan` → `picks`):
+ingest **171 mercati SX → 225 quote salvate** (4 scartate, **11 fixture**);
+scan **10 fixture con quote → 0 SEGNALI GIOCABILI** (0 nelle corsie live AH);
+`picks` = `[]`.
+
+**PERCHE' 0 — il collo di bottiglia e' il GATE LEGHE, non edge/liquidita'.**
+Diagnostica in sola lettura (`analyze_fixture` sulle 10 fixture): **218
+candidati su 218 respinti** e il motivo e' **sempre lo stesso** — «lega ...
+esclusa per ROI negativo (strategia solo campionati vincenti)». Le 10 fixture
+stanno in **Liga MX (1), Liga Profesional (3), Primera Nacional (2), LigaPro
+(2), Brasileiro Serie B (2)**: nessuna in `STRATEGY_LEAGUES`. Conferma sul
+campo la misura del 15/09. ⚠️ Su questo campione **non si e' attivato nemmeno
+un rifiuto per edge/EV o liquidita'**: abbassare la soglia di edge a +2pp e la
+liquidita' a 10 USDC non avrebbe sbloccato UN pick in piu'.
+
+**⚠️ CORREZIONE IMPORTANTE — il report OU/AH era fuorviante.** `shadow_report()`
+conta TUTTE le righe di `predictions` per mercato, **anche quelle `rejected`**:
+l'ROI che stampava (OU **-8.40%**, AH **-12.42%**) e' quindi dominato dalla
+telemetria dei candidati scartati, NON dal P/L dei segnali giocabili. Split
+reale per `status` (profit = per unita' di stake, dal ledger):
+
+| mercato | status | righe | chiuse | profit/unit | ROI |
+|---|---|---|---|---|---|
+| AH | rejected | 144 | 40 | **-6.8615** | -17.2% |
+| AH | strong_value | 4 | 3 | **+1.5189** | +50.6% |
+| OU | rejected | 147 | 44 | **-12.1168** | -27.5% |
+| OU | strong_value | 20 | 19 | **+0.4175** | +2.2% |
+| OU | value | 10 | 10 | **+5.5700** | +55.7% |
+
+I **giocabili** sono quindi POSITIVI (OU value+strong: 29 chiuse, +5.99 →
++20.6%; AH strong: 3 chiuse, +50.6%), ma i campioni sono **sotto la soglia di
+affidabilita' (30)** che il progetto si e' dato: da rimisurare prima di
+qualunque decisione. Da notare che il "leak OU -6.8%" citato come motivo dello
+shadow riguardava il mercato OU della 1X2-era, non la corsia multi-mercato:
+qui il segnale OU e' positivo su 29 chiuse. **Prossimo passo naturale**:
+aggiungere lo split per `status` a `shadow_report()`/`format_report()` (oggi
+mostra un numero che somma giocabili e scartati) e continuare a raccogliere
+campione su OU e AH **prima** di aprire l'OU.
+
+### Falso stop-loss del 21/09/2026: due basi di misura confrontate (fixato)
+
+**Sintomo**: alle 15:53 UTC `data/execution/daily_stop.json` registrava
+`equity wallet -40.4% dall'inizio giornata (valore 20.00)` e il blocco di 24h
+(fino al 22/09 15:53). Il wallet era INTATTO.
+
+**Verifica sul container (sola lettura)**: `execution_engine.py --balance` →
+`availableBalance 33.5535`, `exposure 0`, escrow 0 — esattamente il
+`start_bankroll` del giorno (33.5535). **Zero bet piazzate il 21/09.** I log del
+giro (ogni 60s) mostrano `bankroll LIVE = equity 33.55 USDC` e subito dopo
+`STOP-LOSS GIORNALIERO attivo`: il blocco era un fantasma.
+
+**Causa radice**: due BASI di misura diverse confrontate fra loro. Il
+riferimento del giorno era stato preso dall'EQUITY del wallet (33.5535); quando
+la lettura del wallet SX e' FALLITA, `run_today_bets` e' ripiegato sulla cassa
+simulata (`bankroll_stats()` → **20.0**) e `check_daily_stop` ha confrontato
+20.00 contro 33.5535 → -40.4% inesistente. E' la stessa CLASSE di bug del
+15/09 (disponibile vs equity), con un'altra coppia di grandezze: un errore di
+rete non e' una perdita.
+
+**Post-mortem sul ledger — NESSUNA sovraesposizione**: 27 bet live totali,
+stake **massimo 1.00 USDC** (floor SX; una partial da 0.9253), 26.93 USDC
+piazzati dal 09/09, P/L live cumulato **-13.54 USDC**. Le perdite grosse sono
+puntate da 1 USDC a quota 3-4.6 del 09-10/09, **prima** della strategia
+favoriti netti: ne' il Kelly ne' le quote hanno mai sovraesposto un singolo
+evento (il cap e il floor hanno retto).
+
+**Fix** (`auto_bet.py`): `check_daily_stop(bankroll, basis, basis_key)` non
+confronta MAI letture di basi diverse. `BASIS_PRIORITY` = `live_equity`(2) >
+`cassa`(1): una base piu' autorevole **ri-arma** il riferimento del giorno,
+una meno autorevole viene **ignorata e loggata** (nessun trigger). Il chiamante
+dichiara la base reale (`_wallet_equity is not None` → `live_equity`, altrimenti
+`cassa`), cosi' il log non mente piu' ("equity wallet" su una lettura di
+cassa). `daily_stop_status()` espone `basis_key`.
+
+**Test**: `test_risk_guards.TestStopLossGiornaliero` (regressione 21/09,
+upgrade a base piu' autorevole, nessuna declassazione, stessa base che triggera
+ancora) + `test_auto_bet_live.TestBaseStopLossDichiarata` (il chiamante dichiara
+`live_equity`/`cassa`). Verificati: 52 test sui due file, 142 sul giro
+regressioni, `verify_guardrails.py` **A-G bloccano tutte**, 0 marker di
+conflitto, `compileall` OK.
+
+**⚠️ Da NON fare**: forzare un `clear` manuale prima di aver capito la causa —
+era proprio il rischio che il post-mortem ha evitato. Lo stop si sarebbe
+comunque scaduto alle 22/09 15:53.
+
+**Crediti the-odds-api (21/09)**: `GET /api/credits` → `status: critical`,
+`remaining: 1`, consumo misurato **62.4/giorno** su finestra 20h,
+`days_to_reset: 9` (reset 01/10) → 0.1/giorno sostenibili. `should_query_sport`
+sotto 15 crediti riduce la rotazione alle 3 leghe di emergenza ma **NON la
+ferma**: senza pausa (env) o chiave di backup la rotazione continua a chiamare
+fino a esaurire anche l'ultimo credito (e li' iniziano gli errori HTTP nei log).
+
+**Hard limit crediti — sotto 5 NIENTE HTTP (21/09/2026, direttiva del
+proprietario)**: `odds_api.CREDIT_HARD_STOP` (env `ODDS_CREDIT_HARD_STOP`,
+default **5**) + `credits_hard_stopped()`. Sotto soglia **nessuna chiamata HTTP
+verso the-odds-api**, indipendentemente dalla rotazione ridotta
+(`should_query_sport` e' irrilevante). Gate nei DUE soli punti che fanno HTTP:
+`_get_odds` (rotazione quote → ritorna `[], 0`) e `fetch_scores` (settlement →
+ritorna i punteggi GIA' in cache, mai dati inventati). Fail-open sull'assenza di
+telemetria (nessuna cache `toa_*.json`), stessa direzione di `should_query_sport`;
+il warning esce UNA volta per processo. Test in `test_odds_api.py`:
+soglia (4 → blocco, 5 → no, telemetria assente → no), costante configurabile,
+rotazione bloccata + controprova a 50 crediti, settlement su cache +
+controprova. ⚠️ `surebet_engine.py` resta **INDIPENDENTE per design** (tripwire:
+mai import da tracker/bot): ha la sua guardia `SUREBET_MIN_REMAINING` (50).
+
+**Template Telegram "BOT - TRADING - CRYPTO"**: **NON esiste in questo repo**.
+Le uniche uscite Telegram sono messaggi costruiti nel codice (nessun
+riferimento a crypto/trading) e il webhook n8n opzionale di `surebet_engine.py`
+(`SUREBET_WEBHOOK_URL`), che invia solo `build_json_payload(opp)` senza alcun
+titolo/intestazione. Un header "BOT - TRADING - CRYPTO" puo' stare solo nel
+workflow n8n esterno o nello script di broadcast, fuori da questo repository.

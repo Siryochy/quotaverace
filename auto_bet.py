@@ -1161,6 +1161,7 @@ def daily_stop_status() -> dict:
         "until": until.isoformat() if until else None,
         "day": data.get("day"),
         "start_bankroll": data.get("start_bankroll"),
+        "basis_key": data.get("basis_key"),
         "stopped_at": data.get("stopped_at"),
         "reason": data.get("reason"),
         "loss_pct": DAILY_STOP_LOSS_PCT * 100,
@@ -1169,16 +1170,39 @@ def daily_stop_status() -> dict:
     }
 
 
+# Priorita' delle BASI di misura del bankroll (piu' alto = piu' autorevole).
+# Serve a NON confrontare MAI grandezze diverse: il 21/09/2026 lo stop-loss
+# aveva letto l'equity del wallet al mattino (33.5535) e la cassa simulata
+# nel pomeriggio (20.00, dopo un errore transitorio di lettura del wallet),
+# innescando un -40.4% INESISTENTE che ha bloccato le puntate per 24h col
+# wallet INTATTO. Un errore di rete non e' una perdita.
+BASIS_PRIORITY = {"live_equity": 2, "cassa": 1}
+
+
+def _basis_priority(key: "str | None") -> int:
+    """Priorita' della base di misura (`live_equity` > `cassa` > ignota)."""
+    return BASIS_PRIORITY.get(key or "", 0)
+
+
 def check_daily_stop(bankroll: float | None,
-                     basis: str = "bankroll") -> dict:
+                     basis: str = "bankroll",
+                     basis_key: "str | None" = None) -> dict:
     """Registra il bankroll di inizio giornata e blocca se perde >= pct.
 
     `bankroll` e' il valore di RISCHIO del giorno: in LIVE il chiamante passa
     l'EQUITY del wallet (disponibile + in gioco), mai il solo disponibile —
-    vedi il commento del blocco DAILY_STOP. `basis` e' solo l'etichetta di
-    quel valore nei log/messaggi ("equity wallet" oppure "cassa").
+    vedi il commento del blocco DAILY_STOP. `basis` e' l'etichetta di quel
+    valore nei log/messaggi ("equity wallet" oppure "cassa"); `basis_key` ne
+    e' la chiave STABILE ("live_equity"/"cassa") registrata sul file.
 
-    Ritorna {stopped, start_bankroll, loss_pct, until, just_triggered}.
+    Il confronto avviene SOLO fra letture della STESSA base: se il wallet non
+    e' leggibile il chiamante ripiega sulla cassa, e quella lettura NON viene
+    confrontata col riferimento del giorno preso dall'equity. Una base PIU'
+    autorevole RI-ARMA il riferimento (upgrade); una MENO autorevole viene
+    ignorata e loggata (nessun trigger).
+
+    Ritorna {stopped, start_bankroll, loss_pct, until, just_triggered}
+    (+ `basis_mismatch`/`basis_changed` quando applicano).
     Fail-open: un errore di lettura/scrittura NON blocca le puntate (meglio
     puntare che fermarsi per un file corrotto), ma il blocco attivo resta
     rispettato.
@@ -1190,16 +1214,46 @@ def check_daily_stop(bankroll: float | None,
         if until is not None and now < until:
             return {"stopped": True, "until": until.isoformat(),
                     "start_bankroll": data.get("start_bankroll"),
-                    "loss_pct": None, "just_triggered": False}
+                    "loss_pct": None, "just_triggered": False,
+                    "basis_key": data.get("basis_key")}
         if DAILY_STOP_LOSS_PCT <= 0 or not bankroll or bankroll <= 0:
             return {"stopped": False, "loss_pct": None,
                     "just_triggered": False}
         today = now.date().isoformat()
         if data.get("day") != today or not data.get("start_bankroll"):
             _save_daily_stop({"day": today, "start_bankroll": float(bankroll),
-                              "stopped_until": None})
+                              "stopped_until": None,
+                              "basis_key": basis_key or basis})
             return {"stopped": False, "start_bankroll": float(bankroll),
-                    "loss_pct": 0.0, "just_triggered": False}
+                    "loss_pct": 0.0, "just_triggered": False,
+                    "basis_key": basis_key or basis}
+        stored_key = data.get("basis_key") or basis
+        if basis_key and stored_key != basis_key:
+            if _basis_priority(basis_key) > _basis_priority(stored_key):
+                # Lettura da una base PIU' autorevole (es. la cassa del primo
+                # giro e poi il wallet reale): il riferimento del giorno si
+                # ri-arma sul valore buono, senza confrontare le due basi.
+                data.update({"start_bankroll": float(bankroll),
+                             "basis_key": basis_key,
+                             "stopped_until": None})
+                _save_daily_stop(data)
+                logger.warning(
+                    "auto_bet: stop-loss giorno ri-armato su base piu' "
+                    "autorevole (%s -> %s, valore %.2f)",
+                    stored_key, basis_key, bankroll)
+                return {"stopped": False, "start_bankroll": float(bankroll),
+                        "loss_pct": 0.0, "just_triggered": False,
+                        "basis_changed": True, "basis_key": basis_key}
+            # Base MENO autorevole (wallet illeggibile -> cassa): nessun
+            # confronto e nessun trigger. Il riferimento del giorno resta
+            # quello della base autorevole.
+            logger.warning(
+                "auto_bet: stop-loss NON valutato — lettura sulla base '%s' "
+                "(valore %.2f) mentre il riferimento del giorno e' '%s'",
+                basis_key, bankroll, stored_key)
+            return {"stopped": False, "loss_pct": None,
+                    "just_triggered": False, "basis_mismatch": True,
+                    "basis_key": stored_key}
         start = float(data["start_bankroll"])
         loss = (start - float(bankroll)) / start if start > 0 else 0.0
         if loss >= DAILY_STOP_LOSS_PCT:
@@ -1594,9 +1648,15 @@ def run_today_bets(stake_eur: float | None = None,
     # valore di inizio giornata, per DAILY_STOP_HOURS (default 24h). In LIVE
     # il riferimento e' l'EQUITY (disponibile + in gioco), non la cassa
     # libera: vedi il commento del blocco DAILY_STOP.
-    stop = check_daily_stop(_bankroll,
-                            basis="equity wallet" if mode == "live"
-                            else "cassa")
+    # La BASE e' dichiarata con una chiave stabile: e' "live_equity" SOLO se
+    # il wallet e' stato letto davvero. Quando la lettura fallisce il giro
+    # ripiega sulla cassa, e quella lettura NON va mai confrontata col
+    # riferimento preso dall'equity (21/09/2026: -40.4% inesistente).
+    _stop_basis, _stop_basis_key = "cassa", "cassa"
+    if mode == "live" and _wallet_equity is not None:
+        _stop_basis, _stop_basis_key = "equity wallet", "live_equity"
+    stop = check_daily_stop(_bankroll, basis=_stop_basis,
+                            basis_key=_stop_basis_key)
     if stop.get("stopped"):
         logger.error("auto_bet: STOP-LOSS GIORNALIERO attivo fino a %s "
                      "(%s) — nessuna puntata", stop.get("until"),

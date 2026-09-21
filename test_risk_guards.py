@@ -133,6 +133,58 @@ class TestStopLossGiornaliero:
         r = auto_bet.check_daily_stop(100.0)
         assert r["stopped"] is False
 
+    def test_basi_diverse_non_si_confrontano(self):
+        """Regressione 21/09/2026: l'EQUITY del wallet (33.5535) e la cassa
+        simulata (20.00) NON vanno MAI confrontate.
+
+        Sequenza reale dell'incidente: il riferimento del giorno era stato
+        preso dall'equity del wallet (33.5535); una lettura fallita del wallet
+        fece ripiegare il giro sulla cassa simulata (20.00), che confrontata
+        col riferimento produsse un -40.4% inesistente e un blocco di 24h col
+        wallet INTATTO (verificato: 33.5535 USDC disponibili, 0 ordini).
+        """
+        auto_bet.check_daily_stop(33.5535, basis="equity wallet",
+                                  basis_key="live_equity")
+        # Lettura dalla cassa (wallet illeggibile): NESSUN trigger.
+        r = auto_bet.check_daily_stop(20.0, basis="cassa", basis_key="cassa")
+        assert r["stopped"] is False
+        assert r.get("basis_mismatch") is True
+        # Il riferimento del giorno resta quello dell'equity, intatto.
+        auto_bet.check_daily_stop(33.5535, basis="equity wallet",
+                                  basis_key="live_equity")
+        st = auto_bet.daily_stop_status()
+        assert st["stopped"] is False
+        assert st["start_bankroll"] == pytest.approx(33.5535)
+        assert st["basis_key"] == "live_equity"
+
+    def test_base_piu_autorevole_riarma_il_riferimento(self):
+        """Primo giro del giorno con la cassa (wallet non ancora leggibile),
+        poi arriva il wallet reale: il riferimento si ri-arma sul valore
+        buono, senza mai confrontare le due basi."""
+        auto_bet.check_daily_stop(20.0, basis="cassa", basis_key="cassa")
+        r = auto_bet.check_daily_stop(33.5535, basis="equity wallet",
+                                      basis_key="live_equity")
+        assert r["stopped"] is False and r.get("basis_changed") is True
+        st = auto_bet.daily_stop_status()
+        assert st["start_bankroll"] == pytest.approx(33.5535)
+        assert st["basis_key"] == "live_equity"
+
+    def test_stessa_base_triggera_ancora(self):
+        """Nessuna regressione: sulla STESSA base il blocco scatta come prima."""
+        auto_bet.check_daily_stop(35.98, basis="equity wallet",
+                                  basis_key="live_equity")
+        r = auto_bet.check_daily_stop(32.0, basis="equity wallet",
+                                      basis_key="live_equity")
+        assert r["stopped"] is True and r["just_triggered"] is True
+
+    def test_base_meno_autorevole_non_declassa(self):
+        """Una base meno autorevole non ri-arma il riferimento (mai una
+        regressione da equity a cassa dentro lo stesso giorno)."""
+        auto_bet.check_daily_stop(33.5535, basis="equity wallet",
+                                  basis_key="live_equity")
+        auto_bet.check_daily_stop(20.0, basis="cassa", basis_key="cassa")
+        assert auto_bet.daily_stop_status()["start_bankroll"] == pytest.approx(33.5535)
+
 
 class TestStopLossBloccaIlGiro:
     def test_run_today_bets_non_piazza_con_stop_attivo(self, temp_db):

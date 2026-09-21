@@ -22,6 +22,12 @@ STALE_INPLAY_HOURS = 3
 CREDIT_LOW = 50           # sotto 50: disattiva leghe non-core (intervallo >7gg)
 CREDIT_CRITICAL = 30      # sotto 30: solo top 6 leghe core
 CREDIT_EMERGENCY = 15     # sotto 15: solo Serie A, PL, La Liga
+# HARD STOP (direttiva del proprietario, 21/09/2026): sotto questa soglia
+# NESSUNA chiamata HTTP verso the-odds-api, indipendentemente dalla
+# rotazione ridotta. Il piano free risponde 429 quando i crediti finiscono e
+# le 3 leghe "di emergenza" brucerebbero l'ultimo credito riempiendo i log di
+# errori: da qui in giu' si usano SOLO le cache gia' presenti.
+CREDIT_HARD_STOP = int(os.getenv("ODDS_CREDIT_HARD_STOP", "5"))
 
 CORE_LEAGUES_HIGH = {"soccer_italy_serie_a", "soccer_england_pl", "soccer_spain_la_liga",
                       "soccer_germany_bundesliga", "soccer_france_ligue_one",
@@ -105,6 +111,41 @@ def should_query_sport(sport_key: str) -> bool:
                 # Emergenza: solo top 3
                 return lg in CORE_LEAGUES_EMERGENCY
     return True  # sport non mappato: allow (probabilmente tennis subet)
+
+
+_credit_stop_logged = False
+
+
+def credits_hard_stopped() -> bool:
+    """True se i crediti residui sono SOTTO la soglia di blocco TOTALE.
+
+    Direttiva del proprietario (21/09/2026): sotto `ODDS_CREDIT_HARD_STOP`
+    (default 5) la rotazione ridotta (`should_query_sport`) non basta piu' —
+    il piano free risponde 429 a crediti esauriti e le 3 leghe "di
+    emergenza" brucerebbero l'ultimo credito riempiendo i log di errori.
+    Da qui in giu' NESSUNA chiamata HTTP verso the-odds-api: quote e
+    punteggi vengono serviti solo dalle cache gia' presenti.
+
+    Fail-open sull'assenza di telemetria (nessuna cache `toa_*.json`): senza
+    sapere quanto resta non si ferma tutto — stessa direzione di
+    `should_query_sport`. Il warning esce UNA volta per processo (rotazione e
+    watchdog passano di qui di continuo).
+    """
+    global _credit_stop_logged
+    rem = get_remaining()
+    if rem is None:
+        return False
+    if rem < CREDIT_HARD_STOP:
+        if not _credit_stop_logged:
+            logger.warning(
+                "the-odds-api: crediti %s < soglia %s — TUTTE le chiamate "
+                "HTTP bloccate (solo cache) fino al reset",
+                rem, CREDIT_HARD_STOP)
+            _credit_stop_logged = True
+        return True
+    _credit_stop_logged = False
+    return False
+
 
 def _cache_is_stale_for_settlement(payload: list) -> bool:
     """True se la cache punteggi non e' attendibile per il settlement.
@@ -373,6 +414,10 @@ def _get_odds(sport, frm, to):
         except Exception: pass
     key = _env("ODDS_API_KEY")
     if not key: return [], 999
+    # HARD STOP crediti: sotto soglia nessuna chiamata HTTP (la rotazione
+    # ridotta e' irrilevante: il blocco e' totale e vale per ogni lega).
+    if credits_hard_stopped():
+        return [], 0
     # Filtro proattivo crediti: non interrogare se sotto soglia
     if not should_query_sport(sport):
         logger.info(f"Crediti bassi: {sport} saltata per risparmio crediti")
@@ -446,6 +491,10 @@ def fetch_scores(sport=None, days_from=SCORES_DAYS_FROM):
     key = _env("ODDS_API_KEY")
     if not key:
         # Nessuna chiave: la cache e' tutto quello che abbiamo.
+        return payload if cache_file.exists() else []
+    # HARD STOP crediti: sotto soglia nessuna chiamata HTTP nemmeno per il
+    # settlement — si usano i punteggi GIA' in cache (mai dati inventati).
+    if credits_hard_stopped():
         return payload if cache_file.exists() else []
     try:
         r = requests.get(f"https://api.the-odds-api.com/v4/sports/{sport}/scores",

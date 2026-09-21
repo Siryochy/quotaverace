@@ -464,3 +464,149 @@ def test_get_remaining_senza_remaining_ts_usa_ts(monkeypatch, tmp_path):
     (tmp_path / "toa_b.json").write_text(json.dumps(
         {"ts": now, "payload": [], "remaining": 33}))
     assert odds_api.get_remaining() == 33
+
+
+# ---------------------------------------------------------------------------
+# HARD STOP crediti (21/09/2026): sotto 5 crediti NESSUNA chiamata HTTP
+# ---------------------------------------------------------------------------
+
+def _no_http(*a, **k):
+    raise AssertionError("nessuna chiamata HTTP verso the-odds-api")
+
+
+def test_credits_hard_stopped_sotto_soglia(monkeypatch, tmp_path):
+    """Sotto 5 crediti il blocco e' TOTALE; a 5 e a telemetria assente no.
+
+    La soglia e' `ODDS_CREDIT_HARD_STOP` (default 5): "sotto i 5" = 4 ->
+    blocco. Fail-open senza telemetria: non sapendo quanto resta non si
+    ferma tutto (stessa direzione di `should_query_sport`).
+    """
+    import time
+    odds_api = _credit_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(odds_api, "_credit_stop_logged", False)
+    # nessuna cache: telemetria assente -> non si blocca
+    assert odds_api.credits_hard_stopped() is False
+    # 5 crediti: ancora sopra la soglia (< 5) -> consentito
+    _credit_cache(tmp_path, "soccer_epl", 5, time.time())
+    monkeypatch.setattr(odds_api, "_credit_stop_logged", False)
+    assert odds_api.credits_hard_stopped() is False
+    # 4 crediti: blocco totale
+    _credit_cache(tmp_path, "soccer_epl", 4, time.time() + 1)
+    monkeypatch.setattr(odds_api, "_credit_stop_logged", False)
+    assert odds_api.credits_hard_stopped() is True
+
+
+def test_credits_hard_stop_segue_la_costante(monkeypatch, tmp_path):
+    """La soglia e' configurabile (`ODDS_CREDIT_HARD_STOP`): con 10 crediti
+    residui e soglia 20 il blocco scatta comunque."""
+    import time
+    odds_api = _credit_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(odds_api, "CREDIT_HARD_STOP", 20)
+    monkeypatch.setattr(odds_api, "_credit_stop_logged", False)
+    _credit_cache(tmp_path, "soccer_epl", 10, time.time())
+    assert odds_api.credits_hard_stopped() is True
+
+
+def test_hard_stop_blocca_la_rotazione_quote(monkeypatch, tmp_path):
+    """La rotazione ridotta NON basta: a 4 crediti `_get_odds` non chiama
+    l'API (nessun 429 nei log) e ritorna vuoto come fa `should_query_sport`."""
+    import time
+    odds_api = _credit_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(odds_api, "_credit_stop_logged", False)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    # La telemetria crediti vive NELLA cache quote: usiamo un'ALTRA lega per
+    # non servire la richiesta dalla cache (che eviterebbe l'HTTP comunque).
+    _credit_cache(tmp_path, "soccer_italy_serie_a", 4, time.time())
+    monkeypatch.setattr(odds_api.requests, "get", _no_http)
+    payload, remaining = odds_api._get_odds(
+        "soccer_epl", "2026-09-21", "2026-09-28")
+    assert payload == [] and remaining == 0
+
+
+def test_hard_stop_controprova_sopra_soglia_la_rotazione_chiama(
+        monkeypatch, tmp_path):
+    """Controprova: a 50 crediti la stessa chiamata parte davvero (il blocco
+    e' la soglia, non altro)."""
+    import time
+    odds_api = _credit_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(odds_api, "_credit_stop_logged", False)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    _credit_cache(tmp_path, "soccer_italy_serie_a", 50, time.time())
+    calls = {}
+
+    class _Resp:
+        status_code = 200
+        headers = {"x-requests-remaining": "49"}
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"id": "m1"}]
+
+    def _get(*a, **k):
+        calls["n"] = calls.get("n", 0) + 1
+        return _Resp()
+
+    monkeypatch.setattr(odds_api.requests, "get", _get)
+    payload, remaining = odds_api._get_odds(
+        "soccer_epl", "2026-09-21", "2026-09-28")
+    assert calls["n"] == 1 and remaining == 49
+
+
+def test_hard_stop_settlement_usa_la_cache_senza_http(monkeypatch, tmp_path):
+    """Il settlement non chiama l'API sotto soglia: usa i punteggi gia' in
+    cache (mai dati inventati); il blocco vale anche per il referto."""
+    import json
+    import time
+    from datetime import datetime, timedelta, timezone
+    odds_api = _credit_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(odds_api, "_credit_stop_logged", False)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    _credit_cache(tmp_path, "soccer_epl", 3, time.time())
+    old = (datetime.now(timezone.utc)
+           - timedelta(hours=odds_api.STALE_INPLAY_HOURS + 2)).isoformat()
+    cached = [{"id": "m1", "completed": False, "commence_time": old,
+               "scores": None}]
+    (tmp_path / "toa_scores_soccer_epl.json").write_text(json.dumps(
+        {"ts": time.time(), "payload": cached, "remaining": 3,
+         "remaining_ts": time.time()}))
+    monkeypatch.setattr(odds_api.requests, "get", _no_http)
+    assert odds_api.fetch_scores("soccer_epl") == cached
+
+
+def test_hard_stop_settlement_controprova_sopra_soglia(monkeypatch, tmp_path):
+    """Controprova: a 50 crediti il refresh dei punteggi parte."""
+    import json
+    import time
+    from datetime import datetime, timedelta, timezone
+    odds_api = _credit_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(odds_api, "_credit_stop_logged", False)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    _credit_cache(tmp_path, "soccer_epl", 50, time.time())
+    old = (datetime.now(timezone.utc)
+           - timedelta(hours=odds_api.STALE_INPLAY_HOURS + 2)).isoformat()
+    (tmp_path / "toa_scores_soccer_epl.json").write_text(json.dumps(
+        {"ts": time.time(), "remaining": 50,
+         "payload": [{"id": "m1", "completed": False,
+                      "commence_time": old, "scores": None}]}))
+    calls = {}
+
+    class _Resp:
+        status_code = 200
+        headers = {"x-requests-remaining": "49"}
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"id": "m2", "completed": True}]
+
+    def _get(*a, **k):
+        calls["n"] = calls.get("n", 0) + 1
+        return _Resp()
+
+    monkeypatch.setattr(odds_api.requests, "get", _get)
+    assert odds_api.fetch_scores("soccer_epl") == [{"id": "m2",
+                                                    "completed": True}]
+    assert calls["n"] == 1

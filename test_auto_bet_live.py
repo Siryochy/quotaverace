@@ -642,3 +642,51 @@ class TestLiveFill:
         self._setup(monkeypatch, prov)
         res = auto_bet._live_fill(self._pick(), stake=5.0, floor=1.65)
         assert res is None
+
+
+class TestBaseStopLossDichiarata:
+    """Il chiamante dichiara la BASE della lettura dello stop-loss:
+    'live_equity' SOLO se il wallet e' stato letto davvero, 'cassa' quando il
+    giro ripiega sulla cassa simulata (regressione del 21/09/2026: basi
+    diverse confrontate fra loro = -40.4% inesistente e 24h di stop col
+    wallet intatto).
+    """
+
+    def _capture(self, monkeypatch):
+        calls = []
+
+        def _spy(bankroll, basis="bankroll", basis_key=None):
+            calls.append((bankroll, basis, basis_key))
+            return {"stopped": False, "just_triggered": False}
+
+        monkeypatch.setattr(auto_bet, "check_daily_stop", _spy)
+        return calls
+
+    def test_wallet_letto_dichiara_equity(self, monkeypatch, temp_db):
+        calls = self._capture(monkeypatch)
+        _seed_value_match(quota=1.65)
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+        _stub_wallet(monkeypatch, 33.5535)
+        monkeypatch.setattr(auto_bet, "_live_fill",
+                            lambda pick, stake, floor: _filled())
+        auto_bet.run_today_bets(stake_eur=1.0)
+        assert calls, "lo stop-loss deve essere valutato nel giro"
+        bankroll, basis, basis_key = calls[0]
+        assert basis == "equity wallet" and basis_key == "live_equity"
+        assert bankroll == pytest.approx(33.5535)
+
+    def test_wallet_illeggibile_dichiara_cassa(self, monkeypatch, temp_db):
+        """Regressione 21/09: col wallet illeggibile la lettura E' la cassa e
+        va dichiarata come tale — mai etichettata 'equity wallet'."""
+        calls = self._capture(monkeypatch)
+        _seed_value_match(quota=1.65)
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda: None)
+        monkeypatch.setattr(auto_bet, "_live_fill",
+                            lambda pick, stake, floor: _filled())
+        auto_bet.run_today_bets(stake_eur=1.0)
+        assert calls, "il giro prosegue in live (fallback documentato)"
+        _, basis, basis_key = calls[0]
+        assert basis == "cassa" and basis_key == "cassa"
