@@ -4468,15 +4468,17 @@ log mostra `auto_bet: bankroll LIVE = equity 33.55 USDC (disponibile 33.55 + in
 gioco 0.00)`: la base EQUITY del 15/09 funziona e il wallet e' leggibile. Subito
 dopo, pero': `auto_bet - ERROR - STOP-LOSS GIORNALIERO attivo fino a
 2026-09-22T15:53:37 — nessuna puntata`.
-`data/execution/daily_stop.json` e' **ANCORA PRESENTE sul volume** (mtime 21/09
+`data/execution/daily_stop.json` era **ANCORA PRESENTE sul volume** (mtime 21/09
 15:53, `start_bankroll 33.5535`, `reason "equity wallet -40.4% ... (valore
 20.00)"`): e' il blocco FANTASMA documentato sopra (cassa 20.0 confrontata con
 the equity 33.5535). Il fix `9468eb1` impedisce nuovi inneschi falsi ma
-**rispetta un blocco gia' attivo**: per ripartire adesso va rimosso a mano
+**rispetta un blocco gia' attivo**: per ripartire subito va rimosso a mano
 (`clear_daily_stop()` / `rm data/execution/daily_stop.json`), altrimenti scade da
-solo il **22/09 15:53 UTC**. Gli altri guardrail sono a posto: kill switch
-`live` + `provider_ready: true`, `settlement_paused: false`, `t60_kill.json`
-ASSENTE (equity 33.55 > 30).
+solo il **22/09 15:53 UTC**. **Il blocco e' stato poi rimosso a mano alle 21:40
+UTC**, su decisione esplicita del proprietario (la causa radice era gia'
+compresa e corretta): vedi la sezione di deploy qui sotto. Gli altri guardrail
+sono a posto: kill switch `live` + `provider_ready: true`, `settlement_paused:
+false`, `t60_kill.json` ASSENTE (equity 33.55 > 30).
 
 **3) BUG TROVATO DAL MONITORAGGIO — LA CATENA ERA CIECA ALLO STOP-LOSS**
 (`decision/kill_switch.py`, fixato). `kill_switch.status()` leggeva
@@ -4516,3 +4518,33 @@ crediti.
 `test_decision_guards`/`commands`/`shadow`/`validation`/`adapters` (156),
 `test_risk_guards` + `test_auto_bet_live` + `test_settlement_pause` (61) — tutti
 **verdi**.
+
+**6) DEPLOY DEL FIX + SBLOCCA DELLO STOP-LOSS FANTASMA (21/09/2026, 21:27 UTC).**
+Commit **`9365f2a`** (`fix(decision-chain): corretta rilevazione dello stato
+stopped per lo stop-loss`) → push su `main` → deployment
+**`76300347-10f5-4737-9aa0-a196aeea8c06` SUCCESS** (21:26:55, health 200).
+Prima del push: nessun marker di conflitto, `compileall` OK, **232 test verdi**
+nei lotti mirati (`test_decision_pipeline`/`guards`/`risk_guards` = 91 +
+`test_auto_bet*`/`t60_breakers`/`league_gate` = 141).
+**Il fix e' VISIBILE IN PRODUZIONE**: `python3 -m decision status` sul container
+ora dichiara `stadio betting : BLOCCATO stop-loss giornaliero attivo: equity
+wallet -40.4% ...` (prima: `libero` con `auto_bet` che bloccava ogni giro).
+**Sblocco eseguito alle 21:40 UTC** su decisione del proprietario (chiamata
+`ask_user`: la causa era compresa e corretta, il blocco era provatamente
+fantasma): `auto_bet.clear_daily_stop()` → `ls` = file assente,
+`daily_stop_status()` = `stopped False`. Il file viene poi **ricreato dal primo
+giro come semplice RIFERIMENTO del giorno** (`{"day": "2026-09-21",
+"start_bankroll": 33.5535, "stopped_until": null, "basis_key": "live_equity"}`,
+mtime 21:40:57): e' il comportamento corretto, non un riarmo.
+**Cicli successivi (21:40:57 / 21:41:57 / 21:42:57) tutti PULITI**: bankroll
+`equity 33.55 USDC (disponibile 33.55 + in gioco 0.00)`, strategia favoriti
+netti, corsie multi-mercato (AH live, OU shadow), `0 puntate piazzate` e **0
+errori** (nessun `429`/`403`/traceback). Il gate di mercato NON blocca: il feed
+SX e' validato (`feed: riuso dello stato per sxbet-feed`).
+**Perche' 0 puntate**: non e' un blocco ma l'assenza di candidati — 0 righe
+`predictions` 1X2 aperte con status value/strong_value/moderate,
+`_today_value_picks()` = 0 e `_multi_market_picks()` = 0 (la corsia e' viva e
+valuta, ma non c'e' nulla da giocare a quest'ora: stesso collo di bottiglia di
+gate-leghe/soglie misurato il 15/09 e il 21/09). Crediti **456** (chiave nuova,
+`budget alert: False`), `bets` 44 (0 aperte), `predictions` 132 aperte,
+`decisions` 4 righe.
