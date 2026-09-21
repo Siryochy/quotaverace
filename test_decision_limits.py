@@ -105,10 +105,16 @@ class TestDerivati:
         assert limits.floor_for("live") == max(limits.order_floor, limits.exchange_floor)
 
     def test_required_depth(self, limits):
-        """Formula di produzione: max(stake x 2.0, 25 USDC)."""
+        """Formula di produzione: max(stake x 1.6, 20 USDC) — taratura 21/09
+        (era max(stake x 2.0, 25) dell'11/09). Il vincolo NON e' copiato a
+        mano: segue la stessa fonte del percorso ordini (`auto_bet`)."""
+        import auto_bet
+        assert limits.min_exec_depth_usdc == auto_bet.MIN_EXEC_DEPTH_USDC
+        assert limits.depth_multiplier == auto_bet.SX_DEPTH_MULTIPLIER
         assert limits.required_depth(1.0) == limits.min_exec_depth_usdc
         assert limits.required_depth(5.0) == limits.min_exec_depth_usdc
-        assert limits.required_depth(20.0) == pytest.approx(40.0)
+        assert limits.required_depth(20.0) == pytest.approx(
+            20.0 * auto_bet.SX_DEPTH_MULTIPLIER)
         assert limits.required_depth("boh") == limits.min_exec_depth_usdc
 
     def test_scorciatoia(self):

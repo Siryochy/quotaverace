@@ -84,10 +84,46 @@ STRATEGY_LEAGUES = {
     # "Greek Super League" — escluse per ROI negativo
 }
 
-# Fallback per leghe non in STRATEGY_LEAGUES (vietate per default)
+# === TIER-2 "PROBATION" (21/09/2026) ===
+# Direttiva del proprietario: allentare il gate di lega per aumentare il
+# volume, con rischio LIMITATO. Il gate passa da DUE stati (ammessa/vietata) a
+# TRE: `core` (STRATEGY_LEAGUES, storico misurato positivo) · `probation`
+# (questo set: nessuno storico positivo misurato, ma leghe reali, liquide e
+# saldabili) · `blocked` (tutto il resto).
+#
+# Le leghe in probation ricevono una strategia PIU' SEVERA del core, non
+# uguale: edge minimo +4pp (contro +2/+2.5pp), Kelly ridotto (0.4 contro
+# 0.8-1.3) e cap di stake 0.5% (contro 1.5-2%). Cosi' il volume aggiunto e'
+# a taglia minima — se il ledger live le promuove, si potra' allinearle al
+# core (decisione futura, da misurare).
+#
+# CRITERI DI AMMISSIONE (tutti obbligatori):
+#   1. presente in `odds_api.SPORTS_MAP` (altrimenti non e' saldabile);
+#   2. scansionata davvero da SX (copertura misurata sul ledger);
+#   3. NESSUN ROI misurato negativo (backtest 12/09/2026, 215 bet, fascia
+#      favoriti 1.30-1.80).
+# ESCLUSE di proposito per il criterio 3 (misurate negative, n=6-26):
+#   Serie A -5.9%, La Liga -6.3%, Belgian Pro League -6.3%,
+#   Liga Portugal -13.4%, Greek Super League -69.4%.
+# Eredivisie (-1.8%, n=23) resta invece nel CORE: campione piccolo e
+# differenza dentro il rumore (decisione esplicita del proprietario, 21/09).
+PROBATION_LEAGUES = {
+    # Inghilterra, Italia, USA, Sud America
+    "EFL Championship", "Serie B", "MLS", "Brasileirao", "Argentina Primera",
+    # Europa centro-nord
+    "Swiss Super League", "Eliteserien", "Austrian Bundesliga",
+    "Scottish Premiership", "Superliga Danimarca", "Allsvenskan",
+    # Asia / Golfo
+    "K League 1", "J1 League", "Liga MX", "Saudi Pro League",
+}
+
+# Strategia di probation: piu' severa del core su edge, Kelly e cap.
+PROBATION_STRATEGY = {"min_edge": 0.04, "kelly_mult": 0.4, "max_stake": 0.005}
+
+# Fallback per leghe SCONOSCIUTE o assenti (il segnale resta vietato a monte:
+# `league_allowed` rifiuta qualunque nome non in core/probation).
 # NB: min_edge allineato alla soglia di edge corrente (+2pp dal 21/09): il
-# fallback si applica solo ai segnali con lega VUOTA — le leghe note ma non in
-# STRATEGY_LEAGUES vengono rifiutate prima da league_allowed.
+# fallback si applica solo ai segnali con lega VUOTA.
 DEFAULT_LEAGUE_STRATEGY = {"min_edge": 0.02, "kelly_mult": 0.5, "max_stake": 0.005}
 
 FAVOURITES_ONLY = True   # mantenere: evita sfavorite ad alta quota
@@ -108,20 +144,35 @@ LOW_PROB_THRESHOLD = 0.40
 LOW_PROB_SHRINK = 0.85
 
 def get_league_strategy(league: str = "") -> dict:
-    """Ritorna la configurazione strategica per una lega.
+    """Ritorna la configurazione strategica per una lega (core o probation).
 
-    Le leghe con ROI positivo nel backtest hanno parametri generosi.
-    Le leghe non elencate usano il fallback severo (effectivamente
-    vietate). Se la lega e' vuota, usa il fallback.
+    Tre stati: core (ROI positivo misurato) -> parametri generosi; probation
+    (tier-2 dal 21/09) -> parametri severi (`PROBATION_STRATEGY`); tutto il
+    resto -> fallback severo, che in pratica non arriva mai ai segnali perche'
+    `league_allowed` li rifiuta prima. Lega vuota -> fallback.
     """
-    if not league or league not in STRATEGY_LEAGUES:
+    if not league:
         return DEFAULT_LEAGUE_STRATEGY
-    return STRATEGY_LEAGUES[league]
+    if league in STRATEGY_LEAGUES:
+        return STRATEGY_LEAGUES[league]
+    if league in PROBATION_LEAGUES:
+        return PROBATION_STRATEGY
+    return DEFAULT_LEAGUE_STRATEGY
+
+
+def league_tier(league: str = "") -> str:
+    """'core' | 'probation' | 'blocked' — utile per log e telemetria."""
+    if league and league in STRATEGY_LEAGUES:
+        return "core"
+    if league and league in PROBATION_LEAGUES:
+        return "probation"
+    return "blocked"
 
 
 def league_allowed(league: str = "") -> bool:
-    """True se la lega e' nelle strategie vincenti (ROI positivo)."""
-    return bool(league and league in STRATEGY_LEAGUES)
+    """True se la lega e' giocabile: core (ROI positivo) o probation (tier-2)."""
+    return bool(league and (league in STRATEGY_LEAGUES
+                            or league in PROBATION_LEAGUES))
 
 
 def compute_ev(prob: float, odds: float) -> float:
@@ -201,8 +252,8 @@ def is_sane(prob: float, odds: float, ev: float,
     a quella implicita nel mercato (devig).
 
     In piu' applica la STRATEGIA PER LEGA:
-    - leghe non in STRATEGY_LEAGUES sono vietate
-    - edge minimo differenziato per lega
+    - leghe fuori da core/probation sono vietate
+    - edge minimo differenziato per lega (core +2/+2.5pp, probation +4pp)
     - fascia quote 1.30-1.80
     - odds_movement: se la quota scende > 5%, segnale +20% (sharp money)
     """

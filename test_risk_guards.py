@@ -218,14 +218,23 @@ class TestStopLossBloccaIlGiro:
 
 class TestLiquiditaSx:
     def test_soglie_liquidita_configurate(self):
-        """Taratura 11/09: soglie allo stesso ordine di grandezza su scan e
-        ordine, cosi' i segnali generati sono eseguibili."""
+        """Taratura 21/09 (era 25/5/25/x2.0 dell'11/09): soglie allentate del
+        20% su tutte le corsie, allo stesso ordine di grandezza fra scan e
+        ordine, cosi' i segnali generati sono eseguibili.
+
+        I valori sono ASSERTI ESATTI di proposito: un ulteriore allentamento
+        deve essere una decisione tracciata in AGENTS.md, non un silenzio.
+        """
         import sx_signals
-        assert sx_signals.MIN_DEPTH_USDC >= 25.0      # totale del match
-        assert sx_signals.MIN_LEG_DEPTH_USDC >= 5.0   # ogni esito
-        assert sx_signals.MIN_EXEC_DEPTH_USDC >= 25.0  # leg giocata
-        assert auto_bet.MIN_EXEC_DEPTH_USDC >= 25.0
-        assert auto_bet.SX_DEPTH_MULTIPLIER >= 2.0
+        assert sx_signals.MIN_DEPTH_USDC == 20.0      # totale del match
+        assert sx_signals.MIN_LEG_DEPTH_USDC == 4.0   # ogni esito
+        assert sx_signals.MIN_EXEC_DEPTH_USDC == 20.0  # leg giocata
+        assert auto_bet.MIN_EXEC_DEPTH_USDC == 20.0
+        assert auto_bet.SX_DEPTH_MULTIPLIER == 1.6
+        # Le protezioni NON si azzerano mai: un multiplo sotto 1.5 non
+        # garantirebbe piu' nulla sul consumo del book.
+        assert auto_bet.SX_DEPTH_MULTIPLIER >= 1.5
+        assert sx_signals.MIN_EXEC_DEPTH_USDC >= 15.0
         # La soglia della leg giocata e' GEMELLA nelle due fasi.
         assert sx_signals.MIN_EXEC_DEPTH_USDC == auto_bet.MIN_EXEC_DEPTH_USDC
 

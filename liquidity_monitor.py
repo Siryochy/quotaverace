@@ -46,13 +46,13 @@ SKIP_LOG = Path(os.getenv(
 # Soglie di default usate SOLO per il report (etichette), non per decidere:
 # il monitor NON blocca nulla, si limita a misurare gli scarti decisi dai
 # guardrail di `sx_signals` (scan) e `auto_bet._live_fill` (ordine).
-# Allineate al secondo giro di taratura dell'11/09/2026 (see AGENTS.md):
-# profondita' totale del match, minimo per esito, minimo della leg giocata e
-# margine richiesto sullo stake (multiplo del book al floor).
-DEFAULT_DEPTH_USDC = float(os.getenv("SX_MIN_DEPTH_USDC", "25.0"))
-DEFAULT_LEG_DEPTH_USDC = float(os.getenv("SX_MIN_LEG_DEPTH_USDC", "5.0"))
-DEFAULT_EXEC_DEPTH_USDC = float(os.getenv("SX_MIN_EXEC_DEPTH_USDC", "25.0"))
-DEFAULT_DEPTH_MULTIPLIER = float(os.getenv("SX_DEPTH_MULTIPLIER", "2.0"))
+# Allineate alla taratura del 21/09/2026 (see AGENTS.md): profondita' totale
+# del match, minimo per esito, minimo della leg giocata e margine richiesto
+# sullo stake (multiplo del book al floor). Erano 25/5/25/x2.0 (11/09).
+DEFAULT_DEPTH_USDC = float(os.getenv("SX_MIN_DEPTH_USDC", "20.0"))
+DEFAULT_LEG_DEPTH_USDC = float(os.getenv("SX_MIN_LEG_DEPTH_USDC", "4.0"))
+DEFAULT_EXEC_DEPTH_USDC = float(os.getenv("SX_MIN_EXEC_DEPTH_USDC", "20.0"))
+DEFAULT_DEPTH_MULTIPLIER = float(os.getenv("SX_DEPTH_MULTIPLIER", "1.6"))
 
 
 def _now() -> datetime:

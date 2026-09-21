@@ -50,10 +50,19 @@ def _row(*, home="Alpha", away="Beta", league="Serie A",
 # ---------------------------------------------------------------------------
 
 class TestFiltroMercato:
-    def test_soglie_vecchie_sono_meno_severe(self):
+    def test_vecchie_soglie_vs_attuali(self):
+        """Le soglie VECCHIE (15/5) sono il riferimento before/after del
+        misuratore; l'attuale taratura e' 20/4/20 (21/09/2026).
+
+        Sul TOTALE le vecchie restano meno severe (15 < 20), quindi il
+        confronto "prima passavano piu' partite" e' ancora sensato; sul
+        SINGOLO esito invece la soglia si e' allentata di 1 USDC (5 -> 4)
+        perche' il taglio del 20% si applica a tutti e tre i valori: le due
+        grandezze non sono piu' ordinate allo stesso modo (voluto).
+        """
         import sx_signals
         assert li.OLD_DEPTH_USDC < sx_signals.MIN_DEPTH_USDC
-        assert li.OLD_LEG_DEPTH_USDC <= sx_signals.MIN_LEG_DEPTH_USDC
+        assert li.OLD_LEG_DEPTH_USDC >= sx_signals.MIN_LEG_DEPTH_USDC
 
     def test_totale_sotto_soglia_bloccato(self):
         r = _row(depths={"1": 5.0, "X": 3.0, "2": 2.0})   # totale 10 < 25
@@ -114,7 +123,8 @@ class TestAnalyse:
         grid = {g["stake"]: g for g in data["stake_sensitivity"]}
         assert grid[1.0]["passed"] == 1 and grid[10.0]["passed"] == 1
         assert grid[20.0]["passed"] == 0
-        assert grid[20.0]["required_depth"] == pytest.approx(40.0)
+        # Taratura 21/09: richiesto = max(20 x 1.6, 20) = 32 (era 40 con x2.0).
+        assert grid[20.0]["required_depth"] == pytest.approx(32.0)
 
     def test_sensibilita_se_irrigidissimo_la_soglia(self):
         # due favoriti: floor 40 e 400 -> a soglia 25 passano entrambi,
@@ -261,5 +271,5 @@ class TestIndipendenza:
 
     def test_default_env_documentate(self):
         import liquidity_monitor
-        assert liquidity_monitor.DEFAULT_EXEC_DEPTH_USDC >= 25.0
-        assert liquidity_monitor.DEFAULT_DEPTH_MULTIPLIER >= 2.0
+        assert liquidity_monitor.DEFAULT_EXEC_DEPTH_USDC >= 20.0
+        assert liquidity_monitor.DEFAULT_DEPTH_MULTIPLIER >= 1.6

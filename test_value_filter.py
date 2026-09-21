@@ -239,6 +239,64 @@ class TestStrategiaPerLega:
         assert league_allowed("") is False
         assert league_allowed("Unknown League") is False
 
+    def test_tier2_probation_ammessa_con_parametri_severi(self):
+        """Tier-2 (21/09): leghe reali ma senza storico positivo -> ammesse
+        con strategia PIU' SEVERA del core (edge +4pp, Kelly 0.4, cap 0.5%)."""
+        import value_filter
+        from value_filter import (league_allowed, league_tier,
+                                  get_league_strategy, PROBATION_STRATEGY)
+        for lg in ("EFL Championship", "Serie B", "MLS", "Brasileirao",
+                   "Argentina Primera", "Eliteserien", "Liga MX",
+                   "J1 League", "Saudi Pro League", "K League 1"):
+            assert league_allowed(lg) is True, lg
+            assert league_tier(lg) == "probation", lg
+            assert get_league_strategy(lg) == PROBATION_STRATEGY
+        # La severita' e' un INVARIANTE, non una coincidenza.
+        assert PROBATION_STRATEGY["min_edge"] > max(
+            s["min_edge"] for s in value_filter.STRATEGY_LEAGUES.values())
+        assert PROBATION_STRATEGY["max_stake"] < min(
+            s["max_stake"] for s in value_filter.STRATEGY_LEAGUES.values())
+        assert PROBATION_STRATEGY["kelly_mult"] < min(
+            s["kelly_mult"] for s in value_filter.STRATEGY_LEAGUES.values())
+
+    def test_leghe_misurate_negative_restano_vietate(self):
+        """Escluse per decisione esplicita: aggiungere volume a EV negativo."""
+        from value_filter import league_allowed, league_tier, PROBATION_LEAGUES
+        for lg in ("Serie A", "La Liga", "Belgian Pro League",
+                   "Liga Portugal", "Greek Super League"):
+            assert league_allowed(lg) is False, lg
+            assert league_tier(lg) == "blocked", lg
+            assert lg not in PROBATION_LEAGUES
+
+    def test_tier_del_core(self):
+        from value_filter import league_tier
+        assert league_tier("Premier League") == "core"
+        assert league_tier("Eredivisie") == "core"   # -1.8%: rumore, resta core
+        assert league_tier("") == "blocked"
+        assert league_tier("Serie A") == "blocked"
+
+    def test_is_sane_tier2_edge_4pp(self):
+        """In probation l'edge minimo e' +4pp: +2.5pp passa nel core, non qui."""
+        from value_filter import is_sane
+        # edge = 0.625 - 0.60 = +2.5pp
+        ok_core, _ = is_sane(0.625, 1.65, 0.031, market_prob=0.60,
+                             league="Turkey Super Lig")   # min_edge 2.5pp
+        ok_prob, reason = is_sane(0.625, 1.65, 0.031, market_prob=0.60,
+                                  league="Serie B")
+        assert ok_core is True
+        assert ok_prob is False and "non batte il mercato" in reason
+        # +4.5pp passa in probation.
+        ok_prob2, reason2 = is_sane(0.645, 1.65, 0.064, market_prob=0.60,
+                                    league="Serie B")
+        assert ok_prob2 is True, reason2
+
+    def test_is_sane_tier2_bloccata_resta_bloccata(self):
+        """Il tier non apre le leghe misurate negative."""
+        from value_filter import is_sane
+        ok, reason = is_sane(0.68, 1.60, 0.088, market_prob=0.60,
+                             league="La Liga")
+        assert ok is False and "esclusa per ROI negativo" in reason
+
     def test_get_league_strategy(self):
         from value_filter import get_league_strategy
         strat = get_league_strategy("Premier League")

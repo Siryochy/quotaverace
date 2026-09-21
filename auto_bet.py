@@ -485,17 +485,21 @@ def t60_dispatch_pending(bankroll: float | None = None) -> list[dict]:
 #
 #     richiesto = max(stake * SX_DEPTH_MULTIPLIER, SX_MIN_EXEC_DEPTH_USDC)
 #
-#   SX_DEPTH_MULTIPLIER (default 2.0) -> lo stake non deve esaurire il book:
+#   SX_DEPTH_MULTIPLIER (default 1.6) -> lo stake non deve esaurire il book:
 #     se lo stake consuma meta' del lato, il resto della size muove il prezzo
 #     e la quota "richiesta" non e' piu' garantita.
-#   SX_MIN_EXEC_DEPTH_USDC (default 25.0) -> soglia ASSOLUTA di libro al
+#   SX_MIN_EXEC_DEPTH_USDC (default 20.0) -> soglia ASSOLUTA di libro al
 #     floor per qualunque stake: un mercato quasi vuoto non e' negoziabile
 #     (e' la stessa soglia che `sx_signals` pretende sulla leg giocata, cosi'
 #     non si generano segnali che l'ordine scarterebbe sempre).
+# TARATURA 21/09/2026: 2.0/25.0 -> 1.6/20.0 (-20% sul libro richiesto),
+# direttiva "volume": allarga la fascia dei book eseguibili senza scendere
+# sotto la taglia minima d'ordine. Le guardie restano tutte attive
+# (multiplo + soglia assoluta + inv_sum + fascia quota).
 # Con STAKE_CAP_HARD attivo l'ordine viene SALTATO (fail-closed) e lo scarto
 # finisce nel monitor (liquidity_monitor, kind="order").
-SX_DEPTH_MULTIPLIER = float(os.getenv("SX_DEPTH_MULTIPLIER", "2.0"))
-MIN_EXEC_DEPTH_USDC = float(os.getenv("SX_MIN_EXEC_DEPTH_USDC", "25.0"))
+SX_DEPTH_MULTIPLIER = float(os.getenv("SX_DEPTH_MULTIPLIER", "1.6"))
+MIN_EXEC_DEPTH_USDC = float(os.getenv("SX_MIN_EXEC_DEPTH_USDC", "20.0"))
 
 
 def required_depth(stake: float) -> float:

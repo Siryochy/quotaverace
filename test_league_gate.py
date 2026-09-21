@@ -30,8 +30,9 @@ import sx_signals
 import tracker
 import value_filter
 
-ALLOWED = "Premier League"          # in STRATEGY_LEAGUES
+ALLOWED = "Premier League"          # in STRATEGY_LEAGUES (core)
 BANNED = "La Liga"                  # esclusa per ROI negativo (12/09)
+PROBATION = "Serie B"               # tier-2 dal 21/09 (PROBATION_LEAGUES)
 
 
 @pytest.fixture()
@@ -126,6 +127,16 @@ class TestGateCorsiaOrdini:
         picks = _picks()
         assert len(picks) == len(value_filter.STRATEGY_LEAGUES)
 
+    def test_tutte_le_leghe_tier2_passano(self, temp_db):
+        """Tier-2 (21/09): la corsia ordini non deve VIETARE nessuna delle 15
+        leghe in probation — il gate e' a tre stati, non binario."""
+        for i, league in enumerate(sorted(value_filter.PROBATION_LEAGUES)):
+            _seed(f"p{i}", league)
+        picks = _picks()
+        assert len(picks) == len(value_filter.PROBATION_LEAGUES)
+        for mid in picks:
+            assert value_filter.league_tier(picks[mid]["league"]) == "probation"
+
 
 class TestPropagazioneLega:
     """La causa radice: il candidato DEVE portare la lega."""
@@ -144,6 +155,22 @@ class TestPropagazioneLega:
             {**cand, "league": BANNED}) == "rejected"
         assert fixture_engine._candidate_status(
             {**cand, "league": ALLOWED}) == "value"
+
+    def test_tier2_edge_alzato_applicato_dal_motore(self):
+        """In probation l'edge minimo e' +4pp, e vale nel codice VERO del
+        motore (`_candidate_status`), non solo in `is_sane`.
+
+        +2.5pp: rifiutato (passerebbe invece in una lega core, es. Turchia);
+        +4.5pp: accettato come `value`.
+        """
+        debole = {"prob": 0.625, "quota": 1.65, "ev": 0.031,
+                  "market_prob": 0.60, "market_edge": 0.025}
+        assert fixture_engine._candidate_status(
+            {**debole, "league": PROBATION}) == "rejected"
+        forte = {"prob": 0.645, "quota": 1.65, "ev": 0.064,
+                 "market_prob": 0.60, "market_edge": 0.045}
+        assert fixture_engine._candidate_status(
+            {**forte, "league": PROBATION}) == "value"
 
     def test_i_candidati_1x2_e_ah_portano_la_lega(self):
         """Tripwire sul sorgente: ogni dict candidato ha la chiave `league`."""
@@ -214,13 +241,42 @@ class TestNomiDelleLegheAmmesse:
         assert value_filter.league_allowed(resolved)
 
     @pytest.mark.parametrize("league", [
-        "EFL Cup", "Scottish Premiership", "La Liga", "Serie A",
-        "EFL Championship", "Liga MX", "Primera A",
+        "EFL Cup", "La Liga", "Serie A", "Belgian Pro League",
+        "Liga Portugal", "Greek Super League", "Primera A",
     ])
     def test_lega_vietata_resta_vietata_dopo_la_risoluzione(self, league):
-        """Nessuna scorciatoia: il resolver non 'promuove' una lega persa."""
+        """Nessuna scorciatoia: il resolver non 'promuove' una lega persa.
+
+        Solo le leghe MISURATE NEGATIVE restano vietate (dal 21/09 l'elenco
+        dei vietati si e' ristretto: EFL Championship, Scottish Premiership,
+        Liga MX & co. sono passate in PROBATION — vedi
+        `test_tier2_non_bloccata_per_errore`).
+        """
         resolved = sx_signals._league_sx_to_sports_map(league) or league
         assert not value_filter.league_allowed(resolved)
+
+    @pytest.mark.parametrize("label,expected", [
+        ("England Championship", "EFL Championship"),
+        ("The Championship", "EFL Championship"),
+        ("Italy Serie B", "Serie B"),
+        ("Major League Soccer", "MLS"),
+        ("Liga Profesional", "Argentina Primera"),
+        ("Premiership", "Scottish Premiership"),
+        ("Superliga", "Superliga Danimarca"),
+        ("Switzerland Super League", "Swiss Super League"),
+        ("Mexico Liga MX", "Liga MX"),
+        ("Saudi Arabia Pro League", "Saudi Pro League"),
+        ("South Korea K League 1", "K League 1"),
+        ("Japan J1 League", "J1 League"),
+    ])
+    def test_tier2_non_bloccata_per_errore(self, label, expected):
+        """Tier-2 (21/09): il resolver non deve VIETARE per errore una lega
+        giocabile — un falso divieto varrebbe piu' di un divieto mancante,
+        perche' azzererebbe il flusso autorizzato."""
+        resolved = sx_signals._league_sx_to_sports_map(label) or label
+        assert resolved == expected
+        assert value_filter.league_tier(resolved) == "probation"
+        assert value_filter.league_allowed(resolved)
 
     def test_le_leghe_della_strategia_esistono_in_sports_map(self):
         """Ogni lega ammessa deve avere anche la chiave the-odds-api (settlement)."""

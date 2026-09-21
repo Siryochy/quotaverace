@@ -56,8 +56,21 @@ class TestClassificazione:
         assert lgi._classify({"league": "Bundesliga"}) == lgi.ALLOWED
 
     def test_lega_vietata(self):
-        for league in ("Serie A", "La Liga", "EFL Cup", "Scottish Premiership"):
+        """Dal 21/09 i vietati sono SOLO le leghe misurate negative: le altre
+        (es. Scottish Premiership, Liga MX) sono passate in PROBATION e il
+        misuratore le classifica come ammesse — vedi il test successivo."""
+        for league in ("Serie A", "La Liga", "EFL Cup", "Belgian Pro League",
+                       "Liga Portugal", "Greek Super League"):
             assert lgi._classify({"league": league}) == lgi.BLOCKED
+
+    def test_tier2_classificata_ammessa(self):
+        """Il tier-2 e' giocabile (con strategia severa): il misuratore non
+        deve contarlo fra i bloccati, altrimenti la misura del gate mentirebbe."""
+        import value_filter
+        for league in ("EFL Championship", "Serie B", "Liga MX",
+                       "Scottish Premiership", "Argentina Primera"):
+            assert lgi._classify({"league": league}) == lgi.ALLOWED
+            assert value_filter.league_tier(league) == "probation"
 
     def test_lega_assente_non_e_ammessa(self):
         """Senza riga in `matches` la lega e' ignota: bucket separato, mai

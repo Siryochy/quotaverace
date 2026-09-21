@@ -127,10 +127,10 @@ MAX_RAW_MARKETS = _env_int("MM_MAX_RAW_MARKETS", 400)
 MAX_LINES_PER_MARKET = _env_int("MM_MAX_LINES_PER_MARKET", 12)
 
 #: Soglie di liquidita' (STESSI nomi/env di sx_signals e auto_bet: la taratura
-#: dell'11/09 e' una sola in tutto il progetto).
-MIN_DEPTH_USDC = _env_float("SX_MIN_DEPTH_USDC", 25.0)
-MIN_LEG_DEPTH_USDC = _env_float("SX_MIN_LEG_DEPTH_USDC", 5.0)
-MIN_EXEC_DEPTH_USDC = _env_float("SX_MIN_EXEC_DEPTH_USDC", 25.0)
+#: del 21/09/2026 e' una sola in tutto il progetto: 20/4/20 USDC).
+MIN_DEPTH_USDC = _env_float("SX_MIN_DEPTH_USDC", 20.0)
+MIN_LEG_DEPTH_USDC = _env_float("SX_MIN_LEG_DEPTH_USDC", 4.0)
+MIN_EXEC_DEPTH_USDC = _env_float("SX_MIN_EXEC_DEPTH_USDC", 20.0)
 MIN_INV_SUM, MAX_INV_SUM = 0.98, 1.08
 
 #: I mercati gestiti qui e il type id nativo SX (vedi decision.market).

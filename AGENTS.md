@@ -4548,3 +4548,99 @@ valuta, ma non c'e' nulla da giocare a quest'ora: stesso collo di bottiglia di
 gate-leghe/soglie misurato il 15/09 e il 21/09). Crediti **456** (chiave nuova,
 `budget alert: False`), `bets` 44 (0 aperte), `predictions` 132 aperte,
 `decisions` 4 righe.
+
+### Allentamento del League Gate: Tier-2 in probation + copertura analisi (21/09/2026, notte)
+
+**Direttiva del proprietario**: allentare il gate di lega per aumentare il
+volume operativo (era ~1-2 ordini/giorno), con le protezioni anti-spread e
+anti-quote-spazzatura intatte. Chiesto prima di scrivere codice: analisi della
+configurazione, misura dei blocchi reali, proposta; poi scelta A+B+C.
+
+**LA MISURA HA CORRETTO LA PREMESSA.** Sul ledger di produzione (sola lettura,
+`mode=ro`, zero crediti):
+- **scarti SOLO-lega nelle ultime 24h: 0** (72h: 3 | 7gg: 5);
+- **scarti liquidita' in 24h: 1** (`depth_totale`);
+- nelle leghe AMMESSE, 12 righe respinte in 7 giorni: **tutte e 12 per EV < 2%**
+  (0 per edge, 0 per fascia quota, 0 per favourite gate) → abbassare l'edge non
+  avrebbe sbloccato nulla dove la strategia e' validata;
+- il **board** aveva **6 partite in 7 giorni** e le analisi erano **26 oggi
+  contro 137 il 20/09 e 104 il 19/09**.
+**La causa dominante era `ODDS_DAILY_BUDGET=2`** (default di codice 12),
+eredita' della crisi crediti del 12-21/09: 2 sole leghe/giorno di rotazione →
+quasi nessun candidato a valle. I crediti ora sono sani (**456**, ~50,7/giorno
+sostenibili fino al reset dell'01/10).
+
+**1) OPZIONE A — RIPRISTINO DELLA COPERTURA (env, zero codice).**
+`ODDS_DAILY_BUDGET` **2 → 8** e `SETTLEMENT_HEAL_INTERVAL_HOURS` **36h → 48h**
+(la verifica periodica delle leghe senza righe aperte lascia spazio alla
+rotazione; costo atteso ~28 crediti/giorno su ~50 disponibili). Impostate su
+Railway con `railway variables --set` e **dichiarate `preserve()`** in
+`.railway/railway.ts` (con `SETTLEMENT_WINDOW_DAYS`). Effetto atteso sui dati
+del 20/09: da 3 a ~30-45 candidati 1X2/giorno.
+
+**2) OPZIONE B — GATE A TRE STATI: core / probation / bloccata**
+(`value_filter.py`). Non piu' binario: `PROBATION_LEAGUES` (15 leghe) sono
+giocabili con strategia **piu' severa** del core — `PROBATION_STRATEGY`
+= `min_edge 0.04`, `kelly_mult 0.4`, `max_stake 0.5%` — mentre restano
+**vietate** le 5 leghe con ROI misurato negativo (Serie A −5.9%, La Liga
+−6.3%, Belgian Pro League −6.3%, Liga Portugal −13.4%, Greek Super League
+−69.4%). Nuova `league_tier()` per log/telemetria; `league_allowed()` e
+`get_league_strategy()` includono il tier; `is_sane` applica l'edge del tier
+automaticamente (nessun chiamante passa `market_edge_min`).
+- **Tier-2 ammesso**: EFL Championship, Serie B, MLS, Brasileirao, Argentina
+  Primera, Swiss Super League, Eliteserien, Austrian Bundesliga, Scottish
+  Premiership, Superliga Danimarca, Allsvenskan, K League 1, J1 League,
+  Liga MX, Saudi Pro League. Criteri: in `SPORTS_MAP` (saldabile), scansionata
+  da SX, nessun ROI misurato negativo.
+- **Eredivisie resta CORE** (−1.8%, n=23: differenza dentro il rumore —
+  decisione esplicita del proprietario, non un errore di trasferimento).
+- **Alias SX estesi** (`SX_LEAGUE_ALIASES`): varianti con prefisso paese delle
+  15 leghe Tier-2 ("England Championship", "Italy Serie B", "Mexico Liga MX",
+  "South Korea K League 1"...): un falso DIVIETO su una lega giocabile
+  varrebbe piu' di un divieto mancante, perche' azzererebbe il flusso
+  autorizzato (stessa ragione del fix 17/09).
+- ⚠️ **Come si promuove una lega**: la probation NON e' una promozione, e'
+  una misurazione a taglia minima (cap 0.5%). Dopo N chiusure per lega
+  (`predictions` + `market_diagnose`) si decide se allinearla al core.
+
+**3) OPZIONE C — LIQUIDITA' −20%** (era 25/5/25/x2.0 dell'11/09):
+`SX_MIN_DEPTH_USDC` 25 → **20**, `SX_MIN_LEG_DEPTH_USDC` 5 → **4**,
+`SX_MIN_EXEC_DEPTH_USDC` 25 → **20**, `SX_DEPTH_MULTIPLIER` 2.0 → **1.6**
+(all'ordine: `richiesto = max(stake × 1.6, 20)`). Default di codice allineati
+in `sx_signals.py`, `auto_bet.py`, `multi_market.py`, `liquidity_monitor.py`,
+`decision/limits.py`. Gain misurato: **~1 pick/giorno** (la misura dell'11/09
+diceva 42/42 eseguibili a 25 USDC: il taglio allarga la fascia dei book
+eseguibili, non sblocca un collo di bottiglia). **Protezioni intatte**:
+soglia assoluta + multiplo, `inv_sum 0.98-1.08`, fascia quota 1.30-1.80,
+favourite gate, `EV_MAX 20%`.
+
+**4) Tripwire aggiornati di proposito** (una soglia allentata senza un test
+che la fissi e' un allentamento silenzioso): `test_risk_guards.
+TestLiquiditaSx.test_soglie_liquidita_configurate` ora asserisce **uguaglianza
+esatta** (20/4/20/1.6) piu' il pavimento `multiplier >= 1.5`;
+`test_liquidity_impact` (richiesto 32 per stake 20, vecchie soglie vs attuali);
+`test_decision_limits.test_required_depth` **deriva** la formula da `auto_bet`
+invece di copiarla; `test_league_gate` nuovi
+`test_tutte_le_leghe_tier2_passano`, `test_tier2_edge_alzato_applicato_dal_motore`,
+`test_tier2_non_bloccata_per_errore` e l'elenco dei vietati ristretto alle sole
+misurate negative; `test_value_filter` +4 test sul tier
+(`test_tier2_probation_ammessa_con_parametri_severi`,
+`test_leghe_misurate_negative_restano_vietate`, `test_tier_del_core`,
+`test_is_sane_tier2_edge_4pp`); `test_league_gate_impact` distingue allowed da
+blocked anche per il tier-2 (altrimenti la misura del gate mentirebbe).
+
+**Verifica locale**: 400+ test verdi nei lotti mirati (value_filter,
+risk_guards, decision_limits, liquidity_impact/monitor, multi_market,
+sx_signals, league_gate(+impact), auto_bet×3, favourites_only, t60_breakers,
+market_calib, ou_exclusion, settlement_watchdog, sx_native_settlement,
+odds_api, bot, secret_hygiene) + il pacchetto `decision` (adapters, pipeline,
+feedback, review, review_telegram, shadow, validation, compare, clv, clv_wiring).
+`verify_guardrails.py`: **A-G tutti bloccano** (exit 0). `railway config plan`:
+**0 to add, 1 to change, 0 to destroy** (solo il flag non distruttivo di
+api-volume).
+
+**⚠️ Da rimisurare fra qualche giorno**: (a) il flusso 1X2 per lega
+(tier-2 vs core) sul nuovo ledger; (b) i consumi crediti reali con budget 8
+(credit watchdog ogni 6h); (c) le chiusure per lega Tier-2 prima di qualunque
+promozione. Il numero di partite analizzate e' il KPI di questa modifica, non
+il numero di ordini.

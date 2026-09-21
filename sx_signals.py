@@ -60,24 +60,29 @@ logger = logging.getLogger("sx_signals")
 
 # --- Soglie di coerenza/liquidita' (identiche a scan_sx_live.py) -----------
 MIN_INV_SUM, MAX_INV_SUM = 0.98, 1.08
-# FILTRO LIQUIDITA' SX (tarato l'11/09/2026): su un exchange si scommette
-# contro altri utenti, quindi su mercati sottili la quota mostrata puo' non
-# essere disponibile e l'ordine va in slippage (o resta parziale). Tre
-# soglie, tutte overridabili da env senza redeploy di codice:
+# FILTRO LIQUIDITA' SX (tarato l'11/09/2026, allentato del 20% il 21/09).
+# Su un exchange si scommette contro altri utenti, quindi su mercati sottili la
+# quota mostrata puo' non essere disponibile e l'ordine va in slippage (o resta
+# parziale). Tre soglie, tutte overridabili da env senza redeploy di codice:
 #
-#   SX_MIN_DEPTH_USDC      (25) -> liquidita' TOTALE del match (3 esiti
+#   SX_MIN_DEPTH_USDC      (20) -> liquidita' TOTALE del match (3 esiti
 #     sommati): salute del mercato, un book complessivamente vuoto non e'
 #     devigabile in modo affidabile.
-#   SX_MIN_LEG_DEPTH_USDC  (5)  -> profondita' minima di OGNI esito: sotto
+#   SX_MIN_LEG_DEPTH_USDC  (4)  -> profondita' minima di OGNI esito: sotto
 #     questa soglia il singolo lato e' di fatto inesistente.
-#   SX_MIN_EXEC_DEPTH_USDC (25) -> profondita' minima della LEG GIOCATA
+#   SX_MIN_EXEC_DEPTH_USDC (20) -> profondita' minima della LEG GIOCATA
 #     (il favorito scelto). E' la STESSA soglia assoluta che il guardrail
 #     d'ordine applica in auto_bet (`required_depth`): il segnale viene
 #     generato solo se l'ordine puo' davvero essere eseguito, altrimenti
 #     sarebbe rumore destinato a uno scarto sicuro al momento dell'ordine.
-MIN_DEPTH_USDC = float(os.getenv("SX_MIN_DEPTH_USDC", "25.0"))
-MIN_LEG_DEPTH_USDC = float(os.getenv("SX_MIN_LEG_DEPTH_USDC", "5.0"))
-MIN_EXEC_DEPTH_USDC = float(os.getenv("SX_MIN_EXEC_DEPTH_USDC", "25.0"))
+# VALORI 25/5/25 (11/09) -> 20/4/20 (21/09, direttiva "volume"): la misura
+# dell'11/09 diceva che a 25 USDC passava il 100% dei favoriti (42/42), quindi
+# il taglio del 20% compra poco volume ma allarga la fascia dei book eseguibili
+# restando sopra la taglia minima d'ordine (1 USDC). Le protezioni anti-slippage
+# restano (soglia assoluta + multiplo + inv_sum + fascia quota).
+MIN_DEPTH_USDC = float(os.getenv("SX_MIN_DEPTH_USDC", "20.0"))
+MIN_LEG_DEPTH_USDC = float(os.getenv("SX_MIN_LEG_DEPTH_USDC", "4.0"))
+MIN_EXEC_DEPTH_USDC = float(os.getenv("SX_MIN_EXEC_DEPTH_USDC", "20.0"))
 
 # --- Finestra dei match candidati ------------------------------------------
 HOURS_AHEAD = 24.0          # come auto_bet._today_value_picks (now..now+24h)
@@ -144,6 +149,27 @@ SX_LEAGUE_ALIASES: Dict[str, Optional[str]] = {
     "Turkey Super Lig": "Turkey Super Lig",
     "Ligue 1": "Ligue 1", "Eredivisie": "Eredivisie",
     "Premier League": "Premier League", "Bundesliga": "Bundesliga",
+    # Varianti con prefisso paese delle leghe in PROBATION (value_filter.
+    # PROBATION_LEAGUES, tier-2 dal 21/09/2026): stessa ragione delle righe
+    # sopra — un falso DIVIETO su una lega giocabile varrebbe piu' di un
+    # divieto mancante, perche' azzererebbe il flusso autorizzato.
+    "England Championship": "EFL Championship",
+    "EFL Championship": "EFL Championship",
+    "Argentina Primera Division": "Argentina Primera",
+    "Brazil Campeonato Brasileiro": "Brasileirao",
+    "Swiss Super League": "Swiss Super League",
+    "Switzerland Super League": "Swiss Super League",
+    "Eliteserien": "Eliteserien", "Norway Eliteserien": "Eliteserien",
+    "Austrian Bundesliga": "Austrian Bundesliga",
+    "Scotland Premiership": "Scottish Premiership",
+    "Scottish Premiership": "Scottish Premiership",
+    "Denmark Superliga": "Superliga Danimarca",
+    "Sweden Allsvenskan": "Allsvenskan", "Allsvenskan": "Allsvenskan",
+    "South Korea K League 1": "K League 1", "K League 1": "K League 1",
+    "Japan J1 League": "J1 League", "J1 League": "J1 League",
+    "Mexico Liga MX": "Liga MX", "Liga MX": "Liga MX",
+    "Saudi Arabia Pro League": "Saudi Pro League",
+    "Saudi Pro League": "Saudi Pro League",
     "Europa League_UEFA": "Europa League", "Champions League_UEFA": "Champions League",
     "Premiership": "Scottish Premiership", "Superettan": "Sweden Superettan",
     "Superliga": "Superliga Danimarca",

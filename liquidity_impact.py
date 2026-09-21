@@ -26,11 +26,12 @@ Imbuto:
                 -> sono SEGNALI value del modello (EV/edge)
 
 Poi la sensibilita' allo STAKE reale: per ogni stake tipico (1, 2, 5, 10,
-20 USDC) si applica `auto_bet.required_depth` (= max(stake x 2.0,
-SX_MIN_EXEC_DEPTH_USDC)) alla size al floor della leg giocata.
+20 USDC) si applica `auto_bet.required_depth` (= max(stake x 1.6 dal
+21/09/2026, SX_MIN_EXEC_DEPTH_USDC)) alla size al floor della leg giocata.
 
 Output: tabella con conteggi/percentuali, confronto VECCHIE (15/5) e NUOVE
-(25/5/25) soglie, motivi di blocco, ripartizione per lega e verdetto.
+(20/4/20 dopo l'allentamento del 21/09) soglie, motivi di blocco,
+ripartizione per lega e verdetto.
 
 Uso:
     venv/bin/python liquidity_impact.py                    # campione live 24h
