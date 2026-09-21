@@ -73,7 +73,13 @@ def status(probes: Optional[dict[str, Probe]] = None) -> KillSwitchStatus:
 
     try:
         stop = active["daily_stop"]() or {}
-        out.daily_stop_active = bool(stop.get("active"))
+        # `auto_bet.daily_stop_status()` espone la chiave **`stopped`**: leggere
+        # `active` (nome usato solo dalle sonde iniettate nei test) rendeva la
+        # catena CIECA allo stop-loss — visto in produzione il 21/09/2026, con
+        # `decision status` che dichiarava "stadio betting: libero" mentre
+        # `auto_bet` bloccava ogni giro. Si accettano ENTRAMBE le chiavi: la
+        # sonda reale usa `stopped`, i probe dei test possono usare `active`.
+        out.daily_stop_active = bool(stop.get("stopped", stop.get("active")))
         out.daily_stop_detail = str(stop.get("detail") or stop.get("reason") or "")
     except Exception:
         # fail-open: un file illeggibile non blocca il portafoglio per 24h

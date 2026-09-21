@@ -4417,9 +4417,102 @@ e' ~29h vecchia, quindi con il hard stop scatta la regola di PROBE (vedi
 sopra) e il sistema non resta mai cieco. ⚠️ Senza la regola di probe la chiave
 nuova non sarebbe MAI stata vista (la cache non si aggiorna senza chiamate).
 
-**Template Telegram "BOT - TRADING - CRYPTO"**: **NON esiste in questo repo**.
-Le uniche uscite Telegram sono messaggi costruiti nel codice (nessun
-riferimento a crypto/trading) e il webhook n8n opzionale di `surebet_engine.py`
-(`SUREBET_WEBHOOK_URL`), che invia solo `build_json_payload(opp)` senza alcun
-titolo/intestazione. Un header "BOT - TRADING - CRYPTO" puo' stare solo nel
-workflow n8n esterno o nello script di broadcast, fuori da questo repository.
+**Template Telegram "BOT - TRADING - CRYPTO" — NON ESISTE (chiarimento 21/09):
+il riferimento era a un ALTRO progetto, va ignorato.** In questo repository non
+c'e' alcun bot di crypto trading: la parola "crypto" compare solo per dire che
+**SX Bet e' un exchange P2P crypto** (`execution_engine.py`, DEPLOY.md) — e'
+la rete su cui girano gli ordini, non un'attivita' di trading di criptovalute.
+Conseguenze operative permanenti:
+- le uniche uscite Telegram sono **messaggi di TESTO costruiti nel codice**
+  (`bot.py`, `surebet_engine.py`, `tennis_sandbox.py`): nessun template
+  esterno, nessun header di intestazione, nessun riferimento a crypto/trading;
+- l'unica integrazione esterna e' il **webhook n8n opzionale** di
+  `surebet_engine.py` (`SUREBET_WEBHOOK_URL`, `_send_webhook`), che invia il
+  payload di `build_json_payload(opp)` — nessuna intestazione, nessun titolo;
+- un header "BOT - TRADING - CRYPTO" puo' stare SOLO nel workflow n8n esterno
+  o nello script di broadcast, cioe' **fuori da questo repository**.
+**Se si mette mano alle notifiche, il perimetro di lavoro e' esclusivamente**:
+(a) la formattazione delle stringhe di testo (`format_telegram_alert` e
+`build_inline_keyboard` in `surebet_engine.py`; i testi dei messaggi di
+`bot.py` per la parte bot) e (b) il payload del webhook
+(`build_json_payload`). Niente template, niente crypto: qui si editano
+stringhe e JSON.
+⚠️ **Nome del file**: e' `surebet_engine.py` (non `surebetengine.py`) — il
+modulo indipendente di arbitraggio descritto nella sezione "Surebet engine
+indipendente".
+
+### Monitoraggio post-riavvio: chiave nuova OK, stop-loss ANCORA armato + catena cieca (21/09/2026, sera)
+
+**1) CHIAVE NUOVA VERIFICATA E FUNZIONANTE (zero 429/403).** Impronta letta sul
+container: `ODDS_API_KEY` len **32**, sha12 **`6de9e6433715`** (la vecchia era
+`5c483976d988`) → la chiave e' arrivata sul servizio `api`. Prova live: il giro
+di settlement delle 20:50 UTC ha fatto ~21 chiamate `/scores` con
+`crediti residui` da **496 a 456** (40 crediti, ~2/chiamata) e **0 occorrenze di
+`429`/`403`/`unauthorized`/`too many`** in tutta la finestra di log. Il deploy
+`a91200e4` (21/09 20:48 UTC) e' **SUCCESS**, health 200, `railway list` mostra un
+solo progetto (`quotaverace`: l'orfano e' stato eliminato il 12/09).
+**Il fix del probe (commit `c1918dc`) si e' VISTO in produzione**: alle 20:50:09
+il log recita `crediti 1 < soglia 5 ma telemetria vecchia (29.3h) — un PROBE per
+rileggere i crediti` e subito dopo la lettura e' 496 — senza quella via d'uscita
+la chiave nuova sarebbe rimasta invisibile per sempre (la cache si aggiorna solo
+chiamando, e le chiamate erano bloccate).
+⚠️ Effetto collaterale ATTESO: con i crediti di nuovo sani
+`heal_skipped_low_credits` e' **false**, quindi la verifica periodica delle leghe
+senza righe aperte (36h) e' tornata attiva: ~20 leghe x 2 crediti ogni 36h ≈ 27
+crediti/giorno, sopra l'euristica di 25/giorno ma sotto i **50,7/giorno
+sostenibili** fino al reset (01/10, `days_to_reset: 9`). Da tenere d'occhio col
+credit watchdog (ogni 6h).
+
+**2) IL CICLO BASATO SULL'EQUITY E' RIPARTITO — ma le puntate NO.** Ogni 60s il
+log mostra `auto_bet: bankroll LIVE = equity 33.55 USDC (disponibile 33.55 + in
+gioco 0.00)`: la base EQUITY del 15/09 funziona e il wallet e' leggibile. Subito
+dopo, pero': `auto_bet - ERROR - STOP-LOSS GIORNALIERO attivo fino a
+2026-09-22T15:53:37 — nessuna puntata`.
+`data/execution/daily_stop.json` e' **ANCORA PRESENTE sul volume** (mtime 21/09
+15:53, `start_bankroll 33.5535`, `reason "equity wallet -40.4% ... (valore
+20.00)"`): e' il blocco FANTASMA documentato sopra (cassa 20.0 confrontata con
+the equity 33.5535). Il fix `9468eb1` impedisce nuovi inneschi falsi ma
+**rispetta un blocco gia' attivo**: per ripartire adesso va rimosso a mano
+(`clear_daily_stop()` / `rm data/execution/daily_stop.json`), altrimenti scade da
+solo il **22/09 15:53 UTC**. Gli altri guardrail sono a posto: kill switch
+`live` + `provider_ready: true`, `settlement_paused: false`, `t60_kill.json`
+ASSENTE (equity 33.55 > 30).
+
+**3) BUG TROVATO DAL MONITORAGGIO — LA CATENA ERA CIECA ALLO STOP-LOSS**
+(`decision/kill_switch.py`, fixato). `kill_switch.status()` leggeva
+`stop.get("active")` mentre `auto_bet.daily_stop_status()` espone la chiave
+**`stopped`** → `daily_stop_active` era **sempre False** nel fail-fast.
+Prova raccolta in produzione: `python3 -m decision status` rispondeva
+`stadio betting : libero` mentre `auto_bet` bloccava OGNI giro. Raggio d'azione:
+`require_clear`/`SafetyBlockError`, l'uscita anticipata della shadow mode, il
+messaggio di `/autobet` e (in futuro) il percorso Command — tutti ciechi allo
+stop-loss giornaliero. **Nessun rischio di denaro immediato**: la corsia che
+ordina (`auto_bet.run_today_bets`) legge il file per conto suo, e il dispatch
+T-60 e' inerte (nessuna riga `decisions` validata). Fix:
+`stop.get("stopped", stop.get("active"))` + dettaglio da `reason` — le sonde
+iniettate nei test con la chiave `active` continuano a funzionare.
+Tripwire: `test_decision_pipeline.TestKillSwitch.test_sonda_reale_dello_stop_loss_giornaliero`
+(usa la sonda VERA, non un probe) — **fallisce senza il fix** (verificato con
+`git stash` del solo `kill_switch.py`) — e
+`test_stop_loss_scaduto_non_blocca` (file con `stopped_until` nel passato).
+**Lezione**: un tripwire che inietta l'istantanea (`daily_stop_active=True`) non
+protegge la SONDA che la costruisce; per le autorita' di sicurezza va testato
+anche il percorso reale file → stato.
+
+**4) ALTRE OSSERVAZIONI (nessuna azione richiesta).** Al boot:
+`Token o chat_id Telegram mancanti, messaggio non inviato` (una volta sola, il
+resto delle notifiche parte); `sx_signals: settlement — leghe non mappate a
+SPORTS_MAP` (First League, LigaPro, Primera A, Primera Nacional: insaldabili per
+scelta, documentate); `decision.feeds: riuso dello stato per sxbet-feed (17 quote
+non disponibili in questo processo)` ad ogni `t60_job` — il gate resta validato,
+da riverificare se il dispatch T-60 verra' armato davvero.
+Analisi 1X2 del giro: 6 partite, **0 segnali value** (EV da -2.3% a -18.0%: i
+respinti sono per EV negativo, non per il gate leghe); `multi_market`: 6 fixture
+ingerite, **0 segnali giocabili** (0 nelle corsie AH). Il collo di bottiglia
+resta quello misurato il 15/09 e il 21/09 01:53: gate leghe + soglie, non i
+crediti.
+
+**5) TEST ESEGUITI IN LOCALE**: `test_decision_pipeline` (51),
+`test_decision_guards`/`commands`/`shadow`/`validation`/`adapters` (156),
+`test_risk_guards` + `test_auto_bet_live` + `test_settlement_pause` (61) — tutti
+**verdi**.

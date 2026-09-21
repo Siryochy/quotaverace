@@ -6,9 +6,10 @@ produzione e' il test di PARITA': il set dei `reject` deve coincidere
 esattamente con i rifiuti di `value_filter.is_sane`.
 """
 
+import json
 import subprocess
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -160,6 +161,54 @@ class TestKillSwitch:
                                            "settlement_paused": boom})
         assert kills.mode == "off" and kills.betting_allowed is False
         assert kills.daily_stop_active is False
+
+    def test_sonda_reale_dello_stop_loss_giornaliero(self, tmp_path, monkeypatch):
+        """Regressione 21/09/2026: la sonda REALE espone la chiave `stopped`.
+
+        Il 21/09 in produzione `decision status` riportava "stadio betting:
+        libero" mentre `auto_bet` bloccava ogni giro con lo stop-loss attivo:
+        la catena leggeva `active`, `auto_bet.daily_stop_status()` scrive
+        `stopped`. Questo test usa la sonda VERA (nessun probe iniettato) con
+        un file di stop nella tmp: senza il fix `daily_stop_active` resta False.
+        """
+        import auto_bet
+
+        now = datetime.now(timezone.utc)
+        (tmp_path / "daily_stop.json").write_text(json.dumps({
+            "day": now.strftime("%Y-%m-%d"),
+            "start_bankroll": 33.5535,
+            "stopped_at": now.isoformat(),
+            "stopped_until": (now + timedelta(hours=20)).isoformat(),
+            "reason": "equity wallet -40.4% dall'inizio giornata (valore 20.00)",
+        }), encoding="utf-8")
+        monkeypatch.setattr(auto_bet, "DAILY_STOP_FILE",
+                            tmp_path / "daily_stop.json")
+        monkeypatch.setattr(auto_bet, "KILL_SWITCH_FILE",
+                            tmp_path / "auto_bet_mode.json")
+        monkeypatch.setenv("AUTO_BET_MODE", "live")
+
+        kills = kill_switch.status()
+        assert kills.daily_stop_active is True
+        assert "40.4" in kills.daily_stop_detail
+        assert kills.first_block() is ReasonCode.DAILY_STOP_LOSS
+        assert kills.betting_allowed is False
+
+    def test_stop_loss_scaduto_non_blocca(self, tmp_path, monkeypatch):
+        """Un file di stop con `stopped_until` nel passato non blocca nulla."""
+        import auto_bet
+
+        now = datetime.now(timezone.utc)
+        (tmp_path / "daily_stop.json").write_text(json.dumps({
+            "stopped_until": (now - timedelta(hours=1)).isoformat(),
+            "reason": "vecchio",
+        }), encoding="utf-8")
+        monkeypatch.setattr(auto_bet, "DAILY_STOP_FILE",
+                            tmp_path / "daily_stop.json")
+        monkeypatch.setattr(auto_bet, "KILL_SWITCH_FILE",
+                            tmp_path / "auto_bet_mode.json")
+        monkeypatch.setenv("AUTO_BET_MODE", "live")
+
+        assert kill_switch.status().daily_stop_active is False
 
     def test_modalita_sconosciuta_diventa_off(self):
         kills = kill_switch.status(probes={"kill_switch": lambda: {"effective": "boh"},
