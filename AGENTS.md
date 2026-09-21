@@ -4644,3 +4644,20 @@ api-volume).
 (credit watchdog ogni 6h); (c) le chiusure per lega Tier-2 prima di qualunque
 promozione. Il numero di partite analizzate e' il KPI di questa modifica, non
 il numero di ordini.
+
+**5) DEPLOY E VERIFICA IN PRODUZIONE (22/09/2026, 00:22 UTC).** Commit
+`e68797a` → deployment **`5237a88c` SUCCESS**, health 200. Sul container
+(`railway ssh`, sola lettura): `ODDS_DAILY_BUDGET = 8` (letto anche dal codice),
+`SETTLEMENT_HEAL_INTERVAL_HOURS = 48` → `tracker._heal_interval_hours() = 48.0`,
+`PROBATION_LEAGUES = 15` con `{'min_edge': 0.04, 'kelly_mult': 0.4,
+'max_stake': 0.005}`, `league_tier`: Serie B/Liga MX = `probation`,
+Serie A/La Liga = `blocked`; liquidita' `20/4/20` + `x1.6` anche in
+`multi_market`, `required_depth(1 USDC) = 20`, `required_depth(20) = 32`;
+alias `England Championship -> EFL Championship`.
+Cicli `auto_bet` puliti (equity 33.55, `0 puntate`, nessun errore).
+**Prova diretta del collo di bottiglia**: al momento della verifica le leghe
+DOVUTE erano **5** (Serie B, La Liga, Bundesliga, Ligue 1, Eredivisie) —
+con il vecchio `budget 2` se ne sarebbero analizzate **2** (e le core
+Bundesliga/Ligue 1/Eredivisie sarebbero state rinviate a domani); con budget 8
+entrano tutte e 5. Il KPI da guardare domani e' `matches`/`match_analysis`
+per giorno (l'obiettivo e' tornare verso le ~100-140 partite/giorno del 19-20/09).
