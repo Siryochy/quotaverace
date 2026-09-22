@@ -138,6 +138,17 @@ MARKETS: Tuple[str, ...] = ("OU", "AH")
 SX_TYPE_IDS: Dict[str, str] = {"OU": "2", "AH": "3"}
 _NATIVE_TYPE_TO_MARKET = {v: k for k, v in SX_TYPE_IDS.items()}
 
+#: I tier che il bot considera GIOCABILI (stessa tripla di
+#: `auto_bet._today_value_picks` e `decision.adapters`): una definizione sola,
+#: cosi' un tier nuovo non puo' contare come "giocabile" nel report e non
+#: esserlo nell'ordine (o viceversa).
+PLAYABLE_STATUSES: Tuple[str, ...] = ("value", "strong_value", "moderate")
+
+#: Sotto questo numero di chiusure il ROI di un bucket e' rumore, non una
+#: misura: e' la stessa soglia che `league_gate_impact` dichiara al
+#: proprietario, cosi' il progetto non ha due idee di "campione affidabile".
+MIN_RELIABLE_CLOSED = 30
+
 
 def live_markets() -> Tuple[str, ...]:
     """I mercati che possono piazzare ORDINI REALI adesso (interruttori)."""
@@ -680,8 +691,7 @@ def analyze_fixture(fixture_id: str, lam_h: float, lam_a: float, *,
             if cand is chosen and sane and depth_ok:
                 cand["tier"] = get_signal_tier(cand["ev"], cand["market_edge"])
                 cand["status"] = cand["tier"]
-                cand["playable"] = cand["status"] in ("value", "strong_value",
-                                                       "moderate")
+                cand["playable"] = cand["status"] in PLAYABLE_STATUSES
             else:
                 cand["playable"] = False
                 cand["status"] = "rejected"
@@ -956,18 +966,68 @@ def live_picks(*, hours: float = HOURS_AHEAD,
     return out
 
 
+def _empty_bucket() -> Dict[str, Any]:
+    return {"open": 0, "closed": 0, "won": 0, "lost": 0, "push": 0,
+            "other": 0, "profit": 0.0, "roi": None, "reliable": False}
+
+
+def _bucket_add(bucket: Dict[str, Any], row: Dict[str, Any]) -> None:
+    """Accumula una riga di ledger in un bucket. Mai un'eccezione."""
+    if row.get("esito_finale") is None:
+        bucket["open"] += 1
+        return
+    bucket["closed"] += 1
+    verdict = str(row.get("esito_finale") or "").lower()
+    if verdict in ("won", "lost", "push"):
+        bucket[verdict] += 1
+    else:
+        # Verdetto inatteso (dato sporco): contato a parte invece di essere
+        # fatto sparire dentro un "won"/"lost" che non e' avvenuto.
+        bucket["other"] += 1
+    try:
+        bucket["profit"] += float(row.get("profit") or 0.0)
+    except (TypeError, ValueError):
+        pass
+
+
+def _finalize(bucket: Dict[str, Any]) -> Dict[str, Any]:
+    """Chiude un bucket: arrotonda il profitto, calcola il ROI, dichiara il campione."""
+    bucket["profit"] = round(float(bucket.get("profit") or 0.0), 4)
+    if bucket.get("closed"):
+        bucket["roi"] = round(bucket["profit"] / bucket["closed"], 4)
+    bucket["reliable"] = (bucket.get("closed") or 0) >= MIN_RELIABLE_CLOSED
+    return bucket
+
+
 def shadow_report(*, now: Optional[datetime] = None) -> Dict[str, Any]:
     """Riepilogo della corsia multi-mercato (shadow OU + live AH), sola lettura.
 
-    Serve a MISURARE prima di allargare: quante previsioni, quante chiuse,
-    quante vinte e il P/L per unita' di stake, per mercato. Zero crediti:
-    legge solo il ledger locale.
+    Il P/L e' separato per STATO del segnale, perche' le due popolazioni
+    misurano cose diverse e sommarle da' un numero che non corrisponde a
+    nessuna strategia:
+
+    * **giocabili** (`PLAYABLE_STATUSES`: value / strong_value / moderate) =
+      cio' che la corsia avrebbe giocato → il ROI REALE del campione;
+    * **scartati** (`rejected`) = cio' che i gate hanno tagliato → il costo
+      (o il risparmio) dei filtri, non una performance;
+    * **altro** = stati non riconosciuti: contati a parte, mai fatti sparire.
+
+    Sotto `MIN_RELIABLE_CLOSED` chiusure `reliable` e' False: un ROI su un
+    campione piccolo e' rumore, e il report lo dichiara invece di lasciarlo
+    leggere come una misura. Zero crediti: legge solo il ledger locale.
     """
-    report: Dict[str, Any] = {"live_markets": list(live_markets()), "markets": {}}
+    report: Dict[str, Any] = {
+        "live_markets": list(live_markets()), "markets": {},
+        "playable_statuses": list(PLAYABLE_STATUSES),
+        "min_reliable_closed": MIN_RELIABLE_CLOSED,
+    }
     for market_type in MARKETS:
-        entry: Dict[str, Any] = {"open": 0, "closed": 0, "won": 0,
-                                 "lost": 0, "push": 0, "profit": 0.0,
-                                 "roi": None, "quotes": 0}
+        entry = _empty_bucket()
+        entry["quotes"] = 0
+        by_status: Dict[str, Dict[str, Any]] = {}
+        playable = _empty_bucket()
+        rejected = _empty_bucket()
+        unclassified = _empty_bucket()
         try:
             from tracker import get_predictions
             rows = get_predictions(mercato=market_type, limit=5000)
@@ -975,43 +1035,98 @@ def shadow_report(*, now: Optional[datetime] = None) -> Dict[str, Any]:
             logger.debug("multi_market: report %s fallito: %s", market_type, exc)
             rows = []
         for row in rows:
-            if row.get("esito_finale") is None:
-                entry["open"] += 1
-                continue
-            entry["closed"] += 1
-            verdict = str(row.get("esito_finale") or "").lower()
-            if verdict in entry:
-                entry[verdict] += 1
-            try:
-                entry["profit"] += float(row.get("profit") or 0.0)
-            except (TypeError, ValueError):
-                pass
-        if entry["closed"]:
-            entry["profit"] = round(entry["profit"], 4)
-            entry["roi"] = round(entry["profit"] / entry["closed"], 4)
+            _bucket_add(entry, row)
+            status = str(row.get("status") or "senza_stato").strip().lower()
+            _bucket_add(by_status.setdefault(status, _empty_bucket()), row)
+            if status in PLAYABLE_STATUSES:
+                _bucket_add(playable, row)
+            elif status == "rejected":
+                _bucket_add(rejected, row)
+            else:
+                _bucket_add(unclassified, row)
         try:
             from tracker import get_market_quotes
             entry["quotes"] = len(get_market_quotes(market_type=market_type) or [])
         except Exception:
             pass
-        report["markets"][market_type] = entry
+        report["markets"][market_type] = _finalize(entry)
+        report["markets"][market_type]["by_status"] = {
+            name: _finalize(bucket) for name, bucket in sorted(by_status.items())}
+        report["markets"][market_type]["playable"] = _finalize(playable)
+        report["markets"][market_type]["rejected"] = _finalize(rejected)
+        report["markets"][market_type]["unclassified"] = _finalize(unclassified)
     return report
 
 
+def _counts(bucket: Dict[str, Any]) -> str:
+    """'29 chiuse (17V/12P/0push), profitto +5.99/unita'' — difensivo."""
+
+    def n(key: str) -> int:
+        try:
+            return int(bucket.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    txt = f"{n('closed')} chiuse ({n('won')}V/{n('lost')}P/{n('push')}push)"
+    if n("other"):
+        txt += f" di cui {n('other')} con verdetto inatteso"
+    if n("open"):
+        txt += f" + {n('open')} aperte"
+    try:
+        txt += f", profitto {float(bucket.get('profit') or 0.0):+.2f}/unita'"
+    except (TypeError, ValueError):
+        pass
+    return txt
+
+
+def _group_line(label: str, bucket: Dict[str, Any]) -> str:
+    """Una riga per un gruppo di stati, con il campione dichiarato."""
+    data = bucket or {}
+    roi = data.get("roi")
+    text = (f"    {label}: {_counts(data)} | ROI "
+            f"{'n/d' if roi is None else f'{roi * 100:+.2f}%'}")
+    try:
+        closed = int(data.get("closed") or 0)
+    except (TypeError, ValueError):
+        closed = 0
+    if closed and not data.get("reliable"):
+        text += f"   ⚠️ campione < {MIN_RELIABLE_CLOSED} chiusure: rumore"
+    return text
+
+
 def format_report(data: Optional[Dict[str, Any]] = None) -> str:
-    """Riepilogo leggibile (CLI/Telegram), mai un'eccezione."""
-    rep = data if data is not None else shadow_report()
+    """Riepilogo leggibile (CLI/Telegram), mai un'eccezione.
+
+    Giocabili e scartati su RIGHE SEPARATE: la riga del totale, da sola, e' un
+    numero che non corrisponde a nessuna strategia (mescola cio' che sarebbe
+    stato giocato con cio' che i filtri hanno rifiutato).
+    """
+    rep = data if isinstance(data, dict) else shadow_report()
+    live = rep.get("live_markets") or []
     lines = ["📐 MULTI-MERCATO (OU/AH)",
-             "Corsie LIVE: " + (", ".join(rep.get("live_markets") or [])
-                                or "nessuna (tutto shadow)")]
+             "Corsie LIVE: " + (", ".join(live) or "nessuna (tutto shadow)"),
+             "Split per stato: giocabili "
+             + "/".join(rep.get("playable_statuses") or PLAYABLE_STATUSES)
+             + " | scartati rejected | soglia affidabilita' "
+             + f"{rep.get('min_reliable_closed', MIN_RELIABLE_CLOSED)} chiusure"]
     for market_type, entry in (rep.get("markets") or {}).items():
-        roi = entry.get("roi")
-        lines.append(
-            f"• {market_type}: {entry.get('quotes', 0)} quote sul ledger | "
-            f"{entry.get('closed', 0)} chiuse "
-            f"({entry.get('won', 0)}V/{entry.get('lost', 0)}P/"
-            f"{entry.get('push', 0)}push) | {entry.get('open', 0)} aperte | "
-            f"ROI {'n/d' if roi is None else f'{roi*100:+.2f}%'}")
+        # Un riepilogo malformato (input esterno, JSON vecchio) non deve
+        # rompere il report: si degrada la singola sezione, non il comando.
+        try:
+            lines.append(
+                f"• {market_type}: {entry.get('quotes', 0)} quote sul ledger | "
+                f"{entry.get('closed', 0)} chiuse + {entry.get('open', 0)} aperte")
+            lines.append(_group_line("giocabili ", entry.get("playable") or {}))
+            lines.append(_group_line("scartati  ", entry.get("rejected") or {}))
+            unclassified = entry.get("unclassified") or {}
+            if (unclassified.get("closed") or unclassified.get("open")):
+                lines.append(_group_line("altro     ", unclassified))
+            for status, bucket in (entry.get("by_status") or {}).items():
+                if status in PLAYABLE_STATUSES and (bucket or {}).get("closed"):
+                    lines.append(_group_line(f"  · {status}", bucket))
+        except Exception as exc:
+            logger.debug("multi_market: report %s malformato: %s", market_type, exc)
+            lines.append(f"• {market_type}: dati non leggibili")
     return "\n".join(lines)
 
 

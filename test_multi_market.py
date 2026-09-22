@@ -447,3 +447,149 @@ class TestTripwire:
         src = pathlib.Path(auto_bet.__file__).read_text()
         assert "resolve_market_for" in src
         assert "_multi_market_picks" in src
+
+
+# ---------------------------------------------------------------------------
+# 8. Report shadow: split giocabili / scartati
+# ---------------------------------------------------------------------------
+
+def _seed(path, market, status, verdicts, *, profit=None):
+    """Salva previsioni per `market` con `status` e le chiude coi verdetti dati.
+
+    `verdicts`: lista di "won"/"lost"/"push" (chiuse) o None (ancora aperta).
+    `profit`: P/L per unita' di stake sulle chiuse; default +0.75 / -1.0 / 0.0.
+    """
+    defaults = {"won": 0.75, "lost": -1.0, "push": 0.0}
+    ids = [f"{market}-{status}-{i}" for i in range(1, len(verdicts) + 1)]
+    # Fase 1: `tracker` apre e chiude la PROPRIA connessione a ogni salvataggio,
+    # quindi la nostra non deve restare in transazione mentre lui scrive.
+    for mid in ids:
+        tracker.save_prediction(mid, market, "Over 2.5", 1.75, 0.6, 0.05,
+                                status=status)
+    # Fase 2: chiusura dei verdetti, in una sola transazione.
+    conn = sqlite3.connect(path)
+    for mid, verdict in zip(ids, verdicts):
+        if verdict is None:
+            continue
+        pl = defaults.get(verdict, 0.0) if profit is None else profit
+        conn.execute("UPDATE predictions SET esito_finale=?, profit=? "
+                     "WHERE match_id=? AND mercato=?", (verdict, pl, mid, market))
+    conn.commit()
+    conn.close()
+
+
+class TestSplitReport:
+    """Il P/L separato per stato: giocabili e scartati NON si sommano.
+
+    Sommare le due popolazioni produce un ROI che non corrisponde a nessuna
+    strategia (mescola cio' che sarebbe stato giocato con cio' che i gate
+    hanno rifiutato): qui il comportamento e' fissato da un test.
+    """
+
+    def test_giocabili_e_scartati_separati(self, db):
+        _seed(db, "OU", "rejected", ["won"] * 10 + ["lost"] * 10)
+        _seed(db, "OU", "value", ["won", "won", "lost"])
+        ou = mm.shadow_report()["markets"]["OU"]
+        assert ou["playable"]["closed"] == 3
+        assert ou["playable"]["won"] == 2 and ou["playable"]["lost"] == 1
+        assert ou["playable"]["profit"] == pytest.approx(0.5, abs=1e-6)
+        assert ou["playable"]["roi"] == pytest.approx(0.5 / 3, abs=1e-4)
+        assert ou["rejected"]["closed"] == 20
+        assert ou["rejected"]["profit"] == pytest.approx(-2.5, abs=1e-6)
+        assert ou["rejected"]["roi"] == pytest.approx(-0.125, abs=1e-4)
+
+    def test_il_totale_non_e_una_strategia(self, db):
+        _seed(db, "OU", "rejected", ["lost"] * 20)
+        _seed(db, "OU", "value", ["won"] * 3)
+        ou = mm.shadow_report()["markets"]["OU"]
+        assert ou["closed"] == 23
+        assert ou["roi"] != ou["playable"]["roi"]
+        assert ou["roi"] < 0 < ou["playable"]["roi"]
+
+    def test_i_tre_tier_giocabili_confluiscono(self, db):
+        _seed(db, "OU", "value", ["won"])
+        _seed(db, "OU", "strong_value", ["won"])
+        _seed(db, "OU", "moderate", ["won"])
+        ou = mm.shadow_report()["markets"]["OU"]
+        assert ou["playable"]["closed"] == 3
+        assert set(ou["by_status"]) >= {"value", "strong_value", "moderate"}
+
+    def test_dettaglio_per_singolo_tier(self, db):
+        _seed(db, "AH", "strong_value", ["won", "won"])
+        _seed(db, "AH", "value", ["lost"])
+        by_status = mm.shadow_report()["markets"]["AH"]["by_status"]
+        assert by_status["strong_value"]["closed"] == 2
+        assert by_status["strong_value"]["roi"] == pytest.approx(0.75, abs=1e-4)
+        assert by_status["value"]["roi"] == pytest.approx(-1.0, abs=1e-6)
+
+    def test_aperte_fuori_dal_roi(self, db):
+        _seed(db, "OU", "value", ["won", None, None])
+        play = mm.shadow_report()["markets"]["OU"]["playable"]
+        assert play["open"] == 2
+        assert play["closed"] == 1
+        assert play["roi"] == pytest.approx(0.75, abs=1e-4)
+
+    def test_stato_ignoto_non_sparisce(self, db):
+        _seed(db, "OU", "stato_boh", ["won"])
+        ou = mm.shadow_report()["markets"]["OU"]
+        assert ou["unclassified"]["closed"] == 1
+        assert ou["playable"]["closed"] == 0
+        assert ou["rejected"]["closed"] == 0
+        assert ou["closed"] == 1        # il totale resta completo
+
+    def test_verdetto_inatteso_contato_a_parte(self, db):
+        _seed(db, "OU", "value", ["won", "annullata"])
+        play = mm.shadow_report()["markets"]["OU"]["playable"]
+        assert play["closed"] == 2
+        assert play["other"] == 1
+        assert play["won"] + play["lost"] + play["push"] == 1
+
+    def test_campione_piccolo_e_dichiarato_rumore(self, db):
+        _seed(db, "OU", "value", ["won"] * (mm.MIN_RELIABLE_CLOSED - 1))
+        ou = mm.shadow_report()["markets"]["OU"]
+        assert ou["playable"]["reliable"] is False
+        assert f"campione < {mm.MIN_RELIABLE_CLOSED}" in mm.format_report(
+            mm.shadow_report())
+
+    def test_campione_pieno_e_dichiarato_affidabile(self, db):
+        _seed(db, "OU", "value", ["won"] * mm.MIN_RELIABLE_CLOSED)
+        play = mm.shadow_report()["markets"]["OU"]["playable"]
+        assert play["reliable"] is True
+        assert play["closed"] == mm.MIN_RELIABLE_CLOSED
+
+    def test_soglia_affidabilita_coerente_con_il_progetto(self):
+        # Stessa soglia di league_gate_impact: il progetto non deve avere due
+        # idee diverse di "campione affidabile".
+        import league_gate_impact as lgi
+        assert mm.MIN_RELIABLE_CLOSED == lgi.MIN_RELIABLE_CLOSED
+
+    def test_tripla_dei_giocabili_una_sola_definizione(self):
+        import pathlib
+        assert mm.PLAYABLE_STATUSES == ("value", "strong_value", "moderate")
+        src = pathlib.Path(mm.__file__).read_text()
+        # La tripla non deve essere ricopiata a mano altrove nel modulo.
+        assert src.count('"value", "strong_value"') == 1
+
+    def test_report_non_scrive_nel_ledger(self, db):
+        _seed(db, "OU", "value", ["won"])
+        conn = sqlite3.connect(db)
+        before = conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
+        conn.close()
+        mm.shadow_report()
+        mm.format_report()
+        conn = sqlite3.connect(db)
+        after = conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
+        conn.close()
+        assert before == after
+
+    def test_db_assente_non_solleva(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(tracker, "DB_PATH", tmp_path / "assente" / "x.db")
+        rep = mm.shadow_report()
+        assert rep["markets"]["OU"]["closed"] == 0
+        assert rep["markets"]["AH"]["playable"]["roi"] is None
+
+    def test_format_mai_un_eccezione_su_input_strano(self, db):
+        assert "MULTI-MERCATO" in mm.format_report("spazzatura")
+        assert "MULTI-MERCATO" in mm.format_report({"markets": {}, "live_markets": []})
+        assert "non leggibili" in mm.format_report(
+            {"markets": {"OU": "spazzatura"}, "live_markets": None})
