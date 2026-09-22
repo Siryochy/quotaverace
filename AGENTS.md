@@ -4861,3 +4861,44 @@ ml_dataset, dedup_ml, backup, liquidity_monitor, t60_breakers, report_audit) +
 favourites_only, league_gate, ou_exclusion, tier, market_calib, poisson_engine);
 `verify_guardrails.py` **A-G tutti bloccano**; 0 marker di conflitto,
 `compileall` OK. Nessuna env nuova.
+
+### Direttiva 22/09/2026: strategia 1X2 CONGELATA in attesa del campione
+
+**Direttiva del proprietario, dopo la correzione d'era del campione 1X2**: il
+sistema e' considerato pronto e pulito — **non si tocca piu' nulla** finche' il
+nuovo setup non ha prodotto abbastanza chiusure REALI.
+
+**1) 1X2 RESTA ATTIVO, SOGLIE E BLEND CONGELATI.** Nessuna modifica a
+`MARKET_EDGE_MIN`/`MARKET_EDGE_MODERATE` (0.02), `MARKET_EDGE_STRONG` (0.04),
+`EV_MIN` (0.02) ne' ai pesi del blend dinamico
+(`market_calib.blend_probability` / `LEAGUE_EFFICIENCY`). ⚠️ In particolare
+**NON** leggere il **-21,64%** del 1X2 giocabile come prova contro la strategia
+corrente: **74/85 righe sono PRE-11/09** (quota media 2,87, fuori dalla fascia
+1.30-1.80 attuale) — e' la storia di una strategia RITIRATA (vedi la sezione
+"Misure leggibili" del 22/09).
+
+**2) GATE DI VALUTAZIONE: 30-40 CHIUSURE REALI DELL'ERA NUOVA.** Nessun giudizio
+su blend/EV/soglie prima. Campione al 22/09: **11 chiusure** (ROI -17,36%,
+quota media 1,94) -> si continua a raccogliere. Come si contera' quando sara' il
+momento: righe `predictions` con `status` in `value_filter.PLAYABLE_TIERS`,
+`esito_finale IS NOT NULL`, nate/chiuse **dall'11/09 in poi** e in fascia quota
+1.30-1.80. La colonna `league` (22/09) rende tracciabili per lega le righe
+nuove (sullo storico vecchio la lega NON e' recuperabile in modo utile).
+
+**3) NESSUN BACKFILL — il passato e' SUNK COST.** Le 156 righe storiche ancora
+joinabili restano come sono: **nessun `UPDATE` di lega**, nessuna ricostruzione
+dalle vecchie competizioni. Si misura SOLO sul ledger nuovo, perfettamente
+tracciato (l'era vecchia non e' una base di confronto valida).
+
+**4) MONITORAGGIO PASSIVO — nessuna modifica di codice, nessuno strumento
+nuovo.** La telemetria esistente copre gia' tutto: credit watchdog (6h,
+`credit_budget_status`), settlement watchdog (4h), drift watchdog (6h),
+`decision_compare_job` (6h, confronto catena/corsia), liquidity monitor (6h).
+Il bot riprende da solo a operare (kill switch `live` + provider pronto,
+settlement attivo, stop-loss fantasma rimosso, crediti sani): **si attende la
+fine della pausa nazionali senza interventi manuali**.
+
+**5) RIFINITURA ANNOTATA E NON ESEGUITA**: un filtro d'era su `market_diagnose`
+(fascia quota corrente o `--since`) e' l'unico pezzo che serve per leggere il
+campione nuovo senza filtri a mano — si implementa quando il campione raggiunge
+la soglia, non prima.
