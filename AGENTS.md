@@ -4810,12 +4810,23 @@ AH    4 chiusi | ROI +37.97% | gap +22.02pp  (campione minimo)
 per tier: 1X2 strong_value n=35 ROI -38.43% | 1X2 value n=50 -9.88%
           OU value n=10 +55.70% | OU strong n=20 +3.97% | AH strong n=4 +37.97%
 ```
-**Il -21,64% del 1X2 e' la performance VERA della strategia** (prima
-l'aggregato la mascherava a -10,35% mescolandola coi `rejected`): il gap di
+**Il -21,64% del 1X2 e' il P/L VERO delle righe marcate "giocabili"** (prima
+l'aggregato lo mascherava a -10,35% mescolandolo coi 529 `rejected`): il gap di
 -32,4pp con un'overconfidence di -13,8pp dice che l'EV atteso del modello sul
-1X2 e' gonfiato, non che i gate taglino troppo. E i numeri OU/AH del nuovo
-report **riproducono esattamente** la replica SQL con cui erano stati misurati
+1X2 e' gonfiato, non che i gate taglino troppo. I numeri OU/AH del nuovo report
+**riproducono esattamente** la replica SQL con cui erano stati misurati
 (+21,21% / +37,97%): il contatore nuovo e' coerente con la misura manuale.
+
+⚠️ **MA lo split per stato NON basta a giudicare la strategia CORRENTE — e il
+dato lo dimostra.** `status` registra il tier con le soglie DEL MOMENTO in cui
+la riga e' nata, non con quelle di oggi: del campione 1X2 giocabile, **74/85
+righe sono PRE-11/09** (quota media **2,87**, cioe' fuori dalla fascia
+1.30-1.80 attuale: oggi sarebbero `rejected`) e solo **11/85 sono dal 11/09**
+(quota media 1,94, ROI -17,36%). Quindi il -21,64% e' in gran parte la storia
+di una strategia RITIRATA: per giudicare l'attuale serve un filtro in piu'
+(fascia quota corrente o `--since`) — e' la prossima rifinitura naturale, non
+un difetto dello split, che era comunque il prerequisito (senza di esso il
+numero era inutilizzabile a prescindere).
 
 **5) PERCHE' LA COLONNA ERA NECESSARIA (misurato).** Attribuzione delle 648
 righe chiuse: **156 (24,1%)** via colonna O join; le altre 504 no. Causa: le
