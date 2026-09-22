@@ -4759,3 +4759,94 @@ Interventi:
 **5) Da guardare domani**: il KPI della copertura (rotazione 04:00 UTC con
 budget 8) e i Tier-2 in probation da leggere sul ledger per lega con
 `market_diagnose.py` prima di qualunque promozione al core.
+
+### Misure leggibili: split del report shadow + lega sul ledger previsioni (22/09/2026)
+
+Direttiva del proprietario, tre azioni in sequenza con via libera totale: il
+ROI aggregato per mercato non descriveva nessuna strategia (mescolava cio' che
+sarebbe stato giocato con cio' che i gate avevano scartato) e la strategia per
+lega era non misurabile perche' il 75,9% delle righe non aveva una lega
+attribuibile. Due commit, entrambi deployati e verificati sul container.
+
+**1) SPLIT DEL REPORT SHADOW (commit `70500d5`, deploy #1).**
+`multi_market.shadow_report()` espone per mercato quattro bucket — `playable`
+(`value`/`strong_value`/`moderate`), `rejected`, `unclassified` (stati ignoti:
+mai fatti sparire) e `by_status` per-tier — con `roi`, `profit`, `won/lost/push`,
+`other` (verdetti anomali) e **`reliable`**; `format_report()` stampa giocabili e
+scartati su RIGHE SEPARATE con l'avviso `⚠️ campione < 30 chiusure: rumore`.
+`PLAYABLE_STATUSES` e `MIN_RELIABLE_CLOSED` (30, la stessa soglia di
+`league_gate_impact`: il progetto non ha due idee di "campione affidabile").
+
+**2) LEGA SUL LEDGER PREVISIONI (commit `b1f57bd`, deploy #2
+`6d127680-9607-40ef-a2fe-8b5b885d5fd1`).**
+`predictions` ha la colonna **`league`** (ALTER idempotente in `_get_conn`, quindi
+all'avvio; schema anche in `_create_ledger_table`, l'unico punto di definizione).
+`save_prediction(..., league=...)` la scrive e in UPDATE usa
+`COALESCE(NULLIF(excluded.league,''), predictions.league)`: una rianalisi che NON
+passa la lega **non cancella** il valore registrato (i percorsi sono piu' d'uno:
+`fixture_engine` cand["league"] o la variabile di funzione, `sx_signals`
+`league_name`, `multi_market` `fixture["league"]`). `get_predictions()` espone la
+lega; `predictions_summary(..., statuses=)` filtra per stato (default None =
+comportamento storico invariato, nessun chiamante cambiato).
+
+**3) DIAGNOSI PER MERCATO SOLO SUI GIOCABILI (stesso commit).**
+`market_diagnose` basa `totals`, `markets`, `critici` e `azioni`
+**esclusivamente** su `value_filter.PLAYABLE_TIERS`; le righe escluse finiscono
+in un blocco `excluded` **dichiarato e mai usato per giudicare** (ricavato per
+SOTTRAZIONE, cosi' uno stato nuovo non puo' sparire dai conti). La tripla dei
+tier ha ora UNA definizione sola (`value_filter.PLAYABLE_TIERS`, con
+`multi_market.PLAYABLE_STATUSES` come ALIAS) e tre tripwire la difendono. Nuovo
+flag `--all-statuses` = confronto col comportamento pre-22/09, con banner
+"CONFRONTO, non decisionale" (anche l'etichetta del campione cambia: chiamarlo
+"giocabile" sarebbe una bugia).
+
+**4) I NUMERI REALI (container, 22/09, sola lettura `mode=ro`).**
+```
+Campione giocabile: 119 chiusi (43V/70P/6push) | ROI -8.83% | EV +11.01 | gap -19.84
+Fuori dai calcoli:  529 righe non giocabili | ROI -7.28 -> costo dei gate
+1X2  85 chiusi | ROI -21.64% | gap -32.38pp | hit 29.8% vs prob 43.6%  << critico
+OU   30 chiusi | ROI +21.21% | gap +10.10pp
+AH    4 chiusi | ROI +37.97% | gap +22.02pp  (campione minimo)
+per tier: 1X2 strong_value n=35 ROI -38.43% | 1X2 value n=50 -9.88%
+          OU value n=10 +55.70% | OU strong n=20 +3.97% | AH strong n=4 +37.97%
+```
+**Il -21,64% del 1X2 e' la performance VERA della strategia** (prima
+l'aggregato la mascherava a -10,35% mescolandola coi `rejected`): il gap di
+-32,4pp con un'overconfidence di -13,8pp dice che l'EV atteso del modello sul
+1X2 e' gonfiato, non che i gate taglino troppo. E i numeri OU/AH del nuovo
+report **riproducono esattamente** la replica SQL con cui erano stati misurati
+(+21,21% / +37,97%): il contatore nuovo e' coerente con la misura manuale.
+
+**5) PERCHE' LA COLONNA ERA NECESSARIA (misurato).** Attribuzione delle 648
+righe chiuse: **156 (24,1%)** via colonna O join; le altre 504 no. Causa: le
+righe `matches` vengono POTATE (`clear_old_matches`), quindi la lega evapora con
+la partita — non e' un problema di campione. Conseguenza: sui **giocabili
+chiusi** solo 9/119 hanno una lega (Eredivisie 6, Ligue 1 2, PL 1) e **110 sono
+`None`** → la strategia per lega (e quindi la promozione dei Tier-2) resta NON
+misurabile sullo storico; lo diventa **da adesso** per le righe nuove (prime 5
+righe `multi_market` gia' con lega, verificate). ⚠️ Un backfill delle righe
+ancora joinabili (156) NON cambierebbe nessun numero oggi: servirebbe solo a
+"congelare" la lega prima che la potatura cancelli il match. Non eseguito (non
+richiesto): e' un `UPDATE` di una riga sola, da decidere.
+
+**6) INTEGRITA' POST-MIGRAZIONE (container).** `PRAGMA quick_check` = **ok**,
+`PRAGMA integrity_check` = **ok**, `predictions` = **782 righe** (invariate: la
+migrazione e' additiva), 15 colonne, `league` presente, 5 righe gia' popolate
+dal job `multi_market` (ogni 15'). Il vecchio schema resta leggibile
+(`COALESCE(p.league, m.league)` copre entrambi i casi).
+
+**7) TRIPWIRE.** `test_predictions.py` (+5: salvataggio della lega, la lega
+sopravvive a una chiamata senza lega e alla lega vuota, lega assente = None,
+**migrazione su DB vecchio** senza perdita di righe e idempotente, filtro
+`statuses` case-insensitive e con tupla vuota ≠ nessun filtro);
+`test_market_diagnose.py` (+7: gli scartati non entrano nei giudizi, 90
+giocabili + 500 scartati NON fanno un campione maturo, `excluded` malformato non
+solleva, il report dichiara gli esclusi, integrazione `analyze_db` con entrambe
+le popolazioni + controprova `--all-statuses`, nessuna copia della tripla);
+`test_multi_market.py` (alias, non copia). Regressioni verdi: 277 test (auto_bet
+x3, bot, web_api, settlement x4, sx_signals, reports, performance_report,
+ml_dataset, dedup_ml, backup, liquidity_monitor, t60_breakers, report_audit) +
+324 (decision: adapters/compare/shadow/clv/feedback + value_filter, risk_guards,
+favourites_only, league_gate, ou_exclusion, tier, market_calib, poisson_engine);
+`verify_guardrails.py` **A-G tutti bloccano**; 0 marker di conflitto,
+`compileall` OK. Nessuna env nuova.
