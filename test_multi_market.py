@@ -564,11 +564,19 @@ class TestSplitReport:
         assert mm.MIN_RELIABLE_CLOSED == lgi.MIN_RELIABLE_CLOSED
 
     def test_tripla_dei_giocabili_una_sola_definizione(self):
+        """La tripla vive in `value_filter`: qui e' solo un alias.
+
+        Ricopiarla e' il modo silenzioso di far divergere due misure (un tier
+        nuovo conterebbe come giocabile nel report e non nell'ordine).
+        """
         import pathlib
+        from value_filter import PLAYABLE_TIERS
         assert mm.PLAYABLE_STATUSES == ("value", "strong_value", "moderate")
-        src = pathlib.Path(mm.__file__).read_text()
-        # La tripla non deve essere ricopiata a mano altrove nel modulo.
-        assert src.count('"value", "strong_value"') == 1
+        assert mm.PLAYABLE_STATUSES is PLAYABLE_TIERS      # alias, non copia
+        # Nessuna delle due fonti ricopia la tupla a mano.
+        for mod in (mm, __import__("value_filter")):
+            src = pathlib.Path(mod.__file__).read_text()
+            assert src.count('"value", "strong_value"') <= 1
 
     def test_report_non_scrive_nel_ledger(self, db):
         _seed(db, "OU", "value", ["won"])

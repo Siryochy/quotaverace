@@ -351,10 +351,20 @@ def favourites_gate_reason() -> str:
             f"prob. di mercato >= {MIN_FAVOURITE_MARKET_PROB*100:.0f}%)")
 
 
+# === TIER GIOCABILI ===
+# I tier che il bot considera giocabili: una definizione SOLA, importata da
+# chiunque debba separare cio' che sarebbe stato giocato da cio' che i gate
+# hanno scartato (`multi_market.PLAYABLE_STATUSES`, la diagnosi per mercato,
+# la telemetria). Ricopiare la tripla e' il modo silenzioso di far divergere
+# due misure: un tier nuovo conterebbe come giocabile in un posto e non
+# nell'altro.
+PLAYABLE_TIERS: tuple = ("value", "strong_value", "moderate")
+
+
 def get_signal_tier(ev: float, market_edge_val: float | None = None) -> str:
     """Classifica un segnale in tier basato su EV e edge vs mercato.
 
-    Tier: strong_value (>= +5pp), value (>= +2pp), moderate (>= 0pp).
+    Tier giocabili: `PLAYABLE_TIERS` (strong_value, value, moderate).
     """
     if market_edge_val is not None:
         if market_edge_val >= MARKET_EDGE_STRONG:

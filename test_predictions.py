@@ -207,6 +207,114 @@ def test_cassa_period_filters_settled(temp_db):
     assert p2["chiusi"] == 0 and p2["profit"] == 0.0
 
 
+# --- Colonna `league` sul ledger previsioni (22/09) ---
+# La lega deve vivere SULLA RIGA del segnale: prima si ricavava solo dalla
+# JOIN con `matches`, che non copre le righe senza partita (il 65% del ledger
+# restava non attribuibile) — cosi' la strategia per lega non era misurabile.
+
+def test_save_prediction_salva_la_lega(temp_db):
+    tracker.save_prediction("lg1", "1X2", "Inter", 1.65, 0.62, 0.05,
+                            market_prob=0.60, market_edge=0.02,
+                            status="value", league="Serie A")
+    row = tracker.get_predictions()[0]
+    assert row["league"] == "Serie A"
+
+
+def test_lega_sopravvive_a_una_chiamata_senza_lega(temp_db):
+    """Rianalisi senza `league`: il valore registrato NON si cancella.
+
+    Le rianalisi dello stesso match possono arrivare da percorsi diversi (uno
+    passa la lega, uno no): perdere l'attribuzione a ogni giro renderebbe la
+    strategia per lega di nuovo non misurabile.
+    """
+    tracker.save_prediction("lg2", "1X2", "Inter", 1.65, 0.62, 0.05,
+                            status="value", league="Serie A")
+    tracker.save_prediction("lg2", "1X2", "Inter", 1.70, 0.62, 0.06,
+                            status="value")            # senza lega
+    row = tracker.get_predictions()[0]
+    assert row["league"] == "Serie A"
+    assert row["quota"] == 1.70                        # il resto si aggiorna
+    tracker.save_prediction("lg2", "1X2", "Inter", 1.71, 0.62, 0.06,
+                            status="value", league="")  # lega vuota
+    assert tracker.get_predictions()[0]["league"] == "Serie A"
+
+
+def test_lega_assente_resta_none(temp_db):
+    tracker.save_prediction("lg3", "1X2", "Inter", 1.65, 0.62, 0.05)
+    assert tracker.get_predictions()[0]["league"] is None
+
+
+def test_migrazione_league_su_db_vecchio(temp_db):
+    """Un DB creato PRIMA del 22/09 prende la colonna senza perdere righe.
+
+    La migrazione vive in `_get_conn` (all'avvio del bot): deve essere
+    idempotente e non toccare i dati esistenti.
+    """
+    import sqlite3
+    db = Path(temp_db)
+    db.unlink()
+    conn = sqlite3.connect(db)
+    conn.execute('''CREATE TABLE predictions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        match_id TEXT, mercato TEXT, esito TEXT,
+        quota REAL, prob REAL, ev REAL,
+        market_prob REAL, market_edge REAL,
+        status TEXT, esito_finale TEXT, profit REAL,
+        created_at TEXT, settled_at TEXT,
+        UNIQUE(match_id, mercato, esito))''')
+    conn.execute("INSERT INTO predictions (match_id, mercato, esito, quota, "
+                 "prob, ev, status) VALUES ('old', '1X2', '1', 1.7, 0.6, 0.05, 'value')")
+    conn.commit(); conn.close()
+
+    tracker.init_db()                       # deve aggiungere la colonna
+    tracker.init_db()                       # idempotente
+    rows = tracker.get_predictions()
+    assert len(rows) == 1                   # nessuna riga persa
+    assert rows[0]["league"] is None        # valore mai inventato
+    tracker.save_prediction("old", "1X2", "1", 1.71, 0.6, 0.05,
+                            status="value", league="Bundesliga")
+    assert tracker.get_predictions()[0]["league"] == "Bundesliga"
+    cols = [r[1] for r in sqlite3.connect(db).execute(
+        "PRAGMA table_info(predictions)")]
+    assert cols.count("league") == 1
+
+
+def test_predictions_summary_filtra_per_status(temp_db):
+    """`statuses` separa i giocabili dagli scartati (misura vs telemetria).
+
+    Senza filtro si sommano due popolazioni diverse: il filtro e' cio' che
+    rende la diagnosi una misura della strategia invece di un numero che
+    mescola cio' che sarebbe stato giocato con cio' che i gate hanno tagliato.
+    """
+    _result("s1", "Inter", "Napoli", 2, 1)
+    _result("s2", "Roma", "Empoli", 0, 2)
+    _result("s3", "Lazio", "Torino", 1, 0)
+    tracker.save_prediction("s1", "1X2", "Inter", 1.70, 0.62, 0.05,
+                            status="value")
+    tracker.save_prediction("s2", "1X2", "Roma", 1.75, 0.60, 0.04,
+                            status="strong_value")
+    # Scartato = la trasferta (Lazio vince 1-0): perde, come un gate che
+    # taglia un segnale sbagliato.
+    tracker.save_prediction("s3", "1X2", "Torino", 3.50, 0.30, -0.10,
+                            status="rejected")
+    tracker.settle_predictions()
+
+    tutto = tracker.predictions_summary()
+    assert tutto["1X2"]["n"] == 3
+    giocabili = tracker.predictions_summary(statuses=("value", "strong_value",
+                                                      "moderate"))
+    assert giocabili["1X2"]["n"] == 2
+    assert giocabili["1X2"]["won"] == 1 and giocabili["1X2"]["lost"] == 1
+    scartati = tracker.predictions_summary(statuses=("rejected",))
+    assert scartati["1X2"]["n"] == 1
+    assert scartati["1X2"]["lost"] == 1
+    # il filtro e' case-insensitive e accetta anche stati mai visti
+    assert tracker.predictions_summary(statuses=("REJECTED",))["1X2"]["n"] == 1
+    assert tracker.predictions_summary(statuses=("inesistente",)) == {}
+    # una tupla vuota non equivale a "nessun filtro"
+    assert tracker.predictions_summary(statuses=()) == {}
+
+
 def test_predictions_summary_per_mercato(temp_db):
     _result("m5", "Inter", "Napoli", 2, 1)
     _result("m6", "Roma", "Empoli", 1, 0)

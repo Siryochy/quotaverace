@@ -129,6 +129,7 @@ def _get_conn():
         quota REAL, prob REAL, ev REAL,
         market_prob REAL, market_edge REAL,
         status TEXT, esito_finale TEXT, profit REAL,
+        league TEXT,
         created_at TEXT, settled_at TEXT,
         UNIQUE(match_id, mercato, esito))''')
     # Migrazione idempotente per DB nati prima di settled_at (usato da
@@ -137,6 +138,14 @@ def _get_conn():
     _pred_cols = [r[1] for r in c.execute("PRAGMA table_info(predictions)")]
     if "settled_at" not in _pred_cols:
         c.execute("ALTER TABLE predictions ADD COLUMN settled_at TEXT")
+    # Migrazione idempotente (22/09): la LEGA del segnale sul ledger
+    # previsioni. Prima era ricavabile solo dalla JOIN con `matches`, che non
+    # copre le righe senza partita (i match SX cancellati/riscritti): il 65%
+    # del ledger risultava cosi' non attribuibile a una lega e la strategia
+    # per lega (core/probation/bloccata) era non misurabile. La lega vive
+    # sulla riga del segnale, cosi' resta anche se la partita sparisce.
+    if "league" not in _pred_cols:
+        c.execute("ALTER TABLE predictions ADD COLUMN league TEXT")
     # Puntate automatiche (auto_bet.py): SIM-only dal 04/09 (paper trading
     # con la quota del segnale), saldati a fine partita come le previsioni.
     c.execute('''CREATE TABLE IF NOT EXISTS bets (
@@ -225,6 +234,7 @@ def _create_ledger_table(c, table: str) -> None:
             quota REAL, prob REAL, ev REAL,
             market_prob REAL, market_edge REAL,
             status TEXT, esito_finale TEXT, profit REAL,
+            league TEXT,
             created_at TEXT, settled_at TEXT,
             UNIQUE(match_id, mercato, esito))''')
     elif table == "bets":
@@ -1545,32 +1555,45 @@ def cassa_totals(entries=None):
 # il modello dove sbaglia.
 
 def save_prediction(match_id, mercato, esito, quota, prob, ev,
-                    market_prob=None, market_edge=None, status="value"):
+                    market_prob=None, market_edge=None, status="value",
+                    league=None):
     """Registra (o aggiorna, se ancora non chiusa) una previsione del motore.
 
     Idempotente per (match_id, mercato, esito): a ogni nuova analisi la
     previsione non ancora saldata viene aggiornata con i prezzi correnti;
     quella gia' saldata non viene toccata (per non falsare il record).
+
+    `league` = campionato del segnale (22/09). Prima la lega si ricavava solo
+    dalla JOIN con `matches`, che non copre le righe senza partita: il 65% del
+    ledger risultava non attribuibile a una lega e la strategia per lega non
+    era misurabile. Sulla riga del segnale la lega sopravvive anche se la
+    partita viene riscritta o cancellata.
+
+    In UPDATE la lega usa COALESCE: una chiamata che non la passa (o la passa
+    vuota) NON cancella il valore gia' registrato.
     """
     now = datetime.now().isoformat()
     conn = _get_conn(); c = conn.cursor()
     c.execute('''INSERT INTO predictions (match_id, mercato, esito, quota, prob, ev,
-                                          market_prob, market_edge, status, created_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?)
+                                          market_prob, market_edge, status, league,
+                                          created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(match_id, mercato, esito) DO UPDATE SET
                    quota=excluded.quota, prob=excluded.prob, ev=excluded.ev,
                    market_prob=excluded.market_prob, market_edge=excluded.market_edge,
-                   status=excluded.status, created_at=excluded.created_at
+                   status=excluded.status,
+                   league=COALESCE(NULLIF(excluded.league, ''), predictions.league),
+                   created_at=excluded.created_at
                  WHERE esito_finale IS NULL''',
               (match_id, mercato, esito, float(quota), float(prob), float(ev),
-               market_prob, market_edge, status, now))
+               market_prob, market_edge, status, league, now))
     conn.commit(); conn.close()
 
 
 def get_predictions(mercato=None, status=None, closed=None, limit=500):
     conn = _get_conn(); c = conn.cursor()
     q = "SELECT match_id, mercato, esito, quota, prob, ev, market_prob, market_edge, " \
-        "status, esito_finale, profit, created_at, settled_at FROM predictions"
+        "status, esito_finale, profit, created_at, settled_at, league FROM predictions"
     conds, args = [], []
     if mercato:
         conds.append("mercato=?"); args.append(mercato)
@@ -1589,7 +1612,7 @@ def get_predictions(mercato=None, status=None, closed=None, limit=500):
         {"match_id": r[0], "mercato": r[1], "esito": r[2], "quota": r[3],
          "prob": r[4], "ev": r[5], "market_prob": r[6], "market_edge": r[7],
          "status": r[8], "esito_finale": r[9], "profit": r[10],
-         "created_at": r[11], "settled_at": r[12]}
+         "created_at": r[11], "settled_at": r[12], "league": r[13]}
         for r in rows
     ]
 
@@ -1848,17 +1871,25 @@ def settle_predictions():
     return settled, pushes
 
 
-def predictions_summary(mercato=None, settled_since=None):
+def predictions_summary(mercato=None, settled_since=None, statuses=None):
     """Riepilogo previsioni CHIUSE per mercato: hit, ROI, gap EV, edge mercato.
 
     E' la telemetria di calibrazione: mostra per ogni mercato se il modello
     batte davvero la closing line (ROI realizzato vs EV atteso).
     Con `settled_since` (ISO, es. "2026-09-01") filtra solo le previsioni
     saldate a partire da quella data (report giornaliero).
+
+    Con `statuses` (es. `value_filter.PLAYABLE_TIERS`) restringe ai soli stati
+    indicati: serve a MISURARE la strategia (cio' che sarebbe stato giocato)
+    invece di sommare i candidati scartati dai gate, che sono un'altra
+    popolazione. Default None = tutti gli stati (comportamento storico).
     """
     rows = get_predictions(mercato=mercato, closed=True, limit=100000)
     if settled_since:
         rows = [r for r in rows if (r.get("settled_at") or "") >= settled_since]
+    if statuses is not None:
+        wanted = {str(s).strip().lower() for s in statuses}
+        rows = [r for r in rows if str(r.get("status") or "").strip().lower() in wanted]
     by_mkt: dict = {}
     for r in rows:
         key = r["mercato"] or "?"

@@ -128,3 +128,122 @@ def test_analyze_db_su_db_reale(temp_db):
     # pnl = 2 vinte (2*+1.0) - 10 perse (10*-1.0) = -8 su 12
     assert r["roi"] == round(-8.0 / 12 * 100, 2)
     assert r["roi"] < 0 and r["gap"] <= -3.0
+    assert res["excluded"]["n"] == 0      # tutte le righe sono giocabili
+
+
+# --- Split giocabili / scartati (22/09) -------------------------------------
+# La direttiva: la diagnosi, i gap e le conseguenti raccomandazioni si
+# calcolano ESCLUSIVAMENTE sui segnali giocabili. Gli scartati sono il costo
+# (o il risparmio) dei gate, non la performance di una strategia: sommarli
+# faceva sembrare il campione piu' maturo di quanto sia e poteva far
+# raccomandare cambi di blend/soglie per colpa di righe mai giocate.
+
+
+def test_diagnose_ignora_gli_scartati_nei_giudizi():
+    by = {"1X2": _entry(120, 3.0, 2.0, hit_rate=56.0, avg_prob=0.54)}
+    skipped = {"1X2": {"n": 900, "won": 100, "lost": 800, "push": 0,
+                        "roi": -88.0}}
+    res = market_diagnose.diagnose(by, skipped)
+    # il campione giocabile e' sano: nessuna azione, nonostante 900 scartati
+    assert res["critici"] == [] and res["azioni"] == []
+    assert res["totals"]["n"] == 120
+    assert res["excluded"]["n"] == 900
+    assert res["excluded"]["roi"] == -88.0
+    assert res["excluded"]["by_market"][0]["mercato"] == "1X2"
+
+
+def test_sufficiente_non_contagia_il_campione_coi_rejected():
+    """90 giocabili + 500 scartati NON fanno un campione maturo.
+
+    Prima dello split il totale aggregato faceva scattare le raccomandazioni:
+    e' esattamente il falso segnale che la direttiva vuole chiudere.
+    """
+    by = {"1X2": _entry(90, -8.0, 1.0, hit_rate=40.0, avg_prob=0.55)}
+    skipped = {"1X2": {"n": 500, "won": 50, "lost": 450, "push": 0,
+                        "roi": -80.0}}
+    res = market_diagnose.diagnose(by, skipped)
+    assert res["totals"]["n"] == 90
+    assert res["sufficiente"] is False
+    assert res["azioni"] == []
+    assert "escluse" in res["note"]
+
+
+def test_excluded_vuoto_non_aggiunge_rumore():
+    by = {"1X2": _entry(120, 3.0, 2.0)}
+    res = market_diagnose.diagnose(by, {})
+    assert res["excluded"]["n"] == 0
+    assert res["excluded"]["by_market"] == []
+    assert "escluse" not in res["note"]
+
+
+def test_excluded_tollera_voci_malformate():
+    by = {"1X2": _entry(120, 3.0, 2.0)}
+    res = market_diagnose.diagnose(by, {"X": "spazzatura", "Y": {"n": 0}})
+    assert res["excluded"]["n"] == 0      # nessuna eccezione, niente righe finte
+
+
+def test_report_dichiara_gli_esclusi_e_i_calcoli():
+    by = {"1X2": _entry(120, -6.0, 1.5, hit_rate=40.0, avg_prob=0.55)}
+    skipped = {"1X2": {"n": 300, "won": 30, "lost": 270, "push": 0,
+                        "roi": -90.0}}
+    out = market_diagnose._report(market_diagnose.diagnose(by, skipped))
+    assert "SOLO segnali giocabili" in out
+    assert "Fuori dai calcoli: 300" in out
+    assert "NON performance" in out
+
+
+def test_report_in_modalita_confronto_non_si_chiama_giocabile():
+    """Con `--all-statuses` il campione e' mescolato: etichettarlo
+    "giocabile" sarebbe una bugia letta dall'operatore."""
+    by = {"1X2": _entry(120, -6.0, 1.5, hit_rate=40.0, avg_prob=0.55)}
+    out = market_diagnose._report(market_diagnose.diagnose(by),
+                                  all_statuses=True)
+    assert "TUTTO il ledger" in out and "CONFRONTO" in out
+    assert "Campione MESCOLATO" in out
+    assert "SOLO segnali giocabili" not in out
+
+
+def test_analyze_db_esclude_gli_scartati(temp_db):
+    """Integrazione: il DB reale ha entrambe le popolazioni."""
+    for i in range(12):                       # giocabili: 2 vinte, 10 perse
+        mid = f"p{i}"
+        home = f"Play{i}"                     # nomi distinti: il referto aggancia
+        sh, sa = (2, 0) if i < 2 else (0, 2)  # anche per coppia di squadre
+        tracker.save_result(mid, "Serie A", home, f"PAway{i}", sh, sa,
+                            datetime.now().isoformat())
+        tracker.save_prediction(mid, "1X2", home, 1.7, 0.6, 0.05,
+                                status="value")
+    for i in range(40):                       # scartati: tutti persi
+        mid = f"r{i}"
+        home = f"Rej{i}"
+        tracker.save_result(mid, "Serie A", home, f"RAway{i}", 0, 2,
+                            datetime.now().isoformat())
+        tracker.save_prediction(mid, "1X2", home, 3.5, 0.3, -0.1,
+                                status="rejected")
+    tracker.settle_predictions()
+
+    res = market_diagnose.analyze_db(min_total=10, min_per_market=5)
+    assert res["markets"][0]["n"] == 12          # solo i giocabili
+    assert res["markets"][0]["lost"] == 10
+    assert res["excluded"]["n"] == 40
+    assert res["excluded"]["roi"] == -100.0      # i 40 rejected sono tutti persi
+    assert res["excluded"]["by_market"][0]["mercato"] == "1X2"
+
+    old = market_diagnose.analyze_db(all_statuses=True, min_total=10,
+                                     min_per_market=5)
+    assert old["markets"][0]["n"] == 52           # comportamento pre-22/09
+
+
+def test_usa_la_definizione_condivisa_dei_tier():
+    """Tripwire: nessuna copia della tripla dentro market_diagnose.
+
+    Un tier nuovo deve contare come giocabile in un posto solo: se la tripla
+    fosse ricopiata qui, il report e la corsia ordini misurerebbero due
+    insiemi diversi senza che nessun test lo dica.
+    """
+    from pathlib import Path
+    import value_filter
+    assert value_filter.PLAYABLE_TIERS == ("value", "strong_value", "moderate")
+    src = Path(market_diagnose.__file__).read_text(encoding="utf-8")
+    assert "PLAYABLE_TIERS" in src
+    assert '"value", "strong_value"' not in src

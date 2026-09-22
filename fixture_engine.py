@@ -495,7 +495,8 @@ def _analyze_match(match_id, match, home_db, away_db, league):
             save_prediction(match_id, cand["mercato"], cand["esito"],
                             cand["quota"], cand["prob"], cand["ev"],
                             market_prob=cand.get("market_prob"),
-                            market_edge=cand.get("market_edge"), status=st)
+                            market_edge=cand.get("market_edge"), status=st,
+                            league=cand.get("league") or league)
     except Exception as e:
         logger.warning(f"Ledger previsioni per {match_id}: {e}")
     return status

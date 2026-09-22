@@ -623,7 +623,8 @@ def scan(provider: Optional[SxBetProvider] = None) -> List[dict]:
             save_prediction(match_id, "1X2", cand["esito"], cand["quota"],
                             cand["prob"], cand["ev"],
                             market_prob=cand["market_prob"],
-                            market_edge=cand["market_edge"], status=st)
+                            market_edge=cand["market_edge"], status=st,
+                            league=cand.get("league") or league_name)
         if status in ("value", "strong_value"):
             saved.append({
                 "match_id": match_id, "home": home, "away": away,

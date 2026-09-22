@@ -73,6 +73,7 @@ from value_filter import (
     MIN_FAVOURITE_MARKET_PROB,
     ODDS_MAX,
     ODDS_MIN,
+    PLAYABLE_TIERS,
     adjusted_probability,
     compute_ev,
     get_signal_tier,
@@ -138,11 +139,11 @@ MARKETS: Tuple[str, ...] = ("OU", "AH")
 SX_TYPE_IDS: Dict[str, str] = {"OU": "2", "AH": "3"}
 _NATIVE_TYPE_TO_MARKET = {v: k for k, v in SX_TYPE_IDS.items()}
 
-#: I tier che il bot considera GIOCABILI (stessa tripla di
-#: `auto_bet._today_value_picks` e `decision.adapters`): una definizione sola,
-#: cosi' un tier nuovo non puo' contare come "giocabile" nel report e non
-#: esserlo nell'ordine (o viceversa).
-PLAYABLE_STATUSES: Tuple[str, ...] = ("value", "strong_value", "moderate")
+#: I tier che il bot considera GIOCABILI. La definizione vive in
+#: `value_filter.PLAYABLE_TIERS` (il modulo che possiede i tier) e qui e'
+#: solo un ALIAS: cosi' un tier nuovo non puo' contare come "giocabile" nel
+#: report e non esserlo nell'ordine (o viceversa).
+PLAYABLE_STATUSES: Tuple[str, ...] = PLAYABLE_TIERS
 
 #: Sotto questo numero di chiusure il ROI di un bucket e' rumore, non una
 #: misura: e' la stessa soglia che `league_gate_impact` dichiara al
@@ -830,7 +831,8 @@ def _persist(fixture: Dict[str, Any], cands: Sequence[Dict[str, Any]]) -> int:
                             cand["quota"], cand["prob"], cand["ev"],
                             market_prob=cand.get("market_prob"),
                             market_edge=cand.get("market_edge"),
-                            status=cand.get("status") or "rejected")
+                            status=cand.get("status") or "rejected",
+                            league=fixture.get("league") or "")
             written += 1
     except Exception as exc:
         logger.warning("multi_market: salvataggio previsioni %s: %s",
