@@ -52,16 +52,36 @@ def test_rotazione_crediti():
     """Ogni lega ha un intervallo esplicito e il costo mensile sta nel
     piano free the-odds-api (500 crediti/mese)."""
     from odds_api import interval_for_sport, SPORTS_INTERVAL_DAYS
-    # Profilo SETTEMBRE 2026 sotto-budget: top campionati a 3gg, il resto
-    # (es. Turkey Super Lig, UEFA Nations League) a 30gg = dormiente.
+    # Profilo 24/09/2026: top campionati a 3gg, TUTTE le leghe ammesse dalla
+    # strategia a 7gg, il resto (es. UEFA Nations League) a 30gg = dormiente.
     assert interval_for_sport("soccer_epl") == 3
-    assert interval_for_sport("soccer_turkey_super_league") == 30
+    assert interval_for_sport("soccer_turkey_super_league") == 7
     assert interval_for_sport("soccer_uefa_nations_league") == 30
     # ogni lega in SPORTS_MAP deve avere un intervallo ESPLICITO
     # (niente default silenziosi: prima "Chile Primera" finiva a 1 = 30/mese)
     for league, key in SPORTS_MAP.items():
         assert league in SPORTS_INTERVAL_DAYS, f"{league} senza intervallo"
         assert interval_for_sport(key) == SPORTS_INTERVAL_DAYS[league]
+
+
+def test_leghe_ammesse_mai_dormienti():
+    """Una lega GIOCABILE non puo' stare a 30gg di rotazione.
+
+    Difetto misurato il 24/09/2026: 10 leghe ammesse (Turkey Super Lig,
+    Allsvenskan, Argentina Primera, Austrian Bundesliga, Eliteserien, J1
+    League, K League 1, Scottish Premiership, Superliga Danimarca, Swiss
+    Super League) erano a 30gg, cioe' DORMIENTI di fatto: con partite in
+    calendario non venivano mai interrogate, quindi non potevano produrre
+    alcun candidato qualunque fosse la soglia di edge/EV. Dal 11/09 nelle
+    20 leghe ammesse c'e' una sola prediction su 688 righe di ledger.
+    """
+    from odds_api import SPORTS_INTERVAL_DAYS
+    import value_filter as vf
+    for lg in list(vf.STRATEGY_LEAGUES) + sorted(vf.PROBATION_LEAGUES):
+        assert lg in SPORTS_INTERVAL_DAYS, f"{lg} senza intervallo"
+        assert SPORTS_INTERVAL_DAYS[lg] <= 7, (
+            f"{lg} e' dormiente ({SPORTS_INTERVAL_DAYS[lg]}gg): le leghe "
+            "ammesse devono essere interrogate almeno ogni 7 giorni")
 
 
 def test_budget_mensile_piano_free():
@@ -240,13 +260,18 @@ def test_stagger_scadenza_sul_giorno_di_fase(monkeypatch, tmp_path):
 
 def test_stagger_non_anticipa_le_leghe_30gg(monkeypatch, tmp_path):
     """Le leghe a 30gg (dormienti) NON vengono anticipate dal giorno di
-    fase: restano dovute solo a scadenza intervallo (zero costi extra)."""
+    fase: restano dovute solo a scadenza intervallo (zero costi extra).
+
+    Esempio: una competizione di nazionali fuori strategia. NB dal 24/09 le
+    leghe AMMESSE (compresa Turkey Super Lig) stanno a 7gg, quindi non sono
+    piu' un esempio valido di lega dormiente.
+    """
     import odds_api
     monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
     now = 1_800_000_000.0
     monkeypatch.setattr(odds_api.time, "time", lambda: now)
 
-    key = "soccer_turkey_super_league"
+    key = "soccer_uefa_nations_league"
     assert odds_api.interval_for_sport(key) == 30
     _write_cache(tmp_path, key, now - 2 * 86400)  # eta' 2 giorni
     assert odds_api.is_sport_due(key) is False

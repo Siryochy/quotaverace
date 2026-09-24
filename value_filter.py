@@ -143,6 +143,35 @@ MAX_STAKE_PCT = 0.02       # cap 2% del bankroll (era 1%)
 LOW_PROB_THRESHOLD = 0.40
 LOW_PROB_SHRINK = 0.85
 
+# === ALIAS DEI NOMI LEGA (24/09/2026) ===
+# Le competizioni arrivano da fonti DIVERSE (SX Bet usa le etichette del
+# provider, the-odds-api le chiavi di `SPORTS_MAP`) e il gate di lega e' un
+# confronto per stringa: un nome non allineato vale come "lega vietata".
+# Misurato il 24/09/2026: la corsia multi-mercato salvava
+# `Major League Soccer` mentre la lega in probation si chiama `MLS` ->
+# candidati con EV +52% e edge +9.5pp scartati con "ROI negativo", che per
+# quella lega NON e' vero (falso divieto su una lega ammessa).
+# Solo alias UNIVOCI, mai fusioni fra leghe DIVERSE: `Brazil Serie B` (Serie B
+# brasiliana) NON e' `Serie B` (italiana) e resta vietata com'e' giusto.
+LEAGUE_ALIASES = {
+    "major league soccer": "MLS",
+    "usa mls": "MLS",
+    "united states mls": "MLS",
+}
+
+
+def canonical_league(league: str = "") -> str:
+    """Nome canonico della lega (alias noti -> chiave della strategia).
+
+    Difesa in profondita': il gate non deve dipendere da come una fonte
+    scrive il nome. Una lega sconosciuta resta se stessa (nessun indovinare).
+    """
+    name = (league or "").strip()
+    if not name:
+        return ""
+    return LEAGUE_ALIASES.get(name.lower(), name)
+
+
 def get_league_strategy(league: str = "") -> dict:
     """Ritorna la configurazione strategica per una lega (core o probation).
 
@@ -151,6 +180,7 @@ def get_league_strategy(league: str = "") -> dict:
     resto -> fallback severo, che in pratica non arriva mai ai segnali perche'
     `league_allowed` li rifiuta prima. Lega vuota -> fallback.
     """
+    league = canonical_league(league)
     if not league:
         return DEFAULT_LEAGUE_STRATEGY
     if league in STRATEGY_LEAGUES:
@@ -162,6 +192,7 @@ def get_league_strategy(league: str = "") -> dict:
 
 def league_tier(league: str = "") -> str:
     """'core' | 'probation' | 'blocked' — utile per log e telemetria."""
+    league = canonical_league(league)
     if league and league in STRATEGY_LEAGUES:
         return "core"
     if league and league in PROBATION_LEAGUES:
@@ -171,6 +202,7 @@ def league_tier(league: str = "") -> str:
 
 def league_allowed(league: str = "") -> bool:
     """True se la lega e' giocabile: core (ROI positivo) o probation (tier-2)."""
+    league = canonical_league(league)
     return bool(league and (league in STRATEGY_LEAGUES
                             or league in PROBATION_LEAGUES))
 

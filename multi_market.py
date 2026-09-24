@@ -75,6 +75,7 @@ from value_filter import (
     ODDS_MIN,
     PLAYABLE_TIERS,
     adjusted_probability,
+    canonical_league,
     compute_ev,
     get_signal_tier,
     is_sane,
@@ -339,6 +340,30 @@ def _market_line(m: Dict[str, Any]) -> Optional[float]:
     return None
 
 
+def _resolve_league_label(label: str) -> str:
+    """Etichetta SX -> nome canonico della strategia (chiave `SPORTS_MAP`).
+
+    La corsia multi-mercato salvava l'etichetta GREZZA del provider: quando
+    coincide col nome ammesso non succede nulla, ma `Major League Soccer` (SX)
+    non e' `MLS` (chiave di `SPORTS_MAP`) e il gate di lega lo leggeva come
+    lega VIETATA. Misurato il 24/09/2026: candidati con EV +52% ed edge +9.5pp
+    scartati con "lega esclusa per ROI negativo", che per quella lega in
+    PROBATION non e' vero.
+
+    Riusa la risoluzione deterministica di `sx_signals` (mai fuzzy scritto a
+    mano) con l'alias di sicurezza di `value_filter` come ripiego. Una
+    etichetta sconosciuta resta se stessa: nessun nome inventato.
+    """
+    name = (label or "").strip()
+    if not name:
+        return ""
+    try:
+        from sx_signals import _league_sx_to_sports_map   # import pigro
+        return _league_sx_to_sports_map(name) or canonical_league(name)
+    except Exception:
+        return canonical_league(name)
+
+
 def _discover_type(provider: Any, type_id: str,
                    max_markets: int) -> List[Dict[str, Any]]:
     """Una pagina (o piu') di /markets/active per UN type id (come sx_signals)."""
@@ -402,7 +427,7 @@ def discover(provider: Any, *, types: Optional[Sequence[str]] = None,
                 continue
             records.append({
                 "event_id": str(event_id),
-                "league_label": m.get("leagueLabel") or "",
+                "league_label": _resolve_league_label(m.get("leagueLabel")),
                 "kickoff_ms": kickoff_ms,
                 "home": home, "away": away,
                 "market_type": str(market_type).upper(),

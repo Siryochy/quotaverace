@@ -435,6 +435,32 @@ class TestTripwire:
         assert mm._env_flag("ENABLE_LIVE_OU", False) is False
         assert mm._env_flag("ENABLE_LIVE_AH", True) is True
 
+    def test_etichetta_lega_risolta_in_discovery(self):
+        """`discover` deve risolvere l'etichetta SX nella chiave della
+        strategia: `Major League Soccer` -> `MLS`.
+
+        Il difetto del 24/09/2026: questa corsia salvava l'etichetta GREZZA
+        del provider, quindi il gate di lega la leggeva come vietata e
+        scartava candidati con EV +52% ed edge +9.5pp con "ROI negativo" —
+        un falso divieto su una lega in PROBATION (il resolver esisteva gia'
+        ed era corretto: non veniva usato qui).
+        """
+        import value_filter as vf
+        assert mm._resolve_league_label("Major League Soccer") == "MLS"
+        assert vf.league_allowed(mm._resolve_league_label("Major League Soccer"))
+        # lega sconosciuta: resta se stessa (mai un nome inventato)
+        assert mm._resolve_league_label("Lega Fantasma") == "Lega Fantasma"
+        assert mm._resolve_league_label("") == ""
+        # lega vietata: nessuna scorciatoia del resolver
+        assert not vf.league_allowed(mm._resolve_league_label("Serie A"))
+
+    def test_discover_usa_la_risoluzione_della_lega(self):
+        """Tripwire sul percorso REALE: la risoluzione sta in `discover`."""
+        import pathlib
+        src = pathlib.Path(mm.__file__).read_text()
+        assert '"league_label": _resolve_league_label(' in src
+        assert 'm.get("leagueLabel") or ""' not in src
+
     def test_nessuna_scrittura_sql_diretta(self):
         import pathlib
         src = pathlib.Path(mm.__file__).read_text()

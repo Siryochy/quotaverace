@@ -4902,3 +4902,111 @@ fine della pausa nazionali senza interventi manuali**.
 (fascia quota corrente o `--since`) e' l'unico pezzo che serve per leggere il
 campione nuovo senza filtri a mano — si implementa quando il campione raggiunge
 la soglia, non prima.
+
+### Diagnosi 24/09/2026: flusso scommesse fermo — depth/edge FALSIFICATI, causa = gate leghe + rotazione dormiente
+
+**Segnalazione del proprietario**: "il bot ha completamente interrotto la
+produzione di scommesse". Diagnosi eseguita in **sola lettura** sul container
+(`railway ssh`, SQLite `mode=ro`, zero ordini, zero crediti). Due delle tre
+ipotesi proposte sono state **falsificate dai dati**; la causa e' un'altra.
+
+**1) Depth gate (20/4/20 x1.6) — NON e' la causa.** Il registro scarti
+(`data/execution/liquidity_skips.jsonl`, 61 eventi totali) ha **1 solo** scarto
+per profondita' dal 12/09, e oggi 1 match su ~25 (`depth_esito_2`: leg 3.65 <
+4.0, Nigeria–Madagascar). Le env restano ai default del 21/09: nessuna soglia
+toccata. Un collo di bottiglia di liquidita' avrebbe riempito il registro.
+
+**2) min_edge probation 4% — NON e' la causa.** Dal 11/09 nelle 20 leghe
+ammesse c'e' **UNA sola** prediction (MLS, 23/09) e il suo rifiuto e' per **EV**
+(-12.4%), non per edge. In 4 giorni un solo scarto "EV troppo basso". Il 4%
+non ha mai avuto modo di agire: **non arrivano candidati**.
+
+**3) Attribuzione degli scarti del 24/09** (`value_filter.is_sane` di
+produzione applicata alle 78 righe del ledger):
+
+| motivo | righe |
+|---|---|
+| `lega 'Africa Cup of Nations' esclusa` | 44 |
+| `lega 'UEFA Nations League' esclusa` | 31 |
+| `lega 'Major League Soccer' esclusa` | 2 |
+| `lega 'Primera A' esclusa` | 1 |
+| depth / edge / favourite gate | **0** |
+
+**78/78 scartate dalla LEGA**. Il motivo contingente e' la **finestra delle
+nazionali**: nei 7 giorni successivi 45 delle 80 partite in cache sono UEFA
+Nations League e i campionati di club ammessi sono in pausa; nelle **prossime
+48h** le partite in leghe ammesse erano **2** (Liga MX).
+
+**4) DUE DIFETTI REALI TROVATI (non ipotesi, misurati).**
+- **Leghe ammesse DORMIENTI**: 10 leghe ammesse erano a **30gg** di rotazione
+  (`Turkey Super Lig`, `Allsvenskan`, `Argentina Primera`, `Austrian
+  Bundesliga`, `Eliteserien`, `J1 League`, `K League 1`, `Scottish
+  Premiership`, `Superliga Danimarca`, `Swiss Super League`): con partite in
+  calendario **non venivano mai interrogate**, quindi non potevano produrre
+  alcun candidato qualunque fosse la soglia. E' la configurazione di emergenza
+  crediti del 05/09, mai ripristinata. Dal 11/09: 1 prediction su 688 righe
+  nelle leghe ammesse.
+- **Falso divieto su lega ammessa**: `multi_market` salvava l'etichetta GREZZA
+  di SX (`Major League Soccer`) invece della chiave della strategia (`MLS`) →
+  il gate la leggeva come lega VIETATA e scartava candidati con **EV +52%** ed
+  **edge +9.5pp** con "lega esclusa per ROI negativo", che per quella lega in
+  probation non e' vero. Il resolver esisteva ed era corretto: **quel percorso
+  non lo usava** (il tripwire del 17/09 testava il resolver, non il chiamante).
+
+**5) Nessun blocco tecnico**: kill switch `live` + `provider_ready: true`,
+settlement attivo, stop-loss giornaliero **solo riferimento** (`stopped_until:
+null`, `basis_key: live_equity`), CB2 T-60 non armato, crediti **416**, feed di
+mercato SX validato (63–74/74 quote conformi), wallet 33.55 USDC. Il sistema
+gira: era **progettato per non produrre segnali** in questa finestra.
+
+**6) DECISIONE DEL PROPRIETARIO (via `ask_user`)**: (a) **nessun allentamento**
+di soglie/gate — fix dei difetti e rotazione; (b) **riattivare a 7gg** le 10
+leghe dormienti.
+
+**7) INTERVENTI APPLICATI.**
+- `value_filter.LEAGUE_ALIASES` + `canonical_league()`: **difesa in profondita'
+  del gate** — il nome della lega viene normalizzato in `league_allowed`,
+  `league_tier`, `get_league_strategy`, quindi nessun percorso dipende da come
+  una fonte scrive il nome. SOLO alias univoci (`Major League Soccer`/`USA MLS`
+  → `MLS`); `Brazil Serie B` (Serie B brasiliana) **NON** diventa `Serie B` e
+  resta vietata.
+- `multi_market._resolve_league_label()` usata in `discover`: la risoluzione
+  sta **alla fonte** (riusa `sx_signals._league_sx_to_sports_map`, import
+  pigro, con `canonical_league` come ripiego).
+- `odds_api.SPORTS_INTERVAL_DAYS`: le 10 leghe ammesse da 30 → **7gg** (tutte
+  le leghe giocabili sono ora interrogate almeno ogni 7 giorni). Costo mensile
+  della rotazione **157.7 → 190.6** su un tetto di 460 (`ODDS_DAILY_BUDGET=8`).
+
+**8) IMPATTO MISURATO — onesta: il fix dei nomi e' CORRETTEZZA, non volume.**
+Sulle 709 righe dal 11/09: 89 erano bloccate da un nome lega non canonico, ma
+le righe con lega `Major League Soccer` avevano quota **fuori fascia** (6.1,
+9.3) e le 27 righe che con l'alias passano `is_sane` hanno lega `None`
+(pre-migrazione 22/09) e restano **fail-closed** nella corsia ordini (lega
+assente = non si ordina dal 17/09). Quindi: **zero pick sbloccati oggi**; la
+leva reale e' la **rotazione**, e il flusso riparte quando i campionati ammessi
+tornano in calendario (~28-30/09) o subito via multi-mercato sulle leghe
+riattivate.
+
+**9) TRIPWIRE NUOVI** (una correzione senza test e' una correzione che si
+perde): `test_odds_api.test_leghe_ammesse_mai_dormienti` (ogni lega ammessa
+DEVE avere intervallo ≤ 7gg — il difetto del 24/09; `test_rotazione_crediti`
+aggiornato: Turkey 30→7, con una lega di nazionali come esempio di dormiente);
+`test_league_gate.TestNomiDelleLegheAmmesse.test_gate_ammette_il_nome_grezzo_del_provider`
++ `test_alias_non_fonde_leghe_diverse`; `test_multi_market.TestTripwire.
+test_etichetta_lega_risolta_in_discovery` + tripwire sul sorgente
+(`"league_label": _resolve_league_label(`).
+
+**10) VERIFICHE**: ~718 test verdi nei lotti mirati (`odds_api`, `league_gate`,
+`multi_market`, `value_filter`, `sx_signals`, `auto_bet` x3, `favourites_only`,
+`risk_guards`, `t60_breakers`, `league_gate_impact`, `ou_exclusion`, `tier`,
+`market_calib`, `liquidity_monitor/impact`, `decision` x6, `predictions`,
+`bot`, `web_api`, `settlement_watchdog`, `reports`, `secret_hygiene`),
+`verify_guardrails.py` **A-G tutti bloccano**, 0 marker di conflitto,
+`compileall` OK.
+
+**11) LEZIONE PERMANENTE**: un gate di strategia che confronta NOMI dipende da
+come ogni fonte scrive il nome — e una lega ammessa a 30gg di rotazione e'
+**dormiente di fatto**: le due cose insieme possono azzerare il flusso senza
+che nessuna soglia di rischio sia cambiata. Quando il flusso si ferma, il primo
+controllo non e' la soglia: e' **quante partite in leghe ammesse sono state
+interrogate**.

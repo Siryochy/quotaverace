@@ -283,3 +283,33 @@ class TestNomiDelleLegheAmmesse:
         from odds_api import SPORTS_MAP
         for league in value_filter.STRATEGY_LEAGUES:
             assert league in SPORTS_MAP, f"{league} assente da SPORTS_MAP"
+
+    @pytest.mark.parametrize("raw", [
+        "Major League Soccer", "USA MLS", "United States MLS",
+    ])
+    def test_gate_ammette_il_nome_grezzo_del_provider(self, raw):
+        """Difesa in profondita': il gate NON dipende da come una fonte
+        scrive il nome della lega.
+
+        Misurato il 24/09/2026: `multi_market` salvava l'etichetta GREZZA di
+        SX (`Major League Soccer`) invece della chiave della strategia
+        (`MLS`), quindi il gate la leggeva come lega vietata e scartava
+        candidati con EV +52% ed edge +9.5pp con "ROI negativo" — un divieto
+        FALSO su una lega in probation. Il resolver era corretto: il difetto
+        era che quel percorso non lo usava, percio' il gate si difende da solo.
+        """
+        assert value_filter.canonical_league(raw) == "MLS"
+        assert value_filter.league_allowed(raw)
+        assert value_filter.league_tier(raw) == "probation"
+        assert value_filter.get_league_strategy(raw)["min_edge"] == 0.04
+
+    def test_alias_non_fonde_leghe_diverse(self):
+        """`Brazil Serie B` NON e' `Serie B`: l'alias non deve promuovere la
+        Serie B brasiliana (legittimamente vietata, misurato il 24/09)."""
+        assert value_filter.canonical_league("Brazil Serie B") == "Brazil Serie B"
+        assert not value_filter.league_allowed("Brazil Serie B")
+        assert not value_filter.league_allowed("Brasileiro Serie B")
+        # una lega sconosciuta resta se stessa: nessun nome inventato
+        assert value_filter.canonical_league("Lega Fantasma") == "Lega Fantasma"
+        assert value_filter.canonical_league("") == ""
+        assert value_filter.league_tier("Lega Fantasma") == "blocked"

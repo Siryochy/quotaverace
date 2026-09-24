@@ -341,22 +341,31 @@ SPORTS_INTERVAL_DAYS = {
     # d'inizio, meglio per il CLV + copertura schedina/auto-bet)
     "Serie A": 3, "Premier League": 3, "La Liga": 3, "Bundesliga": 3,
     "Ligue 1": 3, "Eredivisie": 3, "EFL Championship": 3, "Serie B": 3,
-    # ogni 7 giorni: coppe europee + mercati maggiori extra-Europa
+    # ogni 7 giorni: coppe europee + mercati maggiori extra-Europa +
+    # TUTTE le leghe AMMESSE dalla strategia (24/09/2026).
+    # Le 10 leghe in `PROBATION_LEAGUES`/core che stavano a 30gg erano
+    # DORMIENTI di fatto: con partite in calendario non venivano mai
+    # interrogate, quindi non potevano produrre alcun candidato (misurato:
+    # dal 11/09 una sola prediction nelle 20 leghe ammesse). Crediti sani
+    # (416, ~60/giorno sostenibili fino al reset del 01/10) e costo mensile
+    # della rotazione a 158 -> ~191 su un tetto di 460: c'e' margine.
     "Champions League": 7, "Europa League": 7,
     "MLS": 7, "Brasileirao": 7, "Liga MX": 7, "Saudi Pro League": 7,
+    "Turkey Super Lig": 7, "Allsvenskan": 7, "Argentina Primera": 7,
+    "Austrian Bundesliga": 7, "Eliteserien": 7, "J1 League": 7,
+    "K League 1": 7, "Scottish Premiership": 7, "Superliga Danimarca": 7,
+    "Swiss Super League": 7,
     # ogni 30 giorni (dormienti a settembre, riattivare a ottobre): coppe
     # nazionali, campionati secondari, resto del mondo e nazionali
     "Conference League": 30, "Coppa Italia": 30, "Copa del Rey": 30,
     "Coupe de France": 30, "DFB Pokal": 30, "FA Cup": 30, "EFL Cup": 30,
-    "Swiss Super League": 30, "Primeira Liga": 30, "Allsvenskan": 30,
-    "Eliteserien": 30, "Superliga Danimarca": 30, "Veikkausliiga": 30,
-    "J1 League": 30, "K League 1": 30, "A-League": 30,
-    "Argentina Primera": 30, "Chile Primera": 30, "Copa Libertadores": 30,
+    "Primeira Liga": 30, "Veikkausliiga": 30,
+    "A-League": 30,
+    "Chile Primera": 30, "Copa Libertadores": 30,
     "Copa Sudamericana": 30, "Ligue 2": 30, "Bundesliga 2": 30,
     "La Liga 2": 30, "League One": 30, "League Two": 30,
-    "Scottish Premiership": 30, "Austrian Bundesliga": 30,
     "Belgian First Div": 30, "Greek Super League": 30,
-    "Polish Ekstraklasa": 30, "Turkey Super Lig": 30,
+    "Polish Ekstraklasa": 30,
     "Russian Premier League": 30, "3. Liga": 30, "Brazil Serie B": 30,
     "Sweden Superettan": 30, "China Super League": 30,
     "League of Ireland": 30, "Frauen-Bundesliga": 30,
