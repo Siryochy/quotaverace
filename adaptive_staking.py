@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from datetime import datetime, timedelta
@@ -33,13 +34,54 @@ from typing import Dict, List, Optional
 
 from tracker import _get_conn
 
+logger = logging.getLogger(__name__)
+
+
+def _ratio_env(name: str, default: float) -> float:
+    """Legge un RAPPORTO da env con clamp in [0, 1] e fallback al default.
+
+    Parametrizzare lo staking non deve poter introdurre una frazione di
+    Kelly o un drawdown impossibili: un valore negativo, > 1 o non numerico
+    viene IGNORATO (con un warning, mai in silenzio) e vale il default.
+    """
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("%s=%r non numerico: uso il default %s", name, raw, default)
+        return default
+    if val < 0.0 or val > 1.0:
+        logger.warning("%s=%s fuori intervallo [0, 1]: uso il default %s",
+                       name, val, default)
+        return default
+    return val
+
+
 # --- Config (tutto env-configurabile; staking 100% dinamico dal 08/09) ---
 # Il Kelly frazionato calcola lo stake per OGNI scommessa a partire dal
 # bankroll corrente: nessun importo fisso, solo vincoli di sicurezza
 # percentuali (Kelly + cap per segnale) e il floor dell'exchange.
-BASE_KELLY_FRACTION = 0.25     # 1/4 Kelly base
-MIN_KELLY_FRACTION = float(os.getenv("KELLY_MIN_FRACTION", "0.05"))
-MAX_KELLY_FRACTION = float(os.getenv("KELLY_MAX_FRACTION", "0.40"))
+#
+# FRAZIONE DI KELLY — parametrizzabile da env SENZA toccare la formula:
+#   KELLY_MIN_FRACTION / KELLY_MAX_FRACTION = intervallo della frazione
+#     dinamica (confidence-weighted);
+#   KELLY_BASE_FRACTION = punto di PARTENZA della frazione (usato anche nei
+#     messaggi "sopra/sotto il base Kelly").
+# ⚠️ Con il bankroll attuale il floor dell'exchange (1 USDC) prevale su
+# qualunque frazione: alzare questi valori non cambia lo stake finche' il
+# cap percentuale resta sotto 1 USDC (soglie misurate il 17/09: il cap morde
+# da 50.25 USDC per strong_value e da 100.50 per value).
+BASE_KELLY_FRACTION = _ratio_env("KELLY_BASE_FRACTION", 0.25)
+MIN_KELLY_FRACTION = _ratio_env("KELLY_MIN_FRACTION", 0.05)
+MAX_KELLY_FRACTION = _ratio_env("KELLY_MAX_FRACTION", 0.40)
+if MAX_KELLY_FRACTION < MIN_KELLY_FRACTION:
+    # Configurazione incoerente (max < min): il tetto deve poter contenere il
+    # pavimento, altrimenti la frazione dinamica non ha intervallo valido.
+    logger.warning("KELLY_MAX_FRACTION (%s) < KELLY_MIN_FRACTION (%s): allineo",
+                   MAX_KELLY_FRACTION, MIN_KELLY_FRACTION)
+    MAX_KELLY_FRACTION = MIN_KELLY_FRACTION
 # Cap % del bankroll per singola bet: cresce SOLO sui segnali a forte
 # margine matematico (strong_value). Il Kelly frazionato resta il freno
 # principale (mai oltre il 40% del Kelly pieno).
@@ -51,8 +93,8 @@ MAX_KELLY_FRACTION = float(os.getenv("KELLY_MAX_FRACTION", "0.40"))
 # sotto ~50-100 USDC lo stake effettivo resta 1 USDC.
 MAX_STAKE_PCT = float(os.getenv("STAKE_CAP_PCT", "0.01"))        # value
 MAX_STAKE_PCT_STRONG = float(os.getenv("STAKE_CAP_PCT_STRONG", "0.02"))
-DRAWDOWN_THRESHOLD = 0.10      # Riduci stakes se drawdown > 10%
-DRAWDOWN_REDUCTION = 0.50      # Riduci stakes del 50% al drawdown massimo
+DRAWDOWN_THRESHOLD = _ratio_env("DRAWDOWN_THRESHOLD", 0.10)   # > 10% = riduci
+DRAWDOWN_REDUCTION = _ratio_env("DRAWDOWN_REDUCTION", 0.50)   # min 50% stake
 MIN_STAKE_EUR = float(os.getenv("STAKE_MIN_EUR", "0.01"))
 STAKE_STEP = float(os.getenv("STAKE_STEP_EUR", "0.01"))
 

@@ -337,24 +337,35 @@ QUERY_WINDOW_DAYS = 7
 # Con la finestra a 7 giorni, anche le leghe interrogate 1 volta a settimana
 # non perdono partite: vedono tutto il calendario della settimana.
 SPORTS_INTERVAL_DAYS = {
-    # ogni 3 giorni: i top campionati (freschezza quote vicino al calcio
-    # d'inizio, meglio per il CLV + copertura schedina/auto-bet)
-    "Serie A": 3, "Premier League": 3, "La Liga": 3, "Bundesliga": 3,
-    "Ligue 1": 3, "Eredivisie": 3, "EFL Championship": 3, "Serie B": 3,
-    # ogni 7 giorni: coppe europee + mercati maggiori extra-Europa +
-    # TUTTE le leghe AMMESSE dalla strategia (24/09/2026).
-    # Le 10 leghe in `PROBATION_LEAGUES`/core che stavano a 30gg erano
-    # DORMIENTI di fatto: con partite in calendario non venivano mai
-    # interrogate, quindi non potevano produrre alcun candidato (misurato:
-    # dal 11/09 una sola prediction nelle 20 leghe ammesse). Crediti sani
-    # (416, ~60/giorno sostenibili fino al reset del 01/10) e costo mensile
-    # della rotazione a 158 -> ~191 su un tetto di 460: c'e' margine.
+    # ⚠️ 25/09/2026 — ROTAZIONE ALLINEATA ALLA PUBBLICAZIONE DELLE QUOTE.
+    # MISURA DIRETTA (API reale, finestra `now` -> `now`+7gg, dal container):
+    #   MLS 15 eventi · Liga MX 9 · Nations League 38  -> le odds escono con
+    #     **1-3 giorni** di anticipo;
+    #   Serie A / Bundesliga / La Liga / Eredivisie: **0 eventi** — a 7 giorni
+    #     di distanza l'API non ha ancora pubblicato quelle partite.
+    #   Le chiamate VUOTE **non addebitano credito** (remaining invariato su 4
+    #     chiamate vuote, -1 su ognuna delle 3 con dati): il costo e' dato dalle
+    #     leghe CHE HANNO partite, non dal numero di interrogazioni.
+    # Difetto del profilo precedente (24/09): con finestra a 7gg **e** rotazione
+    # a 7gg, una lega interrogata il giorno X non vedeva mai le partite del
+    # weekend X+4 (odds pubblicate solo a X+2) e alla successiva interrogazione
+    # (X+7) erano passate -> **zero candidati per sempre**, qualunque soglia di
+    # edge/EV. Da qui il crollo delle analisi (137 il 20/09 -> 24 il 25/09).
+    # Le 20 leghe AMMESSE (core + probation) stanno quindi a **2 GIORNI**: e' il
+    # massimo che il tetto crediti sostiene (costo mensile teorico 191 -> 371 su
+    # un tetto di 460; a 1gg sarebbe 671). Le chiamate vuote sono gratuite,
+    # quindi il costo REALE resta piu' basso del teorico.
+    "Premier League": 2, "Bundesliga": 2, "Turkey Super Lig": 2,
+    "Ligue 1": 2, "Eredivisie": 2, "EFL Championship": 2, "Serie B": 2,
+    "MLS": 2, "Brasileirao": 2, "Liga MX": 2, "Saudi Pro League": 2,
+    "Allsvenskan": 2, "Argentina Primera": 2, "Austrian Bundesliga": 2,
+    "Eliteserien": 2, "J1 League": 2, "K League 1": 2,
+    "Scottish Premiership": 2, "Superliga Danimarca": 2,
+    "Swiss Super League": 2,
+    # ogni 3 giorni: leghe NON ammesse ma con mercato liquido (telemetria/CLV)
+    "Serie A": 3, "La Liga": 3,
+    # ogni 7 giorni: coppe europee + mercati maggiori extra-Europa
     "Champions League": 7, "Europa League": 7,
-    "MLS": 7, "Brasileirao": 7, "Liga MX": 7, "Saudi Pro League": 7,
-    "Turkey Super Lig": 7, "Allsvenskan": 7, "Argentina Primera": 7,
-    "Austrian Bundesliga": 7, "Eliteserien": 7, "J1 League": 7,
-    "K League 1": 7, "Scottish Premiership": 7, "Superliga Danimarca": 7,
-    "Swiss Super League": 7,
     # ogni 30 giorni (dormienti a settembre, riattivare a ottobre): coppe
     # nazionali, campionati secondari, resto del mondo e nazionali
     "Conference League": 30, "Coppa Italia": 30, "Copa del Rey": 30,
@@ -378,9 +389,11 @@ SPORTS_INTERVAL_DAYS = {
     "CONCACAF Gold Cup": 30, "Africa Cup of Nations": 30,
 }
 
-# Cap giornaliero di chiamate odds (piano free 500/mese -> ~16/giorno).
-# Le leghe in eccedenza vengono rinviate al giorno dopo (elasticita' degli
-# intervalli: niente partite perse, la finestra a 7 giorni copre).
+# Cap giornaliero di chiamate odds. Le leghe in eccedenza vengono rinviate al
+# giorno dopo. ⚠️ Con le 20 leghe ammesse a 2gg (~10 dovute/giorno) un tetto di
+# 8 ne rinvierebbe meta': in produzione `ODDS_DAILY_BUDGET=16` (env, nessun
+# redeploy). Il tetto mensile vero resta comunque quello del piano free (460),
+# verificato da `test_budget_mensile_piano_free`.
 DAILY_QUERY_BUDGET = int(os.getenv("ODDS_DAILY_BUDGET", "12"))
 
 

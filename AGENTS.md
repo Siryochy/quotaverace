@@ -5010,3 +5010,197 @@ come ogni fonte scrive il nome — e una lega ammessa a 30gg di rotazione e'
 che nessuna soglia di rischio sia cambiata. Quando il flusso si ferma, il primo
 controllo non e' la soglia: e' **quante partite in leghe ammesse sono state
 interrogate**.
+
+### Misura del flusso a 24 ore: `flow_measure.py` (24/09/2026)
+
+Richiesta del proprietario: *"misurare il flusso a 24 ore"*, dopo la diagnosi
+"flusso scommesse fermo". Scelta esplicita (via `ask_user`): **strumento
+riutilizzabile + misura reale**, non una query a mano — la diagnosi del 24/09
+era stata fatta con un'attribuzione manuale, e una misura manuale non si
+ripete.
+
+**1) IL MODULO** (`flow_measure.py`, diagnostica top-level come
+`liquidity_impact.py`/`league_gate_impact.py`). Misura il FUNNEL, stadio per
+stadio, su una finestra (default **24h**):
+
+| stadio | fonte | cosa dice |
+|---|---|---|
+| 1. ANALISI | `match_analysis` + `matches` | partite analizzate e leghe per stato (core/probation/blocked/**unknown**) |
+| 2. SEGNALI | `predictions` | righe per mercato e stato, giocabili (`PLAYABLE_TIERS`), aperte |
+| 3. GATE | ricalcolo | **attribuzione di OGNI scartata al motivo** del gate |
+| 4. ORDINI | `bets` | righe per modalita' (live/sim/rejected-t60), stake |
+| 5. CATENA | `decisions` | verdetti e stati della catena `decision/` (shadow) |
+| 6. LIQUIDITA' | log JSONL | scarti del monitor SX (edge perso) |
+
+Perche' e' affidabile: il motivo di scarto si ricalcola con il gate di
+PRODUZIONE (`value_filter.is_sane`, con `favourites_only` come in
+`multi_market` per OU/AH) e la tripla dei tier si importa da
+`value_filter.PLAYABLE_TIERS` — mai una copia delle soglie, che cambierebbe
+senza che la misura se ne accorga. Sola LETTURA (`mode=ro`), offline (nessuna
+rete, zero crediti, zero ordini), fail-safe (DB assente/corrotto/tabella
+mancante -> `error` dichiarato o zeri, mai un'eccezione).
+
+CLI: `venv/bin/python flow_measure.py [--hours N] [--json] [--db PATH]`
+(`FLOW_WINDOW_HOURS` cambia il default). Sul container:
+`railway ssh --service api -- bash -lc "PYTHONPATH=/app python3 /tmp/flow_measure.py --hours 24"`.
+`test_flow_measure.py` = **28 verdi, tutti OFFLINE** (ledger SQLite temporaneo
+con lo schema di produzione, date SEMPRE relative a `now`): tripwire di sola
+lettura (un `UPDATE` deve essere RIFIUTATO), formati di data reali (`T`/`Z`/
+offset/spazio), finestra, attribuzione per motivo, fail-safe, verdetto.
+
+**2) BUG TROVATO DALLA MISURA STESSA (corretto).** `league_tier("")` risponde
+`blocked`, quindi la prima versione contava “lega IGNOTA” come “lega
+VIETATA”: sul ledger vero stampava “13 giocabili, 0 in leghe ammesse”, che si
+legge come un gate che bypassa la strategia. Falso allarme: quelle righe sono
+del 19-20/09 e hanno perso la lega perche' la riga `matches` e' stata POTATA
+(`clear_old_matches`) e la colonna `predictions.league` nasce il 22/09. Nuovo
+`_league_state()` con il bucket **`unknown`** (stessa ragione del bucket
+`UNKNOWN` di `league_gate_impact`) + riga di caveat nel report:
+**“lega ignota” non e' un divieto e non e' giudicabile dal gate**. I 2 ordini
+del 20/09 (bet #43 AH, #44 1X2) NON sono una prova di bypass: allora la riga
+`matches` esisteva e la lega era nota.
+
+**3) MISURA REALE IN PRODUZIONE (24/09/2026, 19:35 UTC, sola lettura).**
+Modulo copiato in `/tmp` e rimosso a fine misura (`PYTHONPATH=/app`): il file
+NON e' deployato (e' uncommitted), quindi la misura non ha richiesto un push.
+
+* **24h**: 40 partite analizzate (blocked 33, probation 7) | **114 segnali**
+  (1X2 21, OU 52, AH 41) | **0 giocabili** | 112 scartati per **league_blocked**
+  + 2 `odds_max` | leghe scartate: Africa Cup of Nations 61, UEFA Nations
+  League 50, Major League Soccer 2, Primera A 1 | **0 ordini**, 0 decisioni,
+  1 scarto liquidita'.
+  -> Conferma la diagnosi: la finestra delle **nazionali** (AFCON + Nations
+  League = 111 delle 114 righe) e' l'unico motivo di stop; **nessuno scarto per
+  edge/EV/fascia quota**. Le leghe ammesse non sono dormienti (Brasileirao 6,
+  MLS 1 analizzate): la rotazione a 7gg del 24/09 sta funzionando.
+* **7 giorni**: 346 partite analizzate (**unknown 300**) | 526 segnali | 13
+  giocabili (**tutti con lega non attribuibile**) | 512 scartati (`odds_max`
+  272, `league_blocked` 134, `ev_low` 86, altri) | **2 ordini live** (20/09,
+  stake 2.0) | 2 decisioni `approve` | 11 scarti liquidita'. **387 righe senza
+  lega attribuibile**: su quelle il gate non e' giudicabile (caveat dichiarato).
+
+**4) LA LEZIONE**: il gate leghe e' il collo di bottiglia, ma la sua misura va
+letta con il periodo giusto — nelle 24h il 97% degli scarti e' una **finestra
+contingente** (nazionali), non una soglia; e i numeri sulle righe con lega
+persa dal pruning **non provano nulla** su oggi. Il KPI da guardare quando i
+campionati di club tornano in calendario e' la riga 2, non il conteggio degli
+scarti.
+
+### Fase 1 — Diagnostica "downtime" (25/09/2026): NESSUN guasto, il fermo e' operativo
+
+Richiesta del proprietario: capire la causa del downtime (log hosting, API
+del bookmaker, integrita' DB). Esito: **non c'e' downtime tecnico**. Il
+servizio e' online, il bot gira, e **nessuno dei tre sospetti era la causa**.
+
+**1) LOG HOSTING — nessun crash, nessun riavvio, nessun loop.** Deploy attivo
+`8c9b0d1` (24/09 18:10 UTC) SUCCESS; PID 1 `python run_all.py` vivo da
+**6.36 h** (nessun "Bot avviato"/"Adding job" nelle ultime 2h); ultime 500
+righe: **0 ERROR, 0 Traceback**. Unica WARNING ricorrente: leghe non mappate a
+SPORTS_MAP (LigaPro, Primera A) → insaldabili per scelta, costo 0 crediti.
+
+**2) API BOOKMAKER/EXCHANGE — tutte valide.** Nota: **Betfair e' stato rimosso
+dal progetto il 06/09** e **Pinnacle non e' un'API integrata** (e' lo sharp di
+riferimento letto via the-odds-api). Gli attori reali sono tre e sono sani:
+SX Bet (provider `sxbet`, `dry_run: false`, **33.5535 USDC** disponibili,
+escrow 0 → credenziali valide), the-odds-api (**412 crediti**, reset 01/10,
+consumo misurato 11.4/g vs 82.4/g sostenibili, **0 × 429/403**), Telegram
+(`getMe` **HTTP 200** su @Calcifrrbot → token valido, nessun 409 conflict).
+
+**3) INTEGRITA' DB — pulita.** `/app/data/quotaverace.db` (6.28 MB):
+**`quick_check` = ok, `integrity_check` = ok**, `journal_mode = delete`,
+**nessun `-wal`/`-journal` pendente** → nessuna transazione interrotta, nessun
+lock. Migrazioni tutte applicate. Disco volume 250 MB liberi (42% usato).
+
+**4) LA CAUSA VERA: 5 giorni senza ordini** (ultima bet #44 del 20/09 12:00;
+ultima riga della catena `decisions` 20/09 12:25). Le 207 predictions aperte
+sono **tutte `rejected`**: zero candidati giocabili. Rifiuti delle ultime 2h:
+Africa Cup of Nations 86, UEFA Nations League 64, Brasileiro Serie B 13,
+Primera A 11 — motivo sempre **EV negativo** (da -2.3% a -27.8%), mai edge,
+fascia quota o liquidita'. Le 9 `strong_value` "senza lega" degli ultimi 6
+giorni sono tutte **chiuse del 19-20/09**: non sono un collo di bottiglia
+attivo. Nessun blocco: kill switch `live`, provider pronto, settlement attivo,
+stop-loss solo riferimento, CB2 non armato.
+
+**5) ANOMALIA DI CONFIGURAZIONE**: `DECISION_SHADOW_PERSIST = '1'` e'
+**impostata su Railway** (la memoria la registrava come default OFF). Oggi non
+fa nulla (0 segnali giocabili → 0 scritture, `decisions` fermo a 4 righe), ma
+quando il flusso ripartira' la shadow mode inizio' a scrivere su `decisions`.
+
+### Fase 2 — Sbloccare il flusso: la rotazione non catturava le odds (25/09/2026)
+
+Direttiva del proprietario su quattro voci di "scalabilita'": dopo la
+verifica, **tre erano gia' implementate** (value betting = il core; Kelly
+dinamico in 4 moduli; ML+dropping odds attivi) e le scelte prese sono state
+**flusso prima**, **Kelly parametrizzabile**, **niente multisport**, **niente
+xG** (prima il campione).
+
+**1) LA MISURA CHE HA TROVATO IL VERO COLLO DI BOTTIGLIA.** Le cache quote
+delle leghe core erano state riscritte 2,5 giorni fa con **`payload: []`** e
+`remaining: 452`: la chiamata RIUSCIVA e restituiva zero partite. Test diretto
+sull'API reale (finestra `now` → `now`+7gg):
+
+| lega | eventi | note |
+|---|---|---|
+| MLS | **15** | kickoff 26/09 |
+| Liga MX | **9** | kickoff 26/09 |
+| UEFA Nations League | **38** | kickoff 25/09 |
+| Serie A / Bundesliga / La Liga / Eredivisie | **0** | 7 giorni di distanza |
+| Brasileirao / Argentina Primera / AFCON | **0** | idem |
+
+Le leghe sono tutte `active=True` su `/v4/sports`: non e' copertura. La
+spiegazione e' il **tempo di pubblicazione**: the-odds-api pubblica le odds con
+**1-3 giorni** di anticipo. E due scoperte operative:
+- **le chiamate VUOTE non addebitano credito** (4 chiamate vuote → `remaining`
+  invariato a 412; -1 su ognuna delle 3 con dati): il costo lo fanno le leghe
+  che HANNO partite, non il numero di interrogazioni;
+- conseguenza del profilo del 24/09 (**finestra 7gg E rotazione 7gg**): una lega
+  interrogata il giorno X non vedeva **mai** le partite del weekend X+4 (odds
+  pubblicate a X+2) e alla successiva interrogazione (X+7) erano passate →
+  **zero candidati per sempre**, qualunque soglia di edge/EV. Da qui il crollo
+  delle analisi: 137 il 20/09 → 24 il 25/09.
+
+**2) FIX — le 20 leghe AMMESSE a 2 GIORNI (`odds_api.SPORTS_INTERVAL_DAYS`).**
+MISURA del tetto crediti (invariante `cost = Σ(30/intervallo) <= 460`):
+attuale **190.6**; con le ammesse a 2gg **370.6** ✓; a 1gg **670.6** ✗. Quindi
+**2 giorni e' il massimo sostenibile**. Serie A e La Liga (non ammesse) restano
+a 3gg, coppe 7gg, resto 30gg.
+**Env:** `ODDS_DAILY_BUDGET` da 8 a **16** (20 leghe a 2gg ≈ 10 dovute/giorno:
+con 8 meta' verrebbero rinviate; l'env e' gia' in `preserve()`).
+
+**3) TRIPWIRE.** `test_rotazione_crediti` (EPL e Turchia 3/7gg → **2gg**),
+`test_leghe_ammesse_mai_dormienti` ora asserisce **uguaglianza a 2gg** (un
+allargamento a 1gg, che sfonda il tetto, deve rompere il test),
+`test_stagger_spalma_le_leghe_core` verifica che le 20 ammesse coprano
+ENTRAMBE le fasi (0 e 1) — se cadessero tutte nello stesso giorno meta' dei
+giorni sarebbe a zero analisi. Due test dipendevano dall'ordinamento per
+intervallo: `test_budget_giornaliero_cap` ora verifica che la lega scelta abbia
+l'intervallo MINIMO (non piu' il nome "Serie A", che non e' un contratto) e
+`test_fetch_analizza_anche_squadre_sconosciute` alza il budget nel test (con
+cache vuota tutte le leghe sono dovute e il tetto tagliava fuori la lega
+esercitata).
+
+**4) KELLY PARAMETRIZZABILE.** `KELLY_MIN/MAX_FRACTION` erano **gia'** da env;
+ora lo sono anche **`KELLY_BASE_FRACTION`** (0.25, usato nel CALCOLO alla riga
+90 e nei messaggi), **`DRAWDOWN_THRESHOLD`** (0.10) e **`DRAWDOWN_REDUCTION`**
+(0.50). Nuovo `_ratio_env()`: clamp in [0, 1] con fallback al default e
+**warning** per valori impossibili (mai in silenzio), piu' allineamento
+`MAX >= MIN`. ⚠️ **Il floor dell'exchange (1 USDC) prevale su qualunque
+frazione finche' il bankroll resta sotto ~50-100 USDC** (soglie misurate il
+17/09: il cap morde da 50.25 USDC per strong_value e 100.50 per value):
+parametrizzare il Kelly oggi NON cambia una singola puntata con 33.55 USDC.
+**IaC**: aggiunte in `preserve()` `KELLY_BASE_FRACTION`, `DRAWDOWN_THRESHOLD`,
+`DRAWDOWN_REDUCTION`, `STAKE_MIN_EUR`, `STAKE_STEP_EUR`, `BET_STAKE_EUR`.
+⚠️ Trovato un **nome divergente**: `auto_bet` legge `MIN_STAKE_EUR` (floor
+1.0) mentre `adaptive_staking` legge `STAKE_MIN_EUR` (0.01) — IaC ne
+dichiarava solo il primo, quindi il secondo sarebbe stato distrutto da
+`railway config apply`. Ora entrambi sono dichiarati.
+
+**5) VERIFICHE**: **673 test verdi** nei lotti mirati (`test_odds_api`,
+`test_adaptive_staking`, `test_decision_limits` 86 · `test_flow_measure`,
+`test_liquidity_monitor`, `test_value_filter`, `test_league_gate` 130 ·
+`test_auto_bet`×3, `test_favourites_only`, `test_risk_guards`,
+`test_t60_breakers`, `test_league_gate_impact`, `test_market_calib`,
+`test_tier` 251 · `test_bot`, `test_settlement_*`, `test_scores_parsing`,
+`test_secret_hygiene`, `test_decision_*` 206);
+`railway config plan` = **0 to add, 1 to change, 0 to destroy**; 0 marker di
+conflitto nel progetto; `compileall` OK.

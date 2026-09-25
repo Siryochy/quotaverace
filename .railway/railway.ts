@@ -40,11 +40,26 @@ export default defineRailway(() => {
     // 2% per singola operazione (value e strong_value). Il floor exchange
     // MIN_STAKE_EUR=1.0 (minimo ordine SX Bet in USDC) resta invariato.
     AUTO_BET_STAKE_MODE: preserve(),
+    // Kelly parametrizzabile (25/09): la frazione dinamica si tara da env
+    // SENZA toccare la formula. KELLY_BASE_FRACTION e' il punto di partenza
+    // (default 0.25), KELLY_MIN/MAX limitano l'intervallo (0.05-0.40);
+    // DRAWDOWN_* governano la protezione dal drawdown.
     KELLY_MIN_FRACTION: preserve(),
     KELLY_MAX_FRACTION: preserve(),
+    KELLY_BASE_FRACTION: preserve(),
+    DRAWDOWN_THRESHOLD: preserve(),
+    DRAWDOWN_REDUCTION: preserve(),
     STAKE_CAP_PCT: preserve(),
     STAKE_CAP_PCT_STRONG: preserve(),
+    // ⚠️ DUE nomi distinti nel codice: `MIN_STAKE_EUR` (auto_bet = floor
+    // dell'exchange, default 1.0) e `STAKE_MIN_EUR` (adaptive_staking =
+    // arrotondamento, default 0.01). Prima era dichiarato solo il primo:
+    // il secondo, se impostato su Railway, sarebbe stato distrutto da
+    // `railway config apply`.
     MIN_STAKE_EUR: preserve(),
+    STAKE_MIN_EUR: preserve(),
+    STAKE_STEP_EUR: preserve(),
+    BET_STAKE_EUR: preserve(),
     // Cap severo (11/09): il floor exchange non puo' alzare lo stake oltre
     // il cap per singola bet. Con STAKE_CAP_HARD=1 (default) una bet il cui
     // stake cappato e' sotto il minimo ordine viene SALTATA: con wallet

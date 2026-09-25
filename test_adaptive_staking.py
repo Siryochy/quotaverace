@@ -148,5 +148,64 @@ class TestAdaptiveStake:
         assert r_big["stake"] >= r_small["stake"] * 9.0
 
 
+# --- Parametrizzazione da env (25/09/2026) ---
+
+class TestParametrizzazioneKelly:
+    """La frazione di Kelly e la protezione dal drawdown si tarano da env
+    SENZA toccare la formula.
+
+    Direttiva del proprietario (Fase 2): «Kelly parametrizzabile da env».
+    Qui si difende il contratto: i default restano quelli documentati e la
+    lettura dall'ambiente non accetta valori impossibili.
+    """
+
+    def test_default_invariati(self):
+        """I default di codice non cambiano (0.25 / 0.05-0.40 / 0.10 / 0.50)."""
+        from adaptive_staking import (
+            BASE_KELLY_FRACTION, MIN_KELLY_FRACTION, MAX_KELLY_FRACTION,
+            DRAWDOWN_THRESHOLD, DRAWDOWN_REDUCTION,
+        )
+        assert BASE_KELLY_FRACTION == 0.25
+        assert MIN_KELLY_FRACTION == 0.05
+        assert MAX_KELLY_FRACTION == 0.40
+        assert DRAWDOWN_THRESHOLD == 0.10
+        assert DRAWDOWN_REDUCTION == 0.50
+
+    def test_ratio_env_legge_il_valore(self, monkeypatch):
+        from adaptive_staking import _ratio_env
+        monkeypatch.setenv("KELLY_BASE_FRACTION", "0.15")
+        assert _ratio_env("KELLY_BASE_FRACTION", 0.25) == 0.15
+
+    def test_ratio_env_variabile_assente_usa_default(self, monkeypatch):
+        from adaptive_staking import _ratio_env
+        monkeypatch.delenv("KELLY_BASE_FRACTION", raising=False)
+        assert _ratio_env("KELLY_BASE_FRACTION", 0.25) == 0.25
+
+    @pytest.mark.parametrize("valore", ["-0.1", "1.5", "2", "abc", "", "  "])
+    def test_ratio_env_valori_impossibili_usan_default(self, monkeypatch, valore):
+        """Fuori [0,1] o non numerico: il default vince (mai una frazione
+        di Kelly > 1 o un drawdown negativo)."""
+        from adaptive_staking import _ratio_env
+        monkeypatch.setenv("KELLY_BASE_FRACTION", valore)
+        assert _ratio_env("KELLY_BASE_FRACTION", 0.25) == 0.25
+
+    def test_estremi_ammessi(self, monkeypatch):
+        """0 e 1 sono valori legittimi (Kelly nullo / pieno, drawdown totale)."""
+        from adaptive_staking import _ratio_env
+        monkeypatch.setenv("KELLY_BASE_FRACTION", "1")
+        assert _ratio_env("KELLY_BASE_FRACTION", 0.25) == 1.0
+        monkeypatch.setenv("KELLY_BASE_FRACTION", "0")
+        assert _ratio_env("KELLY_BASE_FRACTION", 0.25) == 0.0
+
+    def test_decision_limits_segue_la_fonte(self):
+        """La catena `decision/` non copia i valori: li LEGGE dal modulo di
+        staking (una sola fonte, nessuna divergenza silenziosa)."""
+        from adaptive_staking import MIN_KELLY_FRACTION, MAX_KELLY_FRACTION
+        from decision.limits import RiskLimits
+        limits = RiskLimits.from_env()
+        assert limits.kelly_min == MIN_KELLY_FRACTION
+        assert limits.kelly_max == MAX_KELLY_FRACTION
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

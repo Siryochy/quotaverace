@@ -52,10 +52,15 @@ def test_rotazione_crediti():
     """Ogni lega ha un intervallo esplicito e il costo mensile sta nel
     piano free the-odds-api (500 crediti/mese)."""
     from odds_api import interval_for_sport, SPORTS_INTERVAL_DAYS
-    # Profilo 24/09/2026: top campionati a 3gg, TUTTE le leghe ammesse dalla
-    # strategia a 7gg, il resto (es. UEFA Nations League) a 30gg = dormiente.
-    assert interval_for_sport("soccer_epl") == 3
-    assert interval_for_sport("soccer_turkey_super_league") == 7
+    # Profilo 25/09/2026: le 20 leghe AMMESSE stanno a 2gg — l'API pubblica le
+    # odds con 1-3 giorni di anticipo, quindi con rotazione a 7gg una lega
+    # interrogata il giorno X non vedeva MAI le partite del weekend X+4
+    # (misurato: a 7 giorni Serie A/Bundesliga/La Liga/Eredivisie a 0 eventi,
+    # mentre MLS 15 e Liga MX 9 nella stessa finestra), e alla successiva
+    # interrogazione (X+7) erano passate -> zero candidati per sempre.
+    # Il resto resta dormiente (es. UEFA Nations League a 30gg).
+    assert interval_for_sport("soccer_epl") == 2
+    assert interval_for_sport("soccer_turkey_super_league") == 2
     assert interval_for_sport("soccer_uefa_nations_league") == 30
     # ogni lega in SPORTS_MAP deve avere un intervallo ESPLICITO
     # (niente default silenziosi: prima "Chile Primera" finiva a 1 = 30/mese)
@@ -74,14 +79,23 @@ def test_leghe_ammesse_mai_dormienti():
     calendario non venivano mai interrogate, quindi non potevano produrre
     alcun candidato qualunque fosse la soglia di edge/EV. Dal 11/09 nelle
     20 leghe ammesse c'e' una sola prediction su 688 righe di ledger.
+
+    Secondo difetto misurato il 25/09/2026: a 7gg la rotazione NON cattura le
+    odds, perche' l'API le pubblica con 1-3 giorni di anticipo. Le ammesse
+    stanno quindi a **2 giorni** — che e' anche il massimo sostenibile dal
+    tetto crediti (costo mensile teorico 371/460; a 1gg sarebbe 671, vedi
+    `test_budget_mensile_piano_free`). L'uguaglianza a 2 e' voluta: un
+    allargamento (o un restringimento a 1gg che sfonda il tetto) deve
+    rompere il test, non passare in silenzio.
     """
     from odds_api import SPORTS_INTERVAL_DAYS
     import value_filter as vf
     for lg in list(vf.STRATEGY_LEAGUES) + sorted(vf.PROBATION_LEAGUES):
         assert lg in SPORTS_INTERVAL_DAYS, f"{lg} senza intervallo"
-        assert SPORTS_INTERVAL_DAYS[lg] <= 7, (
-            f"{lg} e' dormiente ({SPORTS_INTERVAL_DAYS[lg]}gg): le leghe "
-            "ammesse devono essere interrogate almeno ogni 7 giorni")
+        assert SPORTS_INTERVAL_DAYS[lg] == 2, (
+            f"{lg} e' a {SPORTS_INTERVAL_DAYS[lg]}gg: le leghe ammesse devono "
+            "stare a 2 giorni (le odds nascono 1-3 giorni prima del kickoff; "
+            "il tetto crediti non sostiene 1gg)")
 
 
 def test_budget_mensile_piano_free():
@@ -166,6 +180,11 @@ def test_fetch_analizza_anche_squadre_sconosciute(monkeypatch, tmp_path):
     tracker.init_db()
     monkeypatch.setattr(fixture_engine, "DATA_DIR", tmp_path)
     monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)  # cache vuota -> tutte dovute
+    # Budget alto: con cache vuota TUTTE le leghe sono "dovute" e il tetto
+    # giornaliero (default 12) taglierebbe il gruppo delle ammesse a 2gg
+    # lasciando fuori la lega che questo test vuole esercitare. Qui il tetto
+    # non e' l'oggetto del test (lo verifica `test_budget_giornaliero_cap`).
+    monkeypatch.setattr(fixture_engine, "DAILY_QUERY_BUDGET", 80)
     monkeypatch.setenv("ODDS_API_KEY", "test-key")
 
     payload = [
@@ -192,7 +211,8 @@ def test_fetch_analizza_anche_squadre_sconosciute(monkeypatch, tmp_path):
 
 def test_budget_giornaliero_cap(monkeypatch, tmp_path):
     """Il tetto giornaliero limita le chiamate API: con budget 1 viene
-    interrogata solo la lega piu' prioritaria (Serie A, intervallo minore)."""
+    interrogata SOLO la lega piu' prioritaria (intervallo minore = le 20
+    leghe ammesse a 2gg dal 25/09; prima del cambio il gruppo a 3gg)."""
     import tracker
     import fixture_engine
     import odds_api
@@ -212,7 +232,11 @@ def test_budget_giornaliero_cap(monkeypatch, tmp_path):
 
     fixture_engine.fetch_and_analyze_today()
     assert len(calls) == 1
-    assert calls[0] == "soccer_italy_serie_a"  # prima per priorita'
+    # La lega scelta deve appartenere al gruppo a intervallo MINIMO (le piu'
+    # importanti): fissare il nome legherebbe il test all'ordine interno di
+    # SPORTS_MAP, che non e' un contratto.
+    minimo = min(odds_api.interval_for_sport(k) for k in SPORTS_MAP.values())
+    assert odds_api.interval_for_sport(calls[0]) == minimo
 
 
 # ---------------------------------------------------------------------------
@@ -227,13 +251,21 @@ def _write_cache(tmp_path, sport_key, ts):
 
 
 def test_stagger_spalma_le_leghe_core():
-    """Le leghe core (intervallo 3) hanno fasi diverse: non scadono tutte
-    lo stesso giorno."""
+    """Le 20 leghe AMMESSE (intervallo 2 dal 25/09) hanno fasi diverse: non
+    scadono tutte lo stesso giorno, altrimenti ci sarebbero giorni di
+    calendario senza nessuna lega giocabile interrogata.
+
+    Con intervallo 2 le fasi possibili sono {0, 1}: il test pretende che
+    ENTRAMBE siano rappresentate (se tutte le leghe cadessero nello stesso
+    giorno, meta' dei giorni sarebbe a zero analisi).
+    """
     import odds_api
-    core = [k for k in SPORTS_MAP.values() if odds_api.interval_for_sport(k) == 3]
-    assert len(core) >= 6
-    fasi = {odds_api._rotation_phase(k, 3) for k in core}
-    assert len(fasi) >= 2, f"tutte le leghe core sincronizzate: fasi {fasi}"
+    import value_filter as vf
+    ammesse = [SPORTS_MAP[lg]
+               for lg in list(vf.STRATEGY_LEAGUES) + sorted(vf.PROBATION_LEAGUES)]
+    assert len(ammesse) >= 15
+    fasi = {odds_api._rotation_phase(k, 2) for k in ammesse}
+    assert fasi == {0, 1}, f"leghe ammesse sincronizzate: fasi {fasi}"
 
 
 def test_stagger_scadenza_sul_giorno_di_fase(monkeypatch, tmp_path):
