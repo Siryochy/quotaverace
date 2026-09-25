@@ -5253,6 +5253,109 @@ risalgano verso le ~100-140/giorno del 19-20/09. Watchdog attivi e verificati
 nei log: `credit_watchdog`, `settlement`, `drift`, `liquidity_monitor`,
 `decision_compare`, `backup`. Il prossimo giro automatico e' alle 04:00 UTC.
 
+### Pivot Top-Down (Steam Chasing): Pinnacle come oracolo — FASE 1 PROBE (25/09/2026)
+
+Direttiva del proprietario: **congelare il modello bottom-up (Poisson)** e
+decidere guardando il MERCATO: Pinnacle come fonte della verita', SX Bet come
+prezzo da confrontare, il ritardo fra i due come unico edge. Nuovo modulo
+`pinnacle_oracle.py` + probe `test_pinnacle_api.py` (branch
+`feature/top-down-pinnacle`). **FASE 1 = probe: nessun ordine, nessuna
+scrittura sul ledger, nessun collegamento alla pipeline.**
+
+**1) TRE COSE MISURATE PRIMA DI SCRIVERE CODICE (non assunte).**
+- **Pinnacle e' GIA' nel payload che paghiamo**: la fetch quote usa
+  `regions=eu` SENZA filtro `bookmakers`. Verificato sulle cache di
+  produzione: **9 leghe su 9** hanno Pinnacle. Aggiungere
+  `bookmakers=pinnacle` non compra dati nuovi — riduce il payload. Il costo
+  marginale dell'oracolo e' quindi **ZERO** se si estrae dalla fetch che
+  facciamo gia'.
+- **Il de-vig esiste gia'**: `market_calib.devig` con `multiplicative` /
+  `power` / `shin` + `market_implied`. Nessuna formula duplicata: `power`
+  (default del progetto) corregge il favourite-longshot bias — alza la
+  probabilita' del favorito **rispetto al proporzionale** e abbassa il
+  longshot (misurato: 1.75/3.60/4.50 -> p1 0.5483 con power, 0.5333 con
+  multiplicative).
+- **La cadenza e' il vincolo, non l'estrazione** (vedi punto 3).
+
+**2) PROBE ESEGUITO SUI DATI REALI (container, 25/09, `/tmp` isolato e poi
+rimosso: la produzione non e' stata toccata).**
+- `--from-cache` (**0 crediti**): 9 leghe, **65 partite, 62 con un 1X2
+  Pinnacle COMPLETO (95,4%)**, overround misurato **3,8-5,4%** (MLS 15/15,
+  League Two 12/12, Liga MX 9/9, Bundesliga 2 9/9, League One 7/7, Primeira
+  Liga 7/10, K League 1 1/1, Brazil B 1/1, Superettan 1/1).
+  → L'oracolo e' **disponibile e gratis** sulle partite che gia' analizziamo.
+- `--live soccer_usa_mls` (**1 credito**): status 200, 16 eventi, **15 con 1X2
+  Pinnacle completo**, `x-requests-last = 1`, crediti **402**.
+- `--live soccer_italy_serie_a` (lega **senza partite** in finestra): status
+  200, **0 eventi**, `x-requests-last = 0`, crediti **402** (invariati).
+  → **Le chiamate vuote NON addebitano**: il costo dipende dalle leghe che
+  HANNO partite, non dal numero di interrogazioni. E' il numero che rende
+  sostenibile (o no) un job di confronto.
+
+**3) VERDETTO DI SOSTENIBILITA' (conti con i numeri sopra).** Un job di
+confronto "in tempo reale" **ogni 5 minuti e' insostenibile**: 1 lega ogni 5'
+= 288 chiamate/giorno contro un budget di ~500/mese (~16/giorno). Il piano
+free impone la forma della pipeline:
+- **percorso primario = cache** (`--from-cache`, 0 crediti): l'oracolo si
+extrae dal payload che la rotazione analisi scarica gia';
+- **percorso live = diagnostica**, budgettizzato: il costo e' 1 credito per
+  lega-con-partite. Con le ~3 leghe/giorno che hanno partite (misura del
+  25/09), un controllo a T-60 costerebbe ~3 crediti per passata.
+- Conseguenza: **il confronto SX-vs-Pinnacle in fase 2 deve leggere Pinnacle
+dalla cache**, non chiamare l'API a ogni giro.
+
+**4) GATE EV: UNA SOLA DEFINIZIONE.**
+    EV = p_true x (quota - 1) - (1 - p_true)
+Le due letture della direttiva **coincidono esattamente**:
+    EV >= ev_min   <=>   quota >= true_odd x (1 + ev_min)
+(`true_odd` = 1/p_true). `required_price` espone la seconda forma e un test
+verifica l'equivalenza su ogni riga: e' l'invariante che impedisce due
+standard diversi nella stessa pipeline. `ev_min` di default e' **lo stesso
+`value_filter.EV_MIN` di produzione** (importato, mai copiato; tripwire).
+
+**5) FAIL-CLOSED SCELTI (non default).**
+- Per de-vigare un 1X2 servono **tutti e tre** gli esiti: con due su tre il
+margine dell'esito mancante verrebbe attribuito agli altri in silenzio ->
+  `None` (nessun oracolo invece di un oracolo distorto). Misurato: 62/65.
+- Le righe con quota <= 1.0 sono scartate; `fair_odds` accetta solo
+  probabilita' in (0, 1] (un valore > 1 invertirebbe il segno dell'EV).
+- Un `price_lookup` che esplode **non** viene inghiottito: si CONTA
+  (`totals["price_errors"]`) e si dichiara, perche' "lettura rotta" non deve
+  leggersi come "zero value" (lezione del probe BTTS di oggi, dove
+  `_discover_type` rendeva indistinguibili i due casi).
+
+**6) TRIPWIRE (il pivot e' esplicito, e i test lo difendono).**
+`test_pinnacle_api.py` (**47 verdi offline** + 1 live opt-in con
+`PINNACLE_PROBE=1`) verifica che il modulo NON contenga: riferimenti al motore
+statistico (`poisson_engine`, `expected_goals`, `prob_1x2`, `prob_btts`,
+`ah_outcome_probs`, `ou_outcome_probs`), istruzioni di scrittura
+(`save_prediction`/`save_bet`/`save_market_quotes`/`sqlite3`/`INSERT`/`UPDATE`),
+ne' ordini (`_live_fill`/`place_order`/`resolve_market_for`/
+`execution_engine`/`auto_bet`); che nessun import di rete stia a livello
+modulo; e che **importare `pinnacle_oracle` non carichi** poisson/tracker/bot/
+auto_bet/decision (verifica in sottoprocesso).
+
+**7) CLI.**
+  `venv/bin/python pinnacle_oracle.py --from-cache [--json]`  (0 crediti)
+  `venv/bin/python pinnacle_oracle.py --live SPORT_KEY`          (1 credito)
+
+**⚠️ STATO: NON collegato alla produzione.** `auto_bet` e `multi_market`
+continuano col percorso attuale; il **bypass di Poisson non e' attivo** (e'
+una decisione di pipeline, fase 2, non un effetto collaterale di una funzione
+di lettura). Il branch `feature/top-down-pinnacle` **non e' pushato**: la
+sessione si chiude in attesa dei dati di fine mese.
+⚠️ Promemoria di lavorazione: il filtro **era/fascia quota** su
+`shadow_report`/`market_diagnose` (sviluppato e verificato il 25/09: comando
+`--since 2026-09-19 --odds-min 1.30 --odds-max 1.80` su entrambi, 164+171 test
+verdi, 7 file +650/-18) e' **ancora nello `stash@{0}`** in attesa del push su
+`main`: va ripreso da li', non riscritto.
+
+**PROSSIMO PASSO (fase 2, da decidere):** collegare SX Bet come prezzo di
+confronto (`price_lookup` iniettabile, gia' previsto dall'interfaccia) e
+girare il confronto **sulle cache** per misurare quanti candidati value genera
+il ritardo SX-vs-Pinnacle. Solo dopo ha senso parlare di bypass del modello e
+di ordini.
+
 ### Espansione orizzontale (OU/BTTS): verdetto d'era + sentinella BTTS (25/09/2026)
 
 Direttiva del proprietario: estrarre piu' valore dalle partite gia' analizzate

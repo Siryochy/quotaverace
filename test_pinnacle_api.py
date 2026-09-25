@@ -1,0 +1,492 @@
+"""test_pinnacle_api.py — probe del modello TOP-DOWN (Pinnacle = oracolo).
+
+Tutti i test sono OFFLINE per default: payload finti costruiti a mano, cache in
+`tmp_path`, **zero rete, zero crediti, zero ordini**. L'unico test che tocca
+davvero the-odds-api e' marcato `integration` ed e' doppio-opt-in (serve
+`PINNACLE_PROBE=1`): costa 1 credito e serve a MISURARE `x-requests-last`,
+cioe' a rispondere con un numero alla domanda "quanto costa il confronto
+continuo?" invece che con un'opinione.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+
+import pytest
+
+import pinnacle_oracle as po
+
+
+# ---------------------------------------------------------------------------
+# Payload finti (stessa forma di the-odds-api v4 /odds)
+# ---------------------------------------------------------------------------
+
+def _book(key, title, home, away, prices):
+    outcomes = []
+    for name, price in zip((home, "Draw", away), prices):
+        if price is not None:
+            outcomes.append({"name": name, "price": price})
+    return {"key": key, "title": title, "last_update": "2026-09-25T10:00:00Z",
+            "markets": [{"key": "h2h", "last_update": "2026-09-25T10:00:00Z",
+                         "outcomes": outcomes}]}
+
+
+def _match(home, away, books, kickoff="2026-09-26T19:00:00Z"):
+    return {"id": f"id-{home}", "sport_key": "soccer_usa_mls",
+            "commence_time": kickoff, "home_team": home, "away_team": away,
+            "bookmakers": books}
+
+
+def _payload():
+    return [
+        # oracolo completo + un book non-sharp (non deve mai essere usato)
+        _match("Atlanta United", "Toronto FC", [
+            _book("pinnacle", "Pinnacle", "Atlanta United", "Toronto FC",
+                  (1.75, 3.60, 4.50)),
+            _book("draftkings", "DraftKings", "Atlanta United", "Toronto FC",
+                  (1.60, 3.90, 5.50)),
+        ]),
+        # nessun book sharp
+        _match("Inter Miami", "New York City", [
+            _book("draftkings", "DraftKings", "Inter Miami", "New York City",
+                  (2.10, 3.40, 3.20)),
+        ]),
+        # sharp incompleto: un prezzo e' <= 1.0 -> resta senza oracolo
+        _match("Columbus Crew", "Chicago Fire", [
+            _book("pinnacle", "Pinnacle", "Columbus Crew", "Chicago Fire",
+                  (1.95, 3.50, 1.0)),
+        ]),
+        # assenza di mercato h2h (solo totals)
+        {"id": "id-only-totals", "sport_key": "soccer_usa_mls",
+         "commence_time": "2026-09-26T19:00:00Z",
+         "home_team": "Seattle Sounders", "away_team": "Portland Timbers",
+         "bookmakers": [{"key": "pinnacle", "title": "Pinnacle",
+                         "markets": [{"key": "totals", "outcomes": [
+                             {"name": "Over", "price": 1.9,
+                              "point": 2.5}]}]}]},
+    ]
+
+
+PINNACLE = {"1": 1.75, "X": 3.60, "2": 4.50}
+
+
+# ---------------------------------------------------------------------------
+# 1. ESTRAZIONE
+# ---------------------------------------------------------------------------
+
+class TestEstrazione:
+    def test_estrae_il_1x2_completo_di_pinnacle(self):
+        assert po.pinnacle_quotes(_payload(), "Atlanta United",
+                                  "Toronto FC") == PINNACLE
+
+    def test_ignora_i_book_non_sharp(self):
+        # DraftKings e' presente: se venisse usato le quote sarebbero altre.
+        got = po.pinnacle_quotes(_payload(), "Atlanta United", "Toronto FC")
+        assert got is not None and got["1"] == 1.75
+
+    def test_senza_pinnacle_nessun_oracolo(self):
+        assert po.pinnacle_quotes(_payload(), "Inter Miami",
+                                  "New York City") is None
+
+    def test_fail_closed_con_due_esiti_su_tre(self):
+        """Due esiti su tre NON sono un oracolo: il margine del terzo
+        verrebbe attribuito agli altri due, in silenzio."""
+        assert po.pinnacle_quotes(_payload(), "Columbus Crew",
+                                  "Chicago Fire") is None
+
+    def test_mercato_diverso_da_h2h_non_e_oracolo(self):
+        assert po.pinnacle_quotes(_payload(), "Seattle Sounders",
+                                  "Portland Timbers") is None
+
+    def test_partita_inesistente(self):
+        assert po.pinnacle_quotes(_payload(), "Non Esiste", "Nemmeno") is None
+
+    def test_normalizzazione_di_maiuscole_e_spazi(self):
+        assert po.pinnacle_quotes(_payload(), "  atlanta   united ",
+                                  "TORONTO FC") == PINNACLE
+
+    def test_riconoscimento_sharp_su_key_o_titolo(self):
+        assert po.is_sharp("pinnacle")
+        assert po.is_sharp("Pinnacle")
+        assert po.is_sharp("PINNACLE")
+        assert not po.is_sharp("draftkings")
+        assert not po.is_sharp("")
+        assert not po.is_sharp(None)
+
+    def test_riconoscimento_sharp_sul_titolo_quando_la_key_e_ignota(self):
+        bm = _book("unknown-book", "PINNACLE", "A", "B", (1.9, 3.3, 4.0))
+        bm["key"] = None                       # solo il titolo e' affidabile
+        assert po.is_sharp(bm.get("key") or bm.get("title")) is True
+
+    def test_iter_ritorna_solo_le_partite_con_oracolo_completo(self):
+        hits = po.iter_pinnacle_markets(_payload())
+        assert len(hits) == 1
+        match, quotes = hits[0]
+        assert match["home_team"] == "Atlanta United"
+        assert quotes == PINNACLE
+
+    def test_payload_ostile_non_solleva(self):
+        for weird in (None, [], [None], ["x"], [{"bookmakers": "nope"}],
+                      [{"home_team": "A", "bookmakers": [None, 42]}],
+                      [{"home_team": "A", "away_team": "B",
+                        "bookmakers": [{"key": "pinnacle",
+                                         "markets": [None, 7]}]}]):
+            assert isinstance(po.iter_pinnacle_markets(weird), list)
+        assert po.pinnacle_quotes(["x", None], "A", "B") is None
+        assert po.pinnacle_quotes(None, "A", "B") is None
+
+
+# ---------------------------------------------------------------------------
+# 2. TRUE PROBABILITY (de-vig)
+# ---------------------------------------------------------------------------
+
+class TestTrueProbability:
+    def test_le_probabilita_fair_sommano_a_uno(self):
+        probs = po.true_probabilities(PINNACLE)
+        assert probs is not None
+        assert abs(sum(v for k, v in probs.items() if k != "overround")
+                   - 1.0) < 1e-9
+
+    def test_l_overround_e_il_margine_grezzo_e_sparisce_dalle_fair(self):
+        probs = po.true_probabilities(PINNACLE)
+        raw = sum(1.0 / o for o in PINNACLE.values())
+        assert probs["overround"] == pytest.approx(raw, abs=1e-4)
+        assert raw > 1.0                       # il vig c'e'
+        # togliendo il vig la somma torna 1: la probabilita' e' "vera"
+        assert sum(v for k, v in probs.items() if k != "overround") == \
+            pytest.approx(1.0, abs=1e-9)
+
+    def test_power_corregge_il_favourite_longshot_bias(self):
+        """E' la ragione per cui il default e' `power`.
+
+        Il devig power non "alza" la probabilita' del favorito rispetto a
+        quella implicita grezza (il vig va comunque tolto): alza la sua QUOTA
+        rispetto al devig proporzionale, togliendo margine al longshot.
+        """
+        power = po.true_probabilities(PINNACLE, method="power")
+        prop = po.true_probabilities(PINNACLE, method="multiplicative")
+        assert power["1"] > prop["1"]          # il favorito sale
+        assert power["2"] < prop["2"]          # il longshot scende
+        assert power["1"] < 1.0 / PINNACLE["1"]  # il vig e' comunque tolto
+        assert abs(power["1"] - 0.5483) < 5e-4   # valore misurato
+
+    def test_default_e_power_coerente_con_il_progetto(self):
+        from market_calib import market_implied
+        assert po.DEVIG_METHOD == "power"
+        assert po.true_probabilities(PINNACLE) == market_implied(PINNACLE)
+
+    def test_metodo_shin_accettato(self):
+        probs = po.true_probabilities(PINNACLE, method="shin")
+        assert probs is not None
+        assert abs(sum(v for k, v in probs.items() if k != "overround")
+                   - 1.0) < 1e-6
+
+    def test_metodo_multiplicativo_accettato(self):
+        probs = po.true_probabilities(PINNACLE, method="multiplicative")
+        assert abs(probs["1"] - (1 / 1.75) / (1 / 1.75 + 1 / 3.6 + 1 / 4.5)) \
+            < 1e-9
+
+    def test_meno_di_tre_esiti_non_e_un_oracolo(self):
+        assert po.true_probabilities({"1": 1.75, "X": 3.6}) is None
+        assert po.true_probabilities({}) is None
+        assert po.true_probabilities(None) is None
+
+    def test_true_odd_e_l_inverso_della_probabilita(self):
+        probs = po.true_probabilities(PINNACLE)
+        fair = po.fair_odds(probs)
+        assert fair["1"] == pytest.approx(1.0 / probs["1"], abs=1e-9)
+        assert set(fair) == {"1", "X", "2"}    # 'overround' NON e' un esito
+
+    def test_fair_odds_ignora_valori_non_interpretabili(self):
+        # input = PROBABILITA' (non quote): un valore > 1 o non numerico non
+        # puo' diventare una "true odd" (invertirebbe il segno dell'EV).
+        assert po.fair_odds({"1": "x", "2": 0.5, "overround": 1.07}) == \
+            {"2": 2.0}
+        assert po.fair_odds({"1": 1.2, "X": 0.0, "2": None}) == {}
+        assert po.fair_odds({}) == {}
+        assert po.fair_odds(None) == {}
+
+
+# ---------------------------------------------------------------------------
+# 3. TRIGGER (EV gate e "True Odd + margine" sono la stessa condizione)
+# ---------------------------------------------------------------------------
+
+EV_MIN = 0.02
+
+
+class TestEvGate:
+    def test_senza_prezzo_non_c_e_valore_da_misurare(self):
+        probs = po.true_probabilities(PINNACLE)
+        rows = po.ev_gate(probs, {}, ev_min=EV_MIN)
+        assert rows == []
+
+    def test_le_due_letture_della_direttiva_coincidono(self):
+        """EV >= ev_min  <=>  quota >= true_odd x (1 + ev_min).
+
+        E' l'invariante che impedisce due standard diversi nella stessa
+        pipeline (e il bug classico: due soglie che si scollano).
+        """
+        probs = po.true_probabilities(PINNACLE)
+        prices = {"1": 1.90, "X": 3.45, "2": 4.60}
+        for row in po.ev_gate(probs, prices, ev_min=EV_MIN):
+            required = (1.0 / row["prob"]) * (1.0 + EV_MIN)
+            assert row["trigger"] is (row["ev"] >= EV_MIN)
+            assert row["trigger"] is (row["price"] >= required - 1e-4)
+            assert row["required_price"] == pytest.approx(required, abs=1e-3)
+
+    def test_il_trigger_non_scatta_sotto_il_margine(self):
+        probs = po.true_probabilities(PINNACLE)
+        true_odd_1 = 1.0 / probs["1"]
+        # prezzo sopra la true odd ma sotto la true odd + 2% -> niente segnale
+        under = true_odd_1 * (1.0 + EV_MIN) - 0.01
+        rows = po.ev_gate(probs, {"1": round(under, 3)}, ev_min=EV_MIN)
+        assert rows[0]["ev"] < EV_MIN and rows[0]["trigger"] is False
+        assert rows[0]["price"] < rows[0]["required_price"]
+
+    def test_il_trigger_scatta_sopra_il_margine(self):
+        probs = po.true_probabilities(PINNACLE)
+        over = (1.0 / probs["1"]) * (1.0 + EV_MIN) + 0.05
+        rows = po.ev_gate(probs, {"1": round(over, 3)}, ev_min=EV_MIN)
+        assert rows[0]["trigger"] is True and rows[0]["ev"] > EV_MIN
+
+    def test_ordinati_per_ev_decrescente(self):
+        probs = po.true_probabilities(PINNACLE)
+        rows = po.ev_gate(probs, {"1": 1.90, "X": 3.90, "2": 4.40},
+                          ev_min=EV_MIN)
+        assert [r["ev"] for r in rows] == sorted((r["ev"] for r in rows),
+                                                 reverse=True)
+        assert {r["esito"] for r in rows} == {"1", "X", "2"}
+
+    def test_value_candidates_tiene_solo_i_trigger(self):
+        probs = po.true_probabilities(PINNACLE)
+        prices = {"1": (1.0 / probs["1"]) * 1.10, "X": 3.60, "2": 4.50}
+        cands = po.value_candidates(probs, prices, ev_min=EV_MIN)
+        assert [c["esito"] for c in cands] == ["1"]
+        assert all(c["trigger"] for c in cands)
+
+    def test_prezzo_non_valido_ignorato(self):
+        probs = po.true_probabilities(PINNACLE)
+        rows = po.ev_gate(probs, {"1": 0.95, "X": None, "2": "nope"},
+                          ev_min=EV_MIN)
+        assert rows == []
+
+    def test_soglia_di_default_e_quella_di_produzione(self):
+        from value_filter import EV_MIN as PROD_EV_MIN
+        probs = po.true_probabilities(PINNACLE)
+        default_rows = po.ev_gate(probs, {"1": 1.90})
+        explicit = po.ev_gate(probs, {"1": 1.90}, ev_min=PROD_EV_MIN)
+        assert [r["trigger"] for r in default_rows] == \
+            [r["trigger"] for r in explicit]
+        assert po.DEFAULT_EV_MIN == PROD_EV_MIN
+
+
+# ---------------------------------------------------------------------------
+# 4. PERCORSO A COSTO ZERO (cache gia' scaricate)
+# ---------------------------------------------------------------------------
+
+def _write_cache(folder: Path, sport: str, payload) -> Path:
+    path = folder / f"toa_{sport}.json"
+    path.write_text(json.dumps({"ts": 1, "remaining": 400,
+                                "remaining_ts": 2, "payload": payload}),
+                    encoding="utf-8")
+    return path
+
+
+class TestScanCache:
+    def test_copertura_sulle_cache_finte(self, tmp_path):
+        _write_cache(tmp_path, "soccer_usa_mls", _payload())
+        res = po.scan_cache(tmp_path)
+        assert res["totals"] == {"leagues": 1, "matches": 4,
+                                 "with_pinnacle": 1, "candidates": 0,
+                                 "price_errors": 0}
+        lg = res["leagues"][0]
+        assert lg["sport"] == "soccer_usa_mls"
+        assert lg["with_pinnacle"] == 1 and lg["matches"] == 4
+        assert lg["avg_overround"] > 1.0
+
+    def test_le_cache_dei_punteggi_non_sono_quote(self, tmp_path):
+        _write_cache(tmp_path, "soccer_usa_mls", _payload())
+        (tmp_path / "toa_scores_soccer_usa_mls.json").write_text(
+            json.dumps({"payload": [{"home_team": "A", "away_team": "B"}]}),
+            encoding="utf-8")
+        res = po.scan_cache(tmp_path)
+        assert [lg["sport"] for lg in res["leagues"]] == ["soccer_usa_mls"]
+
+    def test_cache_illeggibile_o_vuota_non_solleva(self, tmp_path):
+        (tmp_path / "toa_rotta.json").write_text("{non-json", encoding="utf-8")
+        _write_cache(tmp_path, "soccer_vuota", [])
+        res = po.scan_cache(tmp_path)
+        assert res["totals"]["leagues"] == 0
+        assert res["totals"]["with_pinnacle"] == 0
+
+    def test_dichiarazione_del_gate(self, tmp_path):
+        _write_cache(tmp_path, "soccer_usa_mls", _payload())
+        gate = po.scan_cache(tmp_path, ev_min=0.03)["gate"]
+        assert gate["ev_min"] == 0.03
+        assert gate["sharp_book"] == "pinnacle"
+        assert gate["devig_method"] == po.DEVIG_METHOD
+
+    def test_senza_price_lookup_nessun_candidato(self, tmp_path):
+        """In fase 1 SX non e' collegato: si misura la COPERTURA, non il P/L."""
+        _write_cache(tmp_path, "soccer_usa_mls", _payload())
+        res = po.scan_cache(tmp_path)
+        assert res["candidates"] == []
+        assert res["totals"]["with_pinnacle"] == 1   # la copertura c'e'
+
+    def test_con_price_lookup_il_candidato_compare(self, tmp_path):
+        _write_cache(tmp_path, "soccer_usa_mls", _payload())
+        res = po.scan_cache(tmp_path, price_lookup=lambda m, e: (
+            2.05 if e == "1" else None))
+        assert res["totals"]["candidates"] == 1
+        cand = res["candidates"][0]
+        assert cand["esito"] == "1" and cand["trigger"] is True
+        assert cand["event"] == "Atlanta United vs Toronto FC"
+        assert cand["sport"] == "soccer_usa_mls"
+
+    def test_price_lookup_basso_non_produce_candidati(self, tmp_path):
+        _write_cache(tmp_path, "soccer_usa_mls", _payload())
+        res = po.scan_cache(tmp_path, price_lookup=lambda m, e: 1.40)
+        assert res["candidates"] == []
+
+    def test_errore_del_lookup_e_contato_non_inghiottito(self, tmp_path):
+        """Un book illeggibile NON deve leggersi come "zero value".
+
+        E' la lezione del probe BTTS (25/09): `_discover_type` inghiottiva
+        l'eccezione e "lettura rotta" diventava indistinguibile da "0 mercati".
+        Qui l'errore si CONTA e si dichiara, e la scansione prosegue.
+        """
+        _write_cache(tmp_path, "soccer_usa_mls", _payload())
+        res = po.scan_cache(tmp_path,
+                            price_lookup=lambda m, e: (_ for _ in ()).throw(
+                                RuntimeError("book giu'")))
+        assert res["totals"]["price_errors"] == 1
+        assert res["totals"]["with_pinnacle"] == 1   # la copertura resta
+        assert res["candidates"] == []               # ma dichiarata incompleta
+        assert po.scan_cache(tmp_path)["totals"]["price_errors"] == 0
+
+    def test_max_leagues_limita_il_lavoro(self, tmp_path):
+        for i in range(3):
+            _write_cache(tmp_path, f"soccer_lega{i}", _payload())
+        assert po.scan_cache(tmp_path, max_leagues=2)["totals"]["leagues"] == 2
+
+    def test_cartella_inesistente_non_solleva(self, tmp_path):
+        res = po.scan_cache(tmp_path / "non-esiste")
+        assert res["totals"]["leagues"] == 0
+
+
+class TestFetchSenzaChiave:
+    def test_senza_chiave_fallisce_senza_toccare_la_rete(self, monkeypatch):
+        monkeypatch.delenv("ODDS_API_KEY", raising=False)
+        res = po.fetch_pinnacle_payload("soccer_usa_mls")
+        assert res["payload"] == [] and res["error"] == "ODDS_API_KEY assente"
+        assert res["status"] is None
+
+    def test_crediti_bloccati_non_chiamano_l_api(self, monkeypatch):
+        monkeypatch.setenv("ODDS_API_KEY", "fake-probe-key")
+        import odds_api
+        monkeypatch.setattr(odds_api, "credits_hard_stopped", lambda: True)
+        res = po.fetch_pinnacle_payload("soccer_usa_mls")
+        assert res["status"] is None and "soglia" in res["error"]
+
+
+class TestCli:
+    def test_from_cache_esce_zero_e_stampa_la_copertura(self, tmp_path,
+                                                         monkeypatch, capsys):
+        _write_cache(tmp_path, "soccer_usa_mls", _payload())
+        monkeypatch.setattr(po, "DATA_DIR", str(tmp_path))
+        assert po.main(["--from-cache"]) == 0
+        out = capsys.readouterr().out
+        assert "ORACOLO PINNACLE" in out and "soccer_usa_mls" in out
+        assert "pinnacle=1" in out
+
+    def test_from_cache_json_ha_i_totali(self, tmp_path, monkeypatch, capsys):
+        _write_cache(tmp_path, "soccer_usa_mls", _payload())
+        monkeypatch.setattr(po, "DATA_DIR", str(tmp_path))
+        assert po.main(["--from-cache", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["totals"]["with_pinnacle"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 5. TRIPWIRE: nessun Poisson, nessuna scrittura, nessun ordine, no rete
+# ---------------------------------------------------------------------------
+
+SOURCE = Path(po.__file__).read_text(encoding="utf-8")
+
+
+class TestTripwire:
+    def test_nessun_ricorso_al_motore_statistico(self):
+        """Il pivot e' esplicito: la decisione NON passa dal modello."""
+        for banned in ("poisson_engine", "expected_goals", "prob_1x2",
+                       "prob_btts", "score_matrix", "ah_outcome_probs",
+                       "ou_outcome_probs"):
+            assert banned not in SOURCE, f"pinnacle_oracle usa {banned}"
+
+    def test_nessuna_scrittura_sul_ledger(self):
+        for banned in ("save_prediction", "save_bet", "save_market_quotes",
+                       "save_analysis", "sqlite3", "INSERT INTO",
+                       "UPDATE ", "DELETE FROM", "connect("):
+            assert banned not in SOURCE, f"pinnacle_oracle scrive: {banned}"
+
+    def test_nessun_ordine_e_nessun_executor(self):
+        for banned in ("_live_fill", "place_order", "resolve_market_for",
+                       "execution_engine", "auto_bet"):
+            assert banned not in SOURCE, f"pinnacle_oracle ordina: {banned}"
+
+    def test_nessuna_rete_all_import(self):
+        """`requests` si importa DENTRO la funzione live: importare il modulo
+        non deve poter toccare la rete (i test girano offline)."""
+        top_level = [ln for ln in SOURCE.splitlines()
+                     if re.match(r"^(import|from)\s+requests", ln)]
+        assert top_level == [], f"import di rete a livello modulo: {top_level}"
+
+    def test_importare_il_modulo_non_carica_la_produzione(self):
+        import subprocess
+        import sys
+        code = ("import sys, pinnacle_oracle;"
+                "print(sorted(m for m in ('poisson_engine','tracker','bot',"
+                "'auto_bet','decision') if m in sys.modules))")
+        out = subprocess.run([sys.executable, "-c", code], cwd=str(Path(po.__file__).parent),
+                             capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "[]", out.stdout
+
+
+# ---------------------------------------------------------------------------
+# 6. PROBE LIVE (opt-in, 1 credito): misura il costo reale della chiamata
+# ---------------------------------------------------------------------------
+
+@pytest.mark.integration
+class TestProbeLive:
+    def _skip_unless_enabled(self):
+        if os.getenv("PINNACLE_PROBE") != "1":
+            pytest.skip("probe live non abilitato (PINNACLE_PROBE=1)")
+        if not (os.getenv("ODDS_API_KEY") or "").strip():
+            pytest.skip("ODDS_API_KEY assente")
+
+    def test_estrae_pinnacle_e_misura_il_costo_della_chiamata(self):
+        self._skip_unless_enabled()
+        sport = os.getenv("PINNACLE_SPORT", "soccer_usa_mls")
+        res = po.fetch_pinnacle_payload(sport)
+        if res["error"] and "soglia" in str(res["error"]):
+            pytest.skip(f"crediti bloccati: {res['error']}")
+        assert res["status"] == 200, f"{res['status']} {res['error']}"
+        assert res["last_cost"] is not None, \
+            "header x-requests-last assente: costo non misurabile"
+        # il filtro bookmakers=pinnacle NON deve costare piu' di una chiamata
+        assert 1 <= res["last_cost"] <= 2, res["last_cost"]
+        hits = po.iter_pinnacle_markets(res["payload"])
+        print(f"\nPROBE {sport}: eventi={len(res['payload'])} "
+              f"con 1X2 Pinnacle={len(hits)} "
+              f"crediti rimasti={res['remaining']} costo={res['last_cost']}")
+        for match, quotes in hits[:3]:
+            probs = po.true_probabilities(quotes)
+            print(f"  {match['home_team']} vs {match['away_team']} "
+                  f"quote={quotes} overround={probs['overround']:.4f} "
+                  f"p1={probs['1']:.4f}")
+        # se la lega ha partite, l'oracolo deve estrarle davvero
+        if res["payload"]:
+            assert hits, "payload non vuoto ma nessun 1X2 Pinnacle completo"
