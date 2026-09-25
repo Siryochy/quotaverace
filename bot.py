@@ -2328,6 +2328,48 @@ async def multi_market_job(context: ContextTypes.DEFAULT_TYPE):
                 len(found), live_n)
 
 
+async def btts_watch_job(context: ContextTypes.DEFAULT_TYPE = None):
+    """Sorveglianza GRATUITA del mercato BTTS su SX Bet (25/09/2026).
+
+    Il type 17 (BTTS) e' nella doc ufficiale di SX ma il book NON lo pubblica
+    sul calcio (probe reali: 0 mercati al 18/09 e al 25/09/2026, mentre il
+    type 2 Over/Under ne pubblica 100+). Senza prezzo non esiste value bet,
+    quindi il backlog BTTS e' CONGELATO: nessun feed a pagamento e nessuno dei
+    10 punti di refactoring finche' l'exchange non quota il mercato.
+
+    Questo job e' il campanello che lo riapre: una lettura PUBBLICA al giorno
+    (zero chiavi, zero crediti the-odds-api, zero ordini) e una notifica agli
+    admin SOLO se il feed si popola, con anti-spam 1 alert/giorno (chiave
+    BTTS_FEED). Lo stato viene SEMPRE loggato: la telemetria e' continua, la
+    notifica e' l'eccezione.
+    """
+    try:
+        import multi_market
+        loop = asyncio.get_running_loop()
+        probes = await loop.run_in_executor(
+            _scan_executor, multi_market.probe_watched_markets)
+        line = multi_market.format_probe(probes)
+        logger.info("btts_watch: %s", line)
+        if not any(p.get("available") for p in probes):
+            return
+        from datetime import timezone as _tz, timedelta as _td
+        from tracker import is_notified, mark_notified
+        day = (datetime.now(_tz.utc) + _td(hours=2)).strftime("%Y-%m-%d")
+        if is_notified("BTTS_FEED", day):
+            return
+        mark_notified("BTTS_FEED", day)
+        text = ("\U0001f195 MERCATO BTTS DISPONIBILE SU SX\n" + line +
+                "\nIl feed ha popolato il type 17: il backlog BTTS puo' "
+                "ripartire (nessun feed a pagamento, la quota e' "
+                "dell'exchange).")
+        if context is not None:
+            await _send_report_to_recipients(context, text)
+        else:
+            logger.warning("btts_watch: %s", text.replace("\n", " | "))
+    except Exception as e:
+        logger.warning("btts_watch_job fallito: %s", e)
+
+
 async def history_sync_job(context: ContextTypes.DEFAULT_TYPE):
     """Sincronizzazione risultati storici (API-Football) + ricalcolo rating.
 
@@ -2610,6 +2652,13 @@ def main() -> None:
         # shadow. MM_ENABLED=0 per spegnerla senza toccare il 1X2.
         job_queue.run_repeating(multi_market_job, interval=_sx_min * 60,
                                 first=150,
+                                job_kwargs={"max_instances": 1})
+        # Sorveglianza BTTS (25/09): il type 17 non e' pubblicato sul calcio
+        # (0 mercati), il backlog BTTS e' congelato. Una lettura pubblica al
+        # giorno — zero crediti, zero ordini — avvisa gli admin se il feed si
+        # popola: e' il campanello che riapre il refactoring.
+        job_queue.run_repeating(btts_watch_job, interval=24 * 3600,
+                                first=1800,
                                 job_kwargs={"max_instances": 1})
         # Revisioni umane (15/09): i verdetti `review` della catena diventano
         # prompt Telegram con bottoni. Frequenza 5 min (non c'e' fretta: il

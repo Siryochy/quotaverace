@@ -365,8 +365,16 @@ def _resolve_league_label(label: str) -> str:
 
 
 def _discover_type(provider: Any, type_id: str,
-                   max_markets: int) -> List[Dict[str, Any]]:
-    """Una pagina (o piu') di /markets/active per UN type id (come sx_signals)."""
+                   max_markets: int,
+                   errors: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Una pagina (o piu') di /markets/active per UN type id (come sx_signals).
+
+    `errors` (opzionale): se passata, il motivo di un fallimento viene
+    REGISTRATO invece di essere solo loggato. Serve al probe dei mercati
+    sorvegliati: senza di essa "il book non pubblica il mercato" e "la lettura
+    e' fallita" diventano la stessa cosa (lista vuota), che e' esattamente il
+    fallimento silenzioso da evitare.
+    """
     out: List[Dict[str, Any]] = []
     pagination_key: Optional[str] = None
     while len(out) < max_markets:
@@ -379,6 +387,8 @@ def _discover_type(provider: Any, type_id: str,
         except Exception as exc:
             logger.warning("multi_market: discovery type %s fallita: %s",
                            type_id, exc)
+            if errors is not None:
+                errors.append(str(exc))
             break
         d = data.get("data") if isinstance(data, dict) else {}
         markets = (d or {}).get("markets") or []
@@ -578,6 +588,84 @@ def ingest(provider: Any = None, *, types: Optional[Sequence[str]] = None,
         logger.warning("multi_market: ingest fallita (%s)", exc)
         summary["error"] = str(exc)
     return summary
+
+
+# ---------------------------------------------------------------------------
+# SORVEGLIANZA dei mercati NON modellati (BTTS) — 25/09/2026
+# ---------------------------------------------------------------------------
+
+#: Type id SX che NON modelliamo ma che vale la pena sorvegliare. Il type 17
+#: (BTTS) esiste nella doc ufficiale di SX ma il book NON lo pubblica sul
+#: calcio: probe reale del 18/09 e del 25/09/2026 -> **0 mercati** (mentre il
+#: type 2 Over/Under ne pubblica 100+). Senza PREZZO non esiste value bet:
+#: la probabilita' del modello la sappiamo calcolare (`prob_btts`), ma non
+#: c'e' nulla con cui confrontarla — e non si paga the-odds-api (2 crediti per
+#: chiamata su `btts`) per rincorrere un mercato che l'exchange non quota.
+#: Il backlog BTTS (10 punti) resta quindi CONGELATO finche' il feed non si
+#: popola; questa sorveglianza e' il campanello che lo riapre, ed e' GRATUITA.
+WATCHED_TYPES: Dict[str, str] = {"BTTS": "17"}
+
+
+def probe_market_type(type_id: str = "17", *, provider: Any = None,
+                      max_markets: int = 5) -> Dict[str, Any]:
+    """Quanti mercati ATTIVI pubblica SX per UN type id (gratis, fail-safe).
+
+    Lettura PUBBLICA di `/markets/active` (la stessa di `_discover_type`):
+    zero chiavi, zero crediti the-odds-api, zero ordini. Un errore di rete o
+    un provider ostile NON solleva mai: torna nel campo `error` e il
+    chiamante resta silenzioso.
+    """
+    out: Dict[str, Any] = {"type_id": str(type_id), "markets": 0,
+                           "available": False, "error": None}
+    try:
+        if provider is None:
+            from execution_engine import SxBetProvider
+            provider = SxBetProvider()
+        errors: List[str] = []
+        found = _discover_type(provider, str(type_id),
+                               max(1, int(max_markets)), errors=errors)
+        # Lettura FALLITA != mercato assente: senza questa distinzione un
+        # errore di rete sembrerebbe "il book non quota il BTTS" e il
+        # campanello tacerebbe proprio quando serve.
+        out["error"] = errors[0] if errors else None
+        out["markets"] = len(found)
+        out["available"] = bool(found) and not errors
+        if found:
+            m = found[0]
+            out["example"] = {
+                "event": f"{m.get('teamOneName')} - {m.get('teamTwoName')}",
+                "outcome_one": m.get("outcomeOneName"),
+                "outcome_two": m.get("outcomeTwoName"),
+                "league": m.get("leagueLabel"),
+                "kickoff": m.get("gameTime"),
+            }
+    except Exception as exc:
+        out["error"] = str(exc)
+    return out
+
+
+def probe_watched_markets(*, provider: Any = None) -> List[Dict[str, Any]]:
+    """Probe di TUTTI i mercati sorvegliati (oggi solo BTTS type 17)."""
+    out: List[Dict[str, Any]] = []
+    for market, type_id in WATCHED_TYPES.items():
+        probe = probe_market_type(type_id, provider=provider)
+        probe["market"] = market
+        out.append(probe)
+    return out
+
+
+def format_probe(probes: Sequence[Dict[str, Any]]) -> str:
+    """Riga leggibile del probe (CLI, log del job, messaggio Telegram)."""
+    parts: List[str] = []
+    for probe in probes or []:
+        name = str(probe.get("market") or probe.get("type_id"))
+        if probe.get("error"):
+            parts.append(f"{name}: errore ({probe['error']})")
+        elif probe.get("available"):
+            parts.append(f"{name}: DISPONIBILE ({probe['markets']} mercati)")
+        else:
+            parts.append(f"{name}: non disponibile (0 mercati)")
+    return " | ".join(parts) or "nessun mercato sorvegliato"
 
 
 # ---------------------------------------------------------------------------
@@ -1165,7 +1253,7 @@ if __name__ == "__main__":                        # pragma: no cover
                         format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description="Multi-mercato OU/AH (SX Bet)")
     parser.add_argument("command", nargs="?", default="report",
-                        choices=("ingest", "scan", "picks", "report"))
+                        choices=("ingest", "scan", "picks", "report", "btts"))
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     if args.command == "ingest":
@@ -1180,6 +1268,10 @@ if __name__ == "__main__":                        # pragma: no cover
         picks = live_picks()
         print(_json.dumps(picks, indent=2, default=str) if args.json
               else f"picks live: {len(picks)}")
+    elif args.command == "btts":
+        probes = probe_watched_markets()
+        print(_json.dumps(probes, indent=2, default=str) if args.json
+              else "sorveglianza mercati non modellati: " + format_probe(probes))
     else:
         data = shadow_report()
         print(_json.dumps(data, indent=2, default=str) if args.json

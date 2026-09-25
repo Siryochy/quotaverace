@@ -5252,3 +5252,94 @@ analisi trovi partite nelle leghe CORE e che `matches`/`match_analysis`
 risalgano verso le ~100-140/giorno del 19-20/09. Watchdog attivi e verificati
 nei log: `credit_watchdog`, `settlement`, `drift`, `liquidity_monitor`,
 `decision_compare`, `backup`. Il prossimo giro automatico e' alle 04:00 UTC.
+
+### Espansione orizzontale (OU/BTTS): verdetto d'era + sentinella BTTS (25/09/2026)
+
+Direttiva del proprietario: estrarre piu' valore dalle partite gia' analizzate
+con il motore Poisson (O/U e BTTS), senza toccare i filtri di capitale (EV e
+Edge restano congelati). Prima di scrivere codice e' stato valutato il backlog
+sull'infrastruttura REALE; due delle premesse sono risultate **false** e i dati
+hanno cambiato la decisione.
+
+**1) O/U 2.5 era GIA' pronto end-to-end** (dal 19/09): `multi_market` copre
+discovery SX type 2 -> contratto 2.0 -> `market_quotes` -> modello push-aware
+(`ou_outcome_probs`) -> devig/blend -> `predictions` (esito `Over 2.5`) ->
+`live_picks` -> `resolve_market_for`, con settlement line-aware. Il 2.5 e' una
+semplice linea fra quelle gia' gestite. L'unico blocco era l'interruttore
+(`ENABLE_LIVE_OU=0`) piu' la misura mancante.
+
+**2) LA MISURA HA SMENTITO IL NUMERO CHE GIUSTIFICAVA L'ACCENSIONE.** Shadow
+report in produzione (sola lettura) e isolamento della popolazione giocabile:
+
+```
+OU: 2050 quote | 158 chiuse + 98 aperte
+  giocabili : 30 chiuse (15V/11P/4push), +6.36/unita' | ROI +21.21%
+    · value        : 10 chiuse (7V/3P), +5.57/u | +55.70%
+    · strong_value : 20 chiuse (8V/8P/4push), +0.79/u | +3.97%
+  scartati  : 128 chiuse (21V/88P/19push), -7.16/u | -5.59%
+AH (controllo): giocabili 4 chiuse +37.97% | scartati 118 chiuse -11.30%
+```
+
+**TRAPPOLA D'ERA (la stessa lezione del 22/09 sul 1X2, qui su un mercato
+diverso)**: isolando le 30 giocabili per data di nascita:
+
+| era | righe | quota media | risultato | ROI |
+|---|---|---|---|---|
+| **< 19/09** (`fixture_engine`, pipeline RITIRATA) | 22 | ~2.25 (oggi `rejected`: fuori fascia) | +7.24/u | **+32.9%** |
+| **>= 19/09** (`multi_market`, la corsia di oggi) | **8** | 1.30-1.48 | 3V/2L/**3push**, -0.876/u | **-10.9%** |
+
+Verifica: `7.24 + (-0.876) = 6.364 = 6.36` -> il +21.21% e' **interamente**
+portato da una strategia ritirata. Le 8 righe dell'era nuova stanno tutte su
+**linee intere alte (4 / 4.5 / 5)** con quota 1.30-1.48 e **3 push su 8**
+(payout minimo, P/L quasi tutto push: ROI fragile per costruzione). Le 98
+righe aperte sono TUTTE `rejected`: la popolazione giocabile non crescera' dal
+backlog, solo dalla nuova copertura Tier-1.
+
+**3) DECISIONE DEL PROPRIETARIO (registrata)**: `ENABLE_LIVE_OU` resta **0**
+(mercato in sola simulazione) finche' non si contano **almeno 30 chiusure
+refertate esclusivamente nell'era nuova (post 19/09) e con ROI positivo**. Non
+si "compra campione" con denaro reale su una strategia in perdita con un
+bankroll di 33.55 USDC. Corollario operativo: il collo di bottiglia per
+decidere e' che **lo split per stato non isola l'era** — la rifinitura annotata
+il 22/09 (filtro `--since`/fascia quota su `shadow_report`/`market_diagnose`)
+resta da implementare, ed e' il prerequisito di qualunque lettura del report OU.
+
+**4) BTTS — CONGELATO, con sentinella gratuita.** Scartata l'ipotesi del feed a
+pagamento (the-odds-api `btts` costerebbe 2 crediti/chiamata: `markets x
+regions`): non ha senso logico ne' economico erodere i crediti per rincorrere
+un mercato che l'exchange non quota. Gli **10 punti di refactoring** del
+backlog BTTS restano congelati. La quota BTTS NON viene da the-odds-api (dal
+09/09 la fetcher e' `markets="h2h"` only): viene da SX Bet, che pero' **non
+pubblica il type 17** — verificato con probe reali il 18/09 e di nuovo il
+25/09/2026: **0 mercati** (mentre il type 2 Over/Under ne pubblica 100+).
+Senza prezzo non esiste value bet: il modello la probabilita' la sa calcolare
+(`prob_btts`), ma non c'e' nulla con cui confrontarla.
+
+Implementato SOLO il campanello (nessun altro intervento):
+- `multi_market.WATCHED_TYPES = {"BTTS": "17"}` +
+  `probe_market_type()` / `probe_watched_markets()` / `format_probe()`;
+- CLI `venv/bin/python multi_market.py btts` (verificato contro l'API reale:
+  `BTTS: non disponibile (0 mercati)`);
+- job `bot.btts_watch_job` giornaliero (24h, `first=1800`): logga SEMPRE lo
+  stato, notifica admin+iscritti SOLO se il type 17 si popola, con anti-spam
+  1 alert/giorno (chiave `BTTS_FEED`);
+- **gratuito per costruzione**: solo `/markets/active` pubblico, nessuna chiave,
+  nessun credito, nessun ordine (tripwire dedicato); BTTS resta **fuori** da
+  `MARKETS`/`SX_TYPE_IDS`/`live_markets()` (test che lo blinda).
+- **BUG trovato dai test**: `_discover_type` inghiottiva l'eccezione, quindi
+  "probe rotto" e "0 mercati" erano **indistinguibili** (il campanello avrebbe
+  taciuto proprio quando serve). Aggiunto il canale `errors` esplicito:
+  `available=False` se la lettura fallisce. Nessun nuovo env, quindi nessuna
+  modifica a `.railway/railway.ts`.
+
+**5) Test**: `test_multi_market.py` **62 verdi** (10 nuovi su probe/fail-safe/
+indipendenza), regressioni verdi su `test_bot`, `test_sx_signals`,
+`test_auto_bet`, `test_secret_hygiene`, `test_liquidity_monitor`;
+`compileall` OK, 0 marker di conflitto.
+
+**6) INFRA**: la chiave host SSH di `ssh.railway.com` e' CAMBIATA (fingerprint
+ED25519 nuovo) e bloccava le interrogazioni del container: rimossa la voce
+stantia da `~/.ssh/known_hosts` (autorizzato dal proprietario;
+`ssh-keygen -f ~/.ssh/known_hosts -R ssh.railway.com`). Nota permanente: dopo
+la rimozione, la prima connessione non-interattiva puo' richiedere di
+riaccettare l'host key.

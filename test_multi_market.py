@@ -627,3 +627,128 @@ class TestSplitReport:
         assert "MULTI-MERCATO" in mm.format_report({"markets": {}, "live_markets": []})
         assert "non leggibili" in mm.format_report(
             {"markets": {"OU": "spazzatura"}, "live_markets": None})
+
+
+# ---------------------------------------------------------------------------
+# 9. Sorveglianza GRATUITA del mercato BTTS (type 17) — 25/09/2026
+# ---------------------------------------------------------------------------
+
+class FakeProbeProvider:
+    """Provider minimo per il probe: SOLO `_get`, nessuna rete.
+
+    Registra le chiamate cosi' un test puo' dimostrare che il probe legge
+    l'endpoint PUBBLICO e non porta con se' chiavi (quindi: zero crediti e
+    zero credenziali).
+    """
+
+    name = "sxbet"
+
+    def __init__(self, markets=None, exc=None, payload=None):
+        self._markets = list(markets or [])
+        self._exc = exc
+        self._payload = payload
+        self.calls = []
+
+    def _get(self, path, params=None):
+        self.calls.append((path, dict(params or {})))
+        if self._exc is not None:
+            raise self._exc
+        if self._payload is not None:
+            return self._payload
+        return {"data": {"markets": list(self._markets), "nextKey": None}}
+
+
+def _sx_market(**over):
+    m = {"sportXeventId": "E1", "marketHash": "H1", "teamOneName": "Roma",
+         "teamTwoName": "Lazio", "outcomeOneName": "Yes",
+         "outcomeTwoName": "No", "leagueLabel": "Serie A",
+         "gameTime": 1900000000000}
+    m.update(over)
+    return m
+
+
+class TestSorveglianzaBTTS:
+    """Il backlog BTTS e' congelato: qui si fissa SOLO il campanello.
+
+    Nessun feed a pagamento, nessuno dei 10 punti di refactoring: il type 17
+    non e' pubblicato su SX (0 mercati), quindi la sorveglianza deve essere
+    gratuita, silenziosa e fail-safe.
+    """
+
+    def test_zero_mercati_non_disponibile(self):
+        p = FakeProbeProvider(markets=[])
+        out = mm.probe_market_type("17", provider=p)
+        assert out["available"] is False
+        assert out["markets"] == 0
+        assert out["error"] is None
+
+    def test_mercati_presenti_disponibile(self):
+        p = FakeProbeProvider(markets=[_sx_market(), _sx_market()])
+        out = mm.probe_market_type("17", provider=p)
+        assert out["available"] is True
+        assert out["markets"] == 2
+        assert out["example"]["event"] == "Roma - Lazio"
+        assert out["example"]["outcome_one"] == "Yes"
+
+    def test_legge_solo_lendpoint_pubblico_senza_chiavi(self):
+        """Gratuito per costruzione: `/markets/active` e nessun `apiKey`."""
+        p = FakeProbeProvider(markets=[_sx_market()])
+        mm.probe_market_type("17", provider=p)
+        assert p.calls, "il probe non ha interrogato SX"
+        path, params = p.calls[0]
+        assert path == "markets/active"
+        assert "apiKey" not in params and "key" not in params
+        assert params.get("type") == "17"
+
+    def test_fail_safe_su_errore_di_rete(self):
+        p = FakeProbeProvider(exc=RuntimeError("boom"))
+        out = mm.probe_market_type("17", provider=p)      # mai un'eccezione
+        assert out["available"] is False
+        assert "boom" in out["error"]
+
+    def test_fail_safe_su_payload_ostile(self):
+        for payload in ({"data": 5}, 5, None, {"data": {"markets": "x"}}):
+            p = FakeProbeProvider(payload=payload)
+            out = mm.probe_market_type("17", provider=p)
+            assert out["available"] is False          # mai un'eccezione
+            assert isinstance(out["markets"], int)
+
+    def test_btts_congelato_non_e_un_mercato_del_modulo(self):
+        """Il probe NON deve riaprire il backlog: BTTS resta fuori da MARKETS."""
+        assert mm.WATCHED_TYPES == {"BTTS": "17"}
+        assert "BTTS" not in mm.MARKETS
+        assert "BTTS" not in mm.SX_TYPE_IDS
+        assert "BTTS" not in mm.live_markets()
+
+    def test_tipo_sorvegliato_coerente_col_registro_del_contratto(self):
+        """Il type id sorvegliato e' quello ufficiale del registro SX."""
+        from decision.market import MarketType, SX_TYPE_IDS
+        assert SX_TYPE_IDS[17] is MarketType.BOTH_TEAMS_TO_SCORE
+
+    def test_probe_watched_e_format(self):
+        probes = mm.probe_watched_markets(
+            provider=FakeProbeProvider(markets=[_sx_market()]))
+        assert len(probes) == 1 and probes[0]["market"] == "BTTS"
+        assert "DISPONIBILE" in mm.format_probe(probes)
+        vuoto = mm.probe_watched_markets(provider=FakeProbeProvider())
+        assert "non disponibile" in mm.format_probe(vuoto)
+        assert mm.format_probe([]) == "nessun mercato sorvegliato"
+
+    def test_nessun_credito_the_odds_api(self):
+        """Zero costi: il modulo non chiama MAI il settlement/quote a pagamento."""
+        import pathlib
+        src = pathlib.Path(mm.__file__).read_text()
+        assert "fetch_scores" not in src
+        assert "odds_api" not in src
+
+    def test_job_schedulato_in_bot(self):
+        import pathlib
+        src = pathlib.Path("bot.py").read_text(encoding="utf-8")
+        assert "async def btts_watch_job" in src
+        assert "run_repeating(btts_watch_job" in src
+        assert "probe_watched_markets" in src
+
+    def test_cli_espone_il_probe(self):
+        import pathlib
+        src = pathlib.Path(mm.__file__).read_text()
+        assert '"btts"' in src
