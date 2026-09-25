@@ -371,6 +371,31 @@ class TestFinestraT60:
         conn.close()
         assert row == ("live", 1.0, "b1")
 
+    def test_senza_bet_id_non_scrive_la_riga(self, temp_db, monkeypatch):
+        """Secondo punto di scrittura: senza bet_id NESSUNA riga live.
+
+        `_live_fill` gia' fallisce chiuso, ma il dispatch T-60 scrive per
+        conto suo: la guardia e' ripetuta qui (difesa in profondita'), perche'
+        il ledger non deve contenere un ordine che sull'exchange non esiste ne'
+        uno status inventato come "SUCCESS".
+        """
+        _live_mode(monkeypatch)
+        _seed_validated_decision(mid="no-id",
+                                 kickoff=datetime.now(timezone.utc)
+                                 + timedelta(minutes=55))
+        monkeypatch.setattr(auto_bet, "_live_fill",
+                            lambda pick, stake, floor: {
+                                "ok": True, "market_id": "mx",
+                                "selection_id": 1, "bet_id": None,
+                                "status": "FULLY_FILLED",
+                                "price": floor, "stake": stake})
+        placed = auto_bet.t60_dispatch_pending(bankroll=34.0)
+        assert placed == []
+        conn = tracker._get_conn()
+        n = conn.execute("SELECT COUNT(*) FROM bets").fetchone()[0]
+        conn.close()
+        assert n == 0
+
     def test_dedup_match_esito(self, temp_db, monkeypatch):
         """UNIQUE(match_id, esito): il job ogni 60s non raddoppia."""
         _live_mode(monkeypatch)

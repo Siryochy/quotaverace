@@ -591,10 +591,19 @@ def t60_dispatch_pending(bankroll: float | None = None) -> list[dict]:
             logger.warning("auto_bet: T60 ordine non piazzato per %s: %s",
                            mid, filled.get("error") or filled.get("status"))
             continue
+        # Stessa barriera della corsia normale (26/09): senza un bet_id emesso
+        # dall'exchange la riga live NON si scrive. `_live_fill` gia' fallisce
+        # chiuso, ma questo e' il SECONDO punto di scrittura: la guardia va
+        # ripetuta qui, non ereditata per fiducia.
+        if not filled.get("bet_id"):
+            logger.error("auto_bet: T60 ordine per %s senza bet_id: riga "
+                         "live NON scritta sul ledger", mid)
+            continue
         record = {"match_id": mid, "home": home, "away": away,
                   "esito_key": esito, "price": float(filled["price"] or price),
                   "stake": float(filled["stake"] or stake),
-                  "mode": "t60-live", "status": filled.get("status") or "SUCCESS",
+                  "mode": "t60-live",
+                  "status": filled.get("status") or "FILLED_UNCONFIRMED",
                   "bet_id": filled.get("bet_id")}
         placed.append(record)
         try:
