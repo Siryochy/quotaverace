@@ -47,6 +47,15 @@ def _isolate_daily_stop(tmp_path, monkeypatch):
     # che attendono [] passerebbero per il motivo sbagliato). Il CB2 ha i suoi
     # tripwire dedicati in test_t60_breakers.py, che usano la soglia vera.
     monkeypatch.setattr(auto_bet, "T60_KILL_WALLET_USDC", 0.0)
+    # Fase 2 top-down (25/09): il gate EV sull'oracolo Pinnacle governa la
+    # corsia LIVE e senza oracolo e' fail-closed (no_oracle -> skip). Questi
+    # test verificano staking/cap/wallet, non l'EV: l'oracolo e' stubbato con
+    # una p_true che fa scattare il trigger per QUALSIASI esito (0.65 su quota
+    # 1.65 -> EV +7.25% >= 2%). La semantica del gate (no_oracle, trigger,
+    # bypass del modello) e' verificata in test_top_down.py.
+    monkeypatch.setattr(auto_bet, "_top_down_load",
+                        lambda home, away: {"1": 0.65, "X": 0.65, "2": 0.65,
+                                            "overround": 0.0})
 
 
 ALLOWED_LEAGUE = "Premier League"   # in STRATEGY_LEAGUES

@@ -247,3 +247,115 @@ def test_usa_la_definizione_condivisa_dei_tier():
     src = Path(market_diagnose.__file__).read_text(encoding="utf-8")
     assert "PLAYABLE_TIERS" in src
     assert '"value", "strong_value"' not in src
+
+
+# --- Filtro d'ERA / fascia quota (25/09/2026) -------------------------------
+# Il 25/09/2026 lo split per stato si e' rivelato insufficiente: il ROI
+# aggregato Over/Under (+21.21% su 30 chiuse) era portato per intero da una
+# pipeline ritirata (22 righe a quota media ~2.25), mentre le 8 chiusure della
+# strategia in produzione davano -10.9%. Qui si fissa il filtro che separa le
+# due popolazioni — e la garanzia che il blocco `excluded` resti il complemento
+# ESATTO della popolazione giudicata.
+
+def _set_born(mid, stamp):
+    """Riscrive la data di NASCITA di una riga (l'era e' quella)."""
+    conn = tracker._get_conn()
+    conn.execute("UPDATE predictions SET created_at=? WHERE match_id=?",
+                 (stamp, mid))
+    conn.commit()
+    conn.close()
+
+
+def _mk(mid, home, quota, status, created, sh, sa):
+    """Previsione chiusa con data di nascita e quota esplicite."""
+    tracker.save_result(mid, "Serie A", home, f"{home}A", sh, sa,
+                        datetime.now().isoformat())
+    tracker.save_prediction(mid, "1X2", home, quota, 0.6, 0.05, status=status)
+    _set_born(mid, created)
+
+
+def test_analyze_db_since_isola_l_era(temp_db):
+    for i in range(8):            # era vecchia: quota alta, tutte perse
+        _mk(f"old{i}", f"Old{i}", 2.40, "value", "2026-09-05T10:00:00", 0, 2)
+    for i in range(6):            # era nuova: quota di fascia, tutte perse
+        _mk(f"new{i}", f"New{i}", 1.55, "value", "2026-09-20T10:00:00", 0, 2)
+    tracker.settle_predictions()
+
+    tutto = market_diagnose.analyze_db(min_total=5, min_per_market=5)
+    era = market_diagnose.analyze_db(since="2026-09-19", min_total=5,
+                                     min_per_market=5)
+    assert tutto["totals"]["n"] == 14
+    assert era["totals"]["n"] == 6
+    assert era["filtro"]["applied"] is True
+    assert era["filtro"]["since"] == "2026-09-19"
+    assert tutto["filtro"]["applied"] is False
+
+
+def test_fascia_quota_isola(temp_db):
+    for i in range(5):            # vinte ma fuori fascia (quota 2.40)
+        _mk(f"hi{i}", f"Hi{i}", 2.40, "value", "2026-09-20T10:00:00", 2, 0)
+    for i in range(4):            # perse ma in fascia
+        _mk(f"lo{i}", f"Lo{i}", 1.50, "value", "2026-09-20T10:00:00", 0, 2)
+    tracker.settle_predictions()
+
+    res = market_diagnose.analyze_db(odds_min=1.30, odds_max=1.80,
+                                     min_total=2, min_per_market=2)
+    assert res["totals"]["n"] == 4
+    assert res["markets"][0]["roi"] == -100.0
+    assert res["filtro"]["applied"] is True
+
+
+def test_excluded_resta_il_complemento_col_filtro(temp_db):
+    """Il blocco `excluded` usa la STESSA popolazione filtrata del giudizio.
+
+    Se il residuo fosse calcolato su un'altra popolazione, giocabili ed
+    esclusi non sarebbero piu' complementari e un pezzo di ledger sparirebbe
+    dai conti senza che nessuno lo veda.
+    """
+    for i in range(4):            # fuori era, giocabili: NON entrano
+        _mk(f"oldP{i}", f"OP{i}", 2.40, "value", "2026-09-05T10:00:00", 2, 0)
+    for i in range(3):            # era nuova, giocabili
+        _mk(f"newP{i}", f"NP{i}", 1.50, "value", "2026-09-20T10:00:00", 0, 2)
+    for i in range(5):            # era nuova, scartate
+        _mk(f"newR{i}", f"NR{i}", 1.60, "rejected", "2026-09-20T10:00:00", 0, 2)
+    tracker.settle_predictions()
+
+    res = market_diagnose.analyze_db(since="2026-09-19", min_total=2,
+                                     min_per_market=2)
+    assert res["markets"][0]["n"] == 3
+    assert res["excluded"]["n"] == 5
+    assert res["totals"]["n"] + res["excluded"]["n"] == 8   # 14 - 6 fuori era
+
+
+def test_report_dichiara_il_filtro():
+    by = {"1X2": _entry(120, -6.0, 1.5, hit_rate=40.0, avg_prob=0.55)}
+    res = market_diagnose.diagnose(
+        by, filtro={"since": "2026-09-19", "odds_min": 1.30, "odds_max": 1.80})
+    out = market_diagnose._report(res)
+    assert "era dal 2026-09-19" in out and "quota 1.3-1.8" in out
+    assert "NESSUNO" not in out
+
+
+def test_report_senza_filtro_lo_dichiara():
+    by = {"1X2": _entry(120, 3.0, 2.0)}
+    out = market_diagnose._report(market_diagnose.diagnose(by))
+    assert "NESSUNO" in out and "mescola ere" in out
+
+
+def test_main_accetta_i_flag_del_filtro(temp_db, capsys):
+    for i in range(6):
+        _mk(f"m{i}", f"M{i}", 1.55, "value", "2026-09-20T10:00:00", 2, 0)
+    tracker.settle_predictions()
+
+    code = market_diagnose.main(["--since", "2026-09-19", "--odds-min", "1.30",
+                                 "--odds-max", "1.80", "--min-total", "5"])
+    out = capsys.readouterr().out
+    assert "era dal 2026-09-19" in out
+    assert code == 0                       # ROI positivo: nessuna azione
+
+
+def test_cli_espone_i_flag_del_filtro():
+    from pathlib import Path
+    src = Path(market_diagnose.__file__).read_text(encoding="utf-8")
+    for flag in ("--since", "--odds-min", "--odds-max"):
+        assert flag in src

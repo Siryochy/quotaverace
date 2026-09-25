@@ -58,6 +58,15 @@ import tracker            # noqa: E402  (dopo aver fissato DATA_DIR)
 import auto_bet           # noqa: E402
 import value_filter       # noqa: E402
 
+# Fase 2 top-down (25/09): il gate EV sull'oracolo Pinnacle (TOP_DOWN_EV,
+# default ON) governa la corsia LIVE ed e' fail-closed senza oracolo — senza
+# lo stub lo scenario C passerebbe per `no_oracle` invece che per il CAP
+# SEVERO che vuole dimostrare, e la controprova col floor non partirebbe
+# mai. L'oracolo e' stubbato con p_true 0.65 (trigger su ogni quota della
+# fascia); la semantica del gate e' verificata in test_top_down.py.
+auto_bet._top_down_load = lambda home, away: {
+    "1": 0.65, "X": 0.65, "2": 0.65, "overround": 0.0}
+
 tracker.init_db()
 
 BOLD = "\033[1m"

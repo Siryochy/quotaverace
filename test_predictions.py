@@ -331,3 +331,141 @@ def test_predictions_summary_per_mercato(temp_db):
     # profitti: Home -0.5 vinta => +0.95 unita'; Home -1.0 push => 0
     # roi = pnl / n = 0.95 / 2 = 0.475 -> 47.5%
     assert s["AH"]["roi"] == round(0.95 / 2 * 100, 2)
+
+
+# --- Filtro d'ERA e di FASCIA QUOTA (25/09/2026) ----------------------------
+# Una sola definizione nel ledger (`filter_predictions`), riusata dal report
+# shadow multi-mercato e dalla diagnosi per mercato: il 25/09 il ROI Over/Under
+# risultava +21.21% solo perche' 22 delle 30 righe giocabili erano di una
+# pipeline ritirata (quota media ~2.25).
+
+def _set_born(mid, stamp):
+    """Riscrive la data di NASCITA di una riga (l'era e' quella, non il saldo)."""
+    conn = tracker._get_conn()
+    conn.execute("UPDATE predictions SET created_at=? WHERE match_id=?",
+                 (stamp, mid))
+    conn.commit()
+    conn.close()
+
+
+def test_filter_predictions_since_confine_inclusivo():
+    rows = [{"created_at": "2026-09-18T23:59:59", "quota": 2.0},
+            {"created_at": "2026-09-19T00:00:00", "quota": 1.5},
+            {"created_at": "2026-09-19T23:59:59Z", "quota": 1.7},
+            {"created_at": "2026-09-25T10:00:00+00:00", "quota": 1.6}]
+    out = tracker.filter_predictions(rows, created_since="2026-09-19")
+    assert [r["created_at"] for r in out] == ["2026-09-19T00:00:00",
+                                             "2026-09-19T23:59:59Z",
+                                             "2026-09-25T10:00:00+00:00"]
+
+
+def test_filter_predictions_formati_di_data_reali():
+    """'T', 'Z', offset, microsecondi e spazio: tutti confrontabili.
+
+    E' la lezione del 17/09 (date del ledger ISO con 'T' contro date SQLite
+    con lo spazio): la normalizzazione sta in un solo posto, in Python.
+    """
+    for stamp in ("2026-09-19T00:00:00", "2026-09-19 00:00:00",
+                  "2026-09-19T00:00:00Z", "2026-09-19T00:00:00+02:00",
+                  "2026-09-19T00:00:00.123456"):
+        rows = [{"created_at": stamp, "quota": 1.5}]
+        assert len(tracker.filter_predictions(
+            rows, created_since="2026-09-19")) == 1, stamp
+    assert tracker.filter_predictions(
+        [{"created_at": "2026-09-18T23:59:59", "quota": 1.5}],
+        created_since="2026-09-19") == []
+
+
+def test_filter_predictions_fascia_quota_inclusiva():
+    rows = [{"created_at": "2026-09-20T01:00:00", "quota": q}
+            for q in (1.29, 1.30, 1.80, 1.81)]
+    out = tracker.filter_predictions(rows, odds_min=1.30, odds_max=1.80)
+    assert [r["quota"] for r in out] == [1.30, 1.80]
+
+
+def test_filter_predictions_fail_closed_su_dato_mancante():
+    """Con un filtro attivo, una riga NON dimostrabile viene esclusa.
+
+    I due filtri sono indipendenti: manca la data -> fuori dal filtro d'era;
+    manca la quota -> fuori dal filtro di fascia. Una riga con la data valida
+    non deve sparire solo perche' le manca la quota.
+    """
+    senza_data = [{"created_at": "", "quota": 1.5},
+                  {"created_at": None, "quota": 1.5},
+                  {"quota": 1.5}]
+    assert tracker.filter_predictions(senza_data,
+                                      created_since="2026-09-19") == []
+
+    senza_quota = [{"created_at": "2026-09-20T01:00:00"},
+                   {"created_at": "2026-09-20T01:00:00",
+                    "quota": "non-numerica"},
+                   {"created_at": "2026-09-20T01:00:00", "quota": None}]
+    assert tracker.filter_predictions(senza_quota, odds_min=1.30) == []
+    assert tracker.filter_predictions(senza_quota, odds_max=1.80) == []
+    # senza il filtro di fascia restano (la data di nascita e' valida)
+    assert len(tracker.filter_predictions(
+        senza_quota, created_since="2026-09-19")) == 3
+
+
+def test_filter_predictions_righe_ostili_non_sollevano():
+    assert tracker.filter_predictions([None, "x", 5],
+                                      created_since="2026-09-19") == []
+    assert tracker.filter_predictions(None, created_since="2026-09-19") == []
+
+
+def test_filter_predictions_senza_filtro_non_tocca_nulla():
+    rows = [{"created_at": "", "quota": None}, {"created_at": "x"}]
+    assert tracker.filter_predictions(rows) == rows
+
+
+def test_get_predictions_filtro_era_e_fascia(temp_db):
+    tracker.save_prediction("vecchio", "OU", "Over 2.5", 2.40, 0.5, 0.10,
+                            status="value")
+    tracker.save_prediction("nuovo", "OU", "Over 2.5", 1.60, 0.6, 0.05,
+                            status="value")
+    _set_born("vecchio", "2026-09-05T10:00:00")
+    _set_born("nuovo", "2026-09-20T10:00:00")
+
+    assert len(tracker.get_predictions(mercato="OU")) == 2
+    era = tracker.get_predictions(mercato="OU", created_since="2026-09-19")
+    assert [r["match_id"] for r in era] == ["nuovo"]
+    banda = tracker.get_predictions(mercato="OU", odds_max=1.80)
+    assert [r["match_id"] for r in banda] == ["nuovo"]
+    assert tracker.get_predictions(mercato="OU", created_since="2026-09-19",
+                                   odds_max=1.80)[0]["quota"] == 1.60
+
+
+def test_predictions_summary_filtro_era(temp_db):
+    for mid, home, quota in (("v", "Vecchia", 2.40), ("n", "Nuova", 1.60)):
+        _result(mid, home, f"{home}Away", 2, 0)
+        tracker.save_prediction(mid, "1X2", home, quota, 0.6, 0.05,
+                                status="value")
+    tracker.settle_predictions()
+    _set_born("v", "2026-09-05T10:00:00")
+    _set_born("n", "2026-09-20T10:00:00")
+
+    tutto = tracker.predictions_summary(statuses=("value",))
+    assert tutto["1X2"]["n"] == 2
+    era = tracker.predictions_summary(statuses=("value",),
+                                      created_since="2026-09-19")
+    assert era["1X2"]["n"] == 1 and era["1X2"]["won"] == 1
+    banda = tracker.predictions_summary(statuses=("value",), odds_max=1.80)
+    assert banda["1X2"]["n"] == 1
+    # era e fascia insieme: il filtro e' additivo, non alternativo
+    insieme = tracker.predictions_summary(statuses=("value",),
+                                          created_since="2026-09-19",
+                                          odds_min=1.30, odds_max=1.80)
+    assert insieme["1X2"]["n"] == 1
+
+
+def test_created_since_e_settled_since_restano_distinti(temp_db):
+    """Nascita e saldo sono due domande diverse: nessuna delle due sovrascrive."""
+    _result("m", "Alfa", "Beta", 2, 0)
+    tracker.save_prediction("m", "1X2", "Alfa", 1.6, 0.6, 0.05, status="value")
+    tracker.settle_predictions()
+    _set_born("m", "2026-09-01T10:00:00")     # nata PRIMA dell'era...
+    assert tracker.predictions_summary(statuses=("value",),
+                                       created_since="2026-09-19") == {}
+    # ...ma saldata DOPO: i due filtri non sono lo stesso filtro
+    assert tracker.predictions_summary(statuses=("value",),
+                                       settled_since="2026-09-19")["1X2"]["n"] == 1

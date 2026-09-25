@@ -164,6 +164,29 @@ T60_ORDER_VALIDATION = os.getenv("T60_ORDER_VALIDATION", "1").strip().lower() \
 T60_EXECUTION_ONLY = os.getenv("T60_EXECUTION_ONLY", "1").strip().lower() \
     in ("1", "true", "yes", "on")
 
+# --- STRATEGIA TOP-DOWN "STEAM CHASING" (fase 2, direttiva del proprietario
+# 25/09/2026) -------------------------------------------------------------
+# Il modello bottom-up (Poisson) resta a monte di tutto (genera i candidati
+# e popola il ledger), ma la VALUTAZIONE EV del giro ordini passa
+# all'ORACOLO: Pinnacle (sharp) de-vigato e' la probabilita' "vera", la
+# quota del segnale (SX) e' il prezzo, e si compra solo il ritardo fra i
+# due. Lettura DALLE CACHE che la rotazione quote scarica gia': ZERO
+# crediti. Con TOP_DOWN_EV attivo, un segnale senza oracolo e' "no_oracle"
+# e NON viene ordinato (fail-closed: senza verita' non si decide).
+TOP_DOWN_EV = os.getenv("TOP_DOWN_EV", "1").strip().lower() \
+    in ("1", "true", "yes", "on")
+#: Moltiplicatore della quota equa di Pinnacle ("true odd + margine"): la
+#: stessa condizione del gate EV scritta come prezzo minimo
+#: (EV >= ev_min  <=>  quota >= true_odd x (1 + TOP_DOWN_MARGIN)).
+TOP_DOWN_MARGIN = float(os.getenv("TOP_DOWN_MARGIN", "0.02"))
+#: Dry-Run (25/09): calcola EV e logga i candidati che superano la soglia,
+#: ma intercetta l'ordine PRIMA della chiamata POST a SX Bet. Env
+#: AUTO_BET_DRY_RUN=1 (o argomento dry_run=True). Il resto del giro e'
+#: INVARIATO: guardrail, gate di mercato, risk cap e log dei candidati
+#: girano identici — solo l'effetto sul mondo e' soppresso.
+DRY_RUN = os.getenv("AUTO_BET_DRY_RUN", "0").strip().lower() \
+    in ("1", "true", "yes", "on")
+
 
 def t60_window(kickoff: "datetime | None") -> str:
     """Posizione di un kickoff rispetto alla finestra esecutiva T-60.
@@ -205,6 +228,80 @@ def t60_stake(bankroll: float, *, mode: str = "sim") -> float:
     if stake < MIN_STAKE_EUR:
         return 0.0                     # sotto il minimo ordine: no bet
     return float(round(min(stake, T60_MAX_STAKE_USDC), 2))
+
+
+# Loader dell'oracolo INIETTABILE (default = le cache di produzione): i test
+# lo sostituiscono senza toccare la rete, e un giorno un feed alternativo
+# (live diagnostica) entra da qui senza riscrivere la valutazione.
+_TOP_DOWN_CACHE_DIR = None
+
+
+def _top_down_load(home: str, away: str):
+    """p_true per esito dall'oracolo Pinnacle (cache, 0 crediti)."""
+    import pinnacle_oracle as po
+    return po.load_oracle(home, away, cache_dir=_TOP_DOWN_CACHE_DIR)
+
+
+def _top_down_eval(pick: dict) -> dict | None:
+    """Valutazione TOP-DOWN di un candidato: EV contro l'ORACOLO Pinnacle.
+
+    Fase 2 del pivot (25/09/2026): la p_true NON arriva dal modello di gol
+    (Poisson/blend), ma dal mercato sharp de-vigato, letto dalle CACHE che
+    la rotazione quote scarica gia' (`pinnacle_oracle.load_oracle`, ZERO
+    crediti). La quota del segnale (SX) resta il prezzo. Si compra solo il
+    ritardo fra Pinnacle e SX: `EV = p_true x (quota - 1) - (1 - p_true)`.
+
+    La soglia EV e' UNA: `value_filter.EV_MIN` di produzione, confrontata
+    alla soglia dichiarata dall'oracolo (`pinnacle_oracle.DEFAULT_EV_MIN` e'
+    la STESSA costante importata la') — niente doppio standard fra i due
+    percorsi. Il margine del prezzo minimo (`TOP_DOWN_MARGIN`, default 2%)
+    e' la seconda forma della stessa condizione: `quota >= true_odd x
+    (1 + margine)`. Un'eventuale divergenza fra le due letture e' un bug
+    del gate, non una soglia nuova.
+
+    Ritorna un dict con verdetto e diagnostica; mai eccezioni verso il
+    chiamante (un errore della valutazione e' un salto, non un crash).
+    """
+    try:
+        import pinnacle_oracle as po
+        probs = _top_down_load(pick.get("home") or "", pick.get("away") or "")
+    except Exception as e:
+        return {"ok": False, "reason": f"oracolo non disponibile ({e})"}
+    try:
+        quota = float(pick.get("quota") or 0)
+        if quota <= 1.0:
+            return {"ok": False, "reason": "quota non valida"}
+        if not probs:
+            return {"ok": False, "reason": "no_oracle",
+                    "detail": "Pinnacle assente/incompleto/stantio "
+                              "(fail-closed: senza verita' non si decide)"}
+        p_true = float(probs.get(pick.get("esito_key")) or 0)
+        if not (0.0 < p_true <= 1.0):
+            return {"ok": False, "reason": "no_oracle",
+                    "detail": f"esito '{pick.get('esito_key')}' senza "
+                              "probabilita' fair"}
+        ev = p_true * (quota - 1.0) - (1.0 - p_true)
+        true_odd = 1.0 / p_true
+        required = true_odd * (1.0 + TOP_DOWN_MARGIN)
+        try:
+            from value_filter import EV_MIN as ev_min
+        except Exception:                                       # pragma: no cover
+            ev_min = po.DEFAULT_EV_MIN
+        # Le due letture della stessa condizione: se divergono, e' un bug del
+        # gate (una sola soglia EV nel sistema) — si logga, non si "sistema".
+        if abs((quota >= required) - (ev >= ev_min)) > 1e-12:
+            logger.warning("auto_bet: gate EV top-down incoerente su %s "
+                           "(ev=%.4f >= %.3f=%s vs quota %.4f >= %.4f) — "
+                           "verificare TOP_DOWN_MARGIN/EV_MIN",
+                           pick.get("match_id"), ev, ev_min, ev >= ev_min,
+                           quota, required)
+        return {"ok": True, "ev": round(ev, 6), "p_true": round(p_true, 6),
+                "true_odd": round(true_odd, 4),
+                "required_price": round(required, 4),
+                "ev_min": ev_min, "trigger": bool(ev >= ev_min),
+                "overround": probs.get("overround")}
+    except Exception as e:
+        return {"ok": False, "reason": f"errore valutazione ({e})"}
 
 
 def t60_kill_switch_status() -> dict:
@@ -1421,6 +1518,11 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
     floor, errore di rete) e per gli ordini riusciti un dict con
     {ok, market_id, selection_id, bet_id, status, price, stake}.
     """
+    if DRY_RUN:
+        logger.warning("auto_bet: DRY-RUN — _live_fill INTERCETTATO per %s "
+                       "(%s): nessun POST a SX Bet",
+                       pick.get("match_id"), pick.get("esito_key"))
+        return None
     try:
         import execution_engine as ee
     except Exception as e:
@@ -1732,6 +1834,44 @@ def run_today_bets(stake_eur: float | None = None,
                          pick["match_id"], pick["esito_key"])
             continue
 
+        # --- VALUTAZIONE TOP-DOWN (fase 2, 25/09): l'EV del segnale si
+        # calcola contro l'ORACOLO Pinnacle (de-vigato, letto DALLE CACHE,
+        # zero crediti) invece che contro le probabilita' del modello. Il
+        # Poisson resta a monte: ha prodotto il candidato e popola il ledger,
+        # ma non decide piu' il denaro. Un segnale senza oracolo (Pinnacle
+        # assente/incompleto/stantio) NON si ordina: fail-closed — senza una
+        # verita' di riferimento non c'e' ritardo da comprare.
+        # SOLO sulla corsia LIVE: la corsia paper (SIM) mantiene la base
+        # storica del segnale per non cambiare era al ledger che alimenta
+        # ML/CLV (lezione 22/09: il campione si misura, non si riscrive);
+        # l'oracolo governa il denaro reale.
+        if TOP_DOWN_EV and mode == "live":
+            verdict = _top_down_eval(pick)
+            if not verdict.get("ok"):
+                logger.info("auto_bet: %s (%s) top-down SKIP [%s]: %s",
+                            pick["match_id"], pick["esito_key"],
+                            verdict.get("reason"), verdict.get("detail") or "")
+                continue
+            pick["p_true"] = verdict["p_true"]
+            pick["top_down_ev"] = verdict["ev"]
+            pick["true_odd"] = verdict["true_odd"]
+            pick["required_price"] = verdict["required_price"]
+            if not verdict["trigger"]:
+                logger.info("auto_bet: %s (%s) @ %.2f EV top-down %+.2f%% < "
+                            "%.1f%% (true odd %.3f, richiesto %.3f): no value",
+                            pick["match_id"], pick["esito_key"],
+                            float(pick.get("quota") or 0),
+                            verdict["ev"] * 100.0,
+                            verdict["ev_min"] * 100.0,
+                            verdict["true_odd"], verdict["required_price"])
+                continue
+            logger.info("auto_bet: %s (%s) @ %.2f EV top-down %+.2f%% >= "
+                        "%.1f%% (p_true %.3f, true odd %.3f): CANDIDATO",
+                        pick["match_id"], pick["esito_key"],
+                        float(pick.get("quota") or 0),
+                        verdict["ev"] * 100.0, verdict["ev_min"] * 100.0,
+                        verdict["p_true"], verdict["true_odd"])
+
         # SIM: quota del segnale, nessun catalogo.
         if _too_close_to_start(pick.get("commence")):
             logger.info("auto_bet: %s vs %s a meno di %d min dall'inizio, salto",
@@ -1913,6 +2053,7 @@ def run_today_bets(stake_eur: float | None = None,
     # --- FASE 3: esegui e registra (LIVE via execution_engine oppure SIM) ---
     from tracker import save_bet
     placed: list[dict] = []
+    dry_run_blocked = 0
     for cand in candidates:
         pick_stake = cand["stake"]
         price = cand["price"]
@@ -1924,6 +2065,24 @@ def run_today_bets(stake_eur: float | None = None,
             logger.info("auto_bet: stake ridotto da cap esposizione totale per "
                         "%s (%s): €%.2f", cand["match_id"],
                         cand.get("total_cap_group", ""), pick_stake)
+
+        # --- DRY-RUN (fase 2, 25/09): il candidato ha superato TUTTI i gate
+        # (top-down EV, timing, cap, feed, liquidita'): qui partirebbe
+        # l'ordine. Si LOGGA quello che sarebbe partito e si passa al
+        # prossimo: NESSUN POST all'exchange, NESSUNA riga sul ledger (un
+        # ordine non piazzato non deve sembrare piazzato ne' a ledger ne'
+        # nei riepiloghi). E' l'intercettazione richiesta dal proprietario
+        # per misurare il flusso della strategia senza muovere denaro.
+        if DRY_RUN:
+            dry_run_blocked += 1
+            logger.warning("auto_bet: DRY-RUN — ordine INTERCETTATO %s vs %s "
+                           "(%s @ %.2f, stake %.2f USDC, EV top-down %+.2f%%, "
+                           "mode=%s): nessun POST a SX, nessuna riga sul "
+                           "ledger", cand.get("home"), cand.get("away"),
+                           cand.get("esito_key"), price, pick_stake,
+                           float(cand.get("top_down_ev") or 0.0) * 100.0,
+                           mode)
+            continue
 
         if mode == "live":
             filled = _live_fill(cand, pick_stake, price)
@@ -1978,6 +2137,11 @@ def run_today_bets(stake_eur: float | None = None,
     # leggere la configurazione ripetuta.
     if placed:
         logger.info("auto_bet: %d puntate piazzate (%s)", len(placed), mode)
+    elif DRY_RUN and dry_run_blocked:
+        logger.warning("auto_bet: DRY-RUN (%s) — %d candidati hanno superato "
+                       "tutti i gate e sono stati INTERCETTATI prima "
+                       "dell'ordine (dettagli nei log qui sopra)",
+                       mode, dry_run_blocked)
     else:
         logger.info("auto_bet: nessuna puntata (%s) — 0 candidati giocabili",
                     mode)

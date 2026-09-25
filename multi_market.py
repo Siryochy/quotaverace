@@ -1114,8 +1114,41 @@ def _finalize(bucket: Dict[str, Any]) -> Dict[str, Any]:
     return bucket
 
 
-def shadow_report(*, now: Optional[datetime] = None) -> Dict[str, Any]:
+def _filter_line(rep: Dict[str, Any]) -> str:
+    """Riga che DICHIARA il filtro applicato al report (o la sua assenza).
+
+    Senza questa riga un report filtrato e uno completo sono indistinguibili:
+    e' la stessa ragione per cui `excluded` e' dichiarato e mai nascosto.
+    """
+    f = rep.get("filter") or {}
+    if not f.get("applied"):
+        return ("Filtro: NESSUNO — mescola ere e strategie diverse "
+                "(usare --since, es. --since 2026-09-19)")
+    bits = []
+    if f.get("since"):
+        bits.append(f"era dal {f['since']}")
+    lo, hi = f.get("odds_min"), f.get("odds_max")
+    if lo is not None or hi is not None:
+        bits.append(f"quota {lo if lo is not None else '-'}-"
+                    f"{hi if hi is not None else '-'}")
+    return (f"Filtro: {' | '.join(bits)} → {f.get('rows_kept', 0)} righe "
+            f"tenute su {f.get('rows_total', 0)} "
+            f"({f.get('rows_excluded', 0)} escluse dal filtro)")
+
+
+def shadow_report(*, now: Optional[datetime] = None, since: Any = None,
+                  odds_min: Optional[float] = None,
+                  odds_max: Optional[float] = None) -> Dict[str, Any]:
     """Riepilogo della corsia multi-mercato (shadow OU + live AH), sola lettura.
+
+    `since` (ISO, es. "2026-09-19") + `odds_min`/`odds_max` restringono il
+    campione all'ERA strategica e alla FASCIA QUOTA correnti. Serve perche'
+    il 25/09/2026 lo split per stato da solo si e' rivelato INSUFFICIENTE: il
+    ROI aggregato dell'Over/Under (+21.21% su 30 chiuse) era portato per
+    intero da una pipeline ritirata (22 righe della vecchia `fixture_engine`,
+    quota media ~2.25, oggi `rejected`), mentre le 8 chiusure della strategia
+    in produzione davano **-10.9%**. Filtrare per era e' l'unico modo di
+    leggere un numero che corrisponda alla strategia che gira davvero.
 
     Il P/L e' separato per STATO del segnale, perche' le due popolazioni
     misurano cose diverse e sommarle da' un numero che non corrisponde a
@@ -1136,6 +1169,7 @@ def shadow_report(*, now: Optional[datetime] = None) -> Dict[str, Any]:
         "playable_statuses": list(PLAYABLE_STATUSES),
         "min_reliable_closed": MIN_RELIABLE_CLOSED,
     }
+    rows_seen = rows_kept = 0
     for market_type in MARKETS:
         entry = _empty_bucket()
         entry["quotes"] = 0
@@ -1144,8 +1178,15 @@ def shadow_report(*, now: Optional[datetime] = None) -> Dict[str, Any]:
         rejected = _empty_bucket()
         unclassified = _empty_bucket()
         try:
-            from tracker import get_predictions
-            rows = get_predictions(mercato=market_type, limit=5000)
+            from tracker import get_predictions, filter_predictions
+            rows_all = get_predictions(mercato=market_type, limit=5000)
+            # Il filtro e' quello CONDIVISO del ledger (`tracker`): la stessa
+            # "era" deve valere per il report shadow e per la diagnosi per
+            # mercato, altrimenti le due misure non coincidono.
+            rows = filter_predictions(rows_all, created_since=since,
+                                      odds_min=odds_min, odds_max=odds_max)
+            rows_seen += len(rows_all)
+            rows_kept += len(rows)
         except Exception as exc:
             logger.debug("multi_market: report %s fallito: %s", market_type, exc)
             rows = []
@@ -1170,6 +1211,12 @@ def shadow_report(*, now: Optional[datetime] = None) -> Dict[str, Any]:
         report["markets"][market_type]["playable"] = _finalize(playable)
         report["markets"][market_type]["rejected"] = _finalize(rejected)
         report["markets"][market_type]["unclassified"] = _finalize(unclassified)
+    report["filter"] = {
+        "since": since, "odds_min": odds_min, "odds_max": odds_max,
+        "applied": bool(since) or odds_min is not None or odds_max is not None,
+        "rows_total": rows_seen, "rows_kept": rows_kept,
+        "rows_excluded": max(0, rows_seen - rows_kept),
+    }
     return report
 
 
@@ -1223,7 +1270,8 @@ def format_report(data: Optional[Dict[str, Any]] = None) -> str:
              "Split per stato: giocabili "
              + "/".join(rep.get("playable_statuses") or PLAYABLE_STATUSES)
              + " | scartati rejected | soglia affidabilita' "
-             + f"{rep.get('min_reliable_closed', MIN_RELIABLE_CLOSED)} chiusure"]
+             + f"{rep.get('min_reliable_closed', MIN_RELIABLE_CLOSED)} chiusure",
+             _filter_line(rep)]
     for market_type, entry in (rep.get("markets") or {}).items():
         # Un riepilogo malformato (input esterno, JSON vecchio) non deve
         # rompere il report: si degrada la singola sezione, non il comando.
@@ -1255,6 +1303,15 @@ if __name__ == "__main__":                        # pragma: no cover
     parser.add_argument("command", nargs="?", default="report",
                         choices=("ingest", "scan", "picks", "report", "btts"))
     parser.add_argument("--json", action="store_true")
+    # Filtro d'ERA e di FASCIA QUOTA (25/09/2026): il report senza filtro
+    # mescola la pipeline ritirata (< 19/09, quota media ~2.25) con quella in
+    # produzione, e il ROI aggregato non corrisponde a nessuna strategia.
+    parser.add_argument("--since", default=None, metavar="YYYY-MM-DD",
+                        help="solo segnali NATI da questa data (es. 2026-09-19)")
+    parser.add_argument("--odds-min", type=float, default=None,
+                        help="quota minima (fascia corrente: 1.30)")
+    parser.add_argument("--odds-max", type=float, default=None,
+                        help="quota massima (fascia corrente: 1.80)")
     args = parser.parse_args()
     if args.command == "ingest":
         result = ingest()
@@ -1273,6 +1330,7 @@ if __name__ == "__main__":                        # pragma: no cover
         print(_json.dumps(probes, indent=2, default=str) if args.json
               else "sorveglianza mercati non modellati: " + format_probe(probes))
     else:
-        data = shadow_report()
+        data = shadow_report(since=args.since, odds_min=args.odds_min,
+                             odds_max=args.odds_max)
         print(_json.dumps(data, indent=2, default=str) if args.json
               else format_report(data))

@@ -752,3 +752,108 @@ class TestSorveglianzaBTTS:
         import pathlib
         src = pathlib.Path(mm.__file__).read_text()
         assert '"btts"' in src
+
+
+# ---------------------------------------------------------------------------
+# 10. Filtro d'ERA e di FASCIA QUOTA (25/09/2026)
+# ---------------------------------------------------------------------------
+
+
+def _seed_era(path, market, status, spec, tag="a"):
+    """Salva righe con data di nascita e quota ESPLICITE.
+
+    `spec`: lista di (created_at, quota, verdetto|None) — verdetto None = aperta.
+    La data di nascita e' la grandezza che definisce l'era (non la data di
+    saldo), quindi il seed la scrive a mano com'e' nel ledger.
+    """
+    defaults = {"won": 0.75, "lost": -1.0, "push": 0.0}
+    ids = [f"{market}-{status}-{tag}-{i}" for i in range(1, len(spec) + 1)]
+    for mid, (_created, quota, _verdict) in zip(ids, spec):
+        tracker.save_prediction(mid, market, "Over 2.5", quota, 0.6, 0.05,
+                                status=status)
+    conn = sqlite3.connect(path)
+    for mid, (created, _quota, verdict) in zip(ids, spec):
+        pl = None if verdict is None else defaults.get(verdict, 0.0)
+        conn.execute("UPDATE predictions SET created_at=?, esito_finale=?, "
+                     "profit=? WHERE match_id=? AND mercato=?",
+                     (created, verdict, pl, mid, market))
+    conn.commit()
+    conn.close()
+
+
+class TestFiltroEra:
+    """Il filtro che rende leggibile il report: era + fascia quota.
+
+    Il 25/09/2026 lo split per stato si e' rivelato INSUFFICIENTE: il ROI
+    aggregato OU (+21.21% su 30 chiuse) era portato per intero da una pipeline
+    ritirata (22 righe a quota media ~2.25), mentre le 8 chiusure della
+    strategia in produzione davano -10.9%. Questi test fissano il filtro che
+    separa le due popolazioni.
+    """
+
+    def test_since_isola_la_nuova_era(self, db):
+        _seed_era(db, "OU", "value",
+                  [("2026-09-05T10:00:00", 2.25, "won")] * 5 +
+                  [("2026-09-20T10:00:00", 1.50, "lost")] * 3)
+        tutto = mm.shadow_report()["markets"]["OU"]["playable"]
+        assert tutto["closed"] == 8 and tutto["roi"] > 0     # numero inquinato
+        era = mm.shadow_report(since="2026-09-19")["markets"]["OU"]["playable"]
+        assert era["closed"] == 3 and era["lost"] == 3
+        assert era["roi"] == pytest.approx(-1.0, abs=1e-6)
+        assert era["reliable"] is False
+
+    def test_fascia_quota_isola_le_quote_correnti(self, db):
+        _seed_era(db, "OU", "value",
+                  [("2026-09-20T10:00:00", 2.25, "won")] * 4 +
+                  [("2026-09-20T10:00:00", 1.55, "lost")] * 2)
+        band = mm.shadow_report(odds_min=1.30, odds_max=1.80)["markets"]["OU"]
+        assert band["playable"]["closed"] == 2
+        assert band["playable"]["lost"] == 2 and band["playable"]["won"] == 0
+
+    def test_filtro_combinato(self, db):
+        _seed_era(db, "OU", "value",
+                  [("2026-09-05T10:00:00", 1.50, "won")] +     # era vecchia
+                  [("2026-09-20T10:00:00", 2.25, "won")] +     # fuori fascia
+                  [("2026-09-20T10:00:00", 1.55, "lost")])     # dentro
+        play = mm.shadow_report(since="2026-09-19", odds_min=1.30,
+                                odds_max=1.80)["markets"]["OU"]["playable"]
+        assert play["closed"] == 1 and play["lost"] == 1
+
+    def test_filtro_dichiarato_nel_report(self, db):
+        _seed_era(db, "OU", "value",
+                  [("2026-09-05T10:00:00", 2.25, "won")] +
+                  [("2026-09-20T10:00:00", 1.55, "lost")])
+        rep = mm.shadow_report(since="2026-09-19", odds_min=1.30, odds_max=1.80)
+        f = rep["filter"]
+        assert f["applied"] is True and f["since"] == "2026-09-19"
+        assert f["rows_total"] == 2 and f["rows_kept"] == 1
+        assert f["rows_excluded"] == 1
+        out = mm.format_report(rep)
+        assert "era dal 2026-09-19" in out and "quota 1.3" in out
+
+    def test_senza_filtro_lo_dichiara(self, db):
+        _seed_era(db, "OU", "value", [("2026-09-20T10:00:00", 1.5, "won")])
+        rep = mm.shadow_report()
+        assert rep["filter"]["applied"] is False
+        assert rep["markets"]["OU"]["playable"]["closed"] == 1
+        assert "NESSUNO" in mm.format_report(rep)
+
+    def test_riga_senza_data_esclusa_dal_filtro(self, db):
+        """Fail-closed: senza data non si puo' dimostrare l'appartenenza."""
+        _seed_era(db, "OU", "value", [("", 1.50, "won")])
+        assert mm.shadow_report()["markets"]["OU"]["playable"]["closed"] == 1
+        era = mm.shadow_report(since="2026-09-19")["markets"]["OU"]["playable"]
+        assert era["closed"] == 0
+
+    def test_usa_il_filtro_condiviso_del_ledger(self):
+        """Una sola definizione dell'era: nessuna copia dentro multi_market."""
+        import pathlib
+        src = pathlib.Path(mm.__file__).read_text()
+        assert "filter_predictions" in src
+        assert "created_since=since" in src
+
+    def test_cli_espone_i_flag_del_filtro(self):
+        import pathlib
+        src = pathlib.Path(mm.__file__).read_text()
+        for flag in ("--since", "--odds-min", "--odds-max"):
+            assert flag in src

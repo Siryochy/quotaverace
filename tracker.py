@@ -1590,7 +1590,89 @@ def save_prediction(match_id, mercato, esito, quota, prob, ev,
     conn.commit(); conn.close()
 
 
-def get_predictions(mercato=None, status=None, closed=None, limit=500):
+def _date_key(value) -> str:
+    """Chiave di data CONFRONTABILE per le date del ledger.
+
+    Le date del ledger sono ISO con la 'T' (a volte con 'Z' o con l'offset)
+    mentre SQLite produce date con lo SPAZIO: confrontarle direttamente e' la
+    classe di bug del 17/09/2026 (la scadenza delle righe slittava di un
+    giorno perche' 'T' > ' ' in una comparazione fra stringhe). Qui la
+    normalizzazione e' in PYTHON, cosi' ogni confronto fra date passa da un
+    solo posto e non dipende dal formato della fonte.
+    """
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    s = s.replace("T", " ")
+    if s.endswith("Z"):
+        s = s[:-1]
+    if len(s) > 19 and s[19] in "+-":        # offset '+02:00' / '-0300'
+        s = s[:19]
+    return s[:19]
+
+
+def _row_era_key(row) -> str:
+    """Data che definisce l'ERA di un segnale: quando e' NATO (`created_at`).
+
+    `created_at` e' il momento in cui la strategia ha prodotto la riga, ed e'
+    la grandezza giusta per separare due strategie diverse (non `settled_at`,
+    che dipende da quando e' arrivato il risultato). Solo se manca si ripiega
+    su `settled_at`: una riga senza data di nascita non deve sparire.
+    """
+    try:
+        return _date_key(row.get("created_at") or row.get("settled_at"))
+    except Exception:
+        return ""
+
+
+def filter_predictions(rows, *, created_since=None, odds_min=None,
+                       odds_max=None):
+    """Filtro CONDIVISO del ledger previsioni: era strategica + fascia quota.
+
+    UNA sola definizione per tutti i consumatori (report shadow multi-mercato,
+    diagnosi per mercato, CLI): due implementazioni diverse della stessa
+    "era" sono il modo silenzioso di ottenere due misure che non coincidono
+    — ed e' esattamente la trappola che il 25/09/2026 ha reso invisibile il
+    vero ROI dell'Over/Under (il +21.21% era portato per intero da una
+    pipeline ritirata: 22 righe a quota media ~2.25).
+
+    `created_since` (ISO, es. "2026-09-19"): tiene solo i segnali NATI da
+    quella data in poi.
+    `odds_min`/`odds_max`: fascia di quota.
+
+    FAIL-CLOSED sul dato mancante: con un filtro attivo una riga senza data
+    (o con quota non leggibile) viene ESCLUSA — non si puo' dimostrare che
+    appartenga alla popolazione richiesta — e il chiamante la dichiara fra
+    le escluse, cosi' non sparisce in silenzio.
+    """
+    out = list(rows or [])
+    if created_since:
+        cutoff = _date_key(created_since)
+        if cutoff:
+            out = [r for r in out if _row_era_key(r) >= cutoff]
+
+    def _quota(row):
+        try:
+            return float(row.get("quota"))
+        except (TypeError, ValueError, AttributeError):
+            return None
+
+    if odds_min is not None:
+        out = [r for r in out
+               if _quota(r) is not None and _quota(r) >= float(odds_min)]
+    if odds_max is not None:
+        out = [r for r in out
+               if _quota(r) is not None and _quota(r) <= float(odds_max)]
+    return out
+
+
+def get_predictions(mercato=None, status=None, closed=None, limit=500, *,
+                    created_since=None, odds_min=None, odds_max=None):
+    """Righe del ledger previsioni (filtri opzionali di era e fascia quota).
+
+    I filtri sono applicati da `filter_predictions` (definizione unica):
+    vedi la sua docstring per la semantica del fail-closed sul dato mancante.
+    """
     conn = _get_conn(); c = conn.cursor()
     q = "SELECT match_id, mercato, esito, quota, prob, ev, market_prob, market_edge, " \
         "status, esito_finale, profit, created_at, settled_at, league FROM predictions"
@@ -1608,13 +1690,15 @@ def get_predictions(mercato=None, status=None, closed=None, limit=500):
     q += " ORDER BY id DESC LIMIT ?"; args.append(limit)
     rows = c.execute(q, args).fetchall()
     conn.close()
-    return [
+    out = [
         {"match_id": r[0], "mercato": r[1], "esito": r[2], "quota": r[3],
          "prob": r[4], "ev": r[5], "market_prob": r[6], "market_edge": r[7],
          "status": r[8], "esito_finale": r[9], "profit": r[10],
          "created_at": r[11], "settled_at": r[12], "league": r[13]}
         for r in rows
     ]
+    return filter_predictions(out, created_since=created_since,
+                              odds_min=odds_min, odds_max=odds_max)
 
 
 def _ah_halves(line: float):
@@ -1871,7 +1955,8 @@ def settle_predictions():
     return settled, pushes
 
 
-def predictions_summary(mercato=None, settled_since=None, statuses=None):
+def predictions_summary(mercato=None, settled_since=None, statuses=None, *,
+                        created_since=None, odds_min=None, odds_max=None):
     """Riepilogo previsioni CHIUSE per mercato: hit, ROI, gap EV, edge mercato.
 
     E' la telemetria di calibrazione: mostra per ogni mercato se il modello
@@ -1883,10 +1968,19 @@ def predictions_summary(mercato=None, settled_since=None, statuses=None):
     indicati: serve a MISURARE la strategia (cio' che sarebbe stato giocato)
     invece di sommare i candidati scartati dai gate, che sono un'altra
     popolazione. Default None = tutti gli stati (comportamento storico).
+
+    `created_since` + `odds_min`/`odds_max` (25/09/2026): filtro di ERA e di
+    FASCIA QUOTA, applicato da `filter_predictions` (definizione unica del
+    progetto). `created_since` e' la data di NASCITA del segnale, quindi
+    distinta da `settled_since` (data di saldo): servono a domande diverse e
+    vengono tenute separate di proposito.
     """
-    rows = get_predictions(mercato=mercato, closed=True, limit=100000)
+    rows = get_predictions(mercato=mercato, closed=True, limit=100000,
+                           created_since=created_since,
+                           odds_min=odds_min, odds_max=odds_max)
     if settled_since:
-        rows = [r for r in rows if (r.get("settled_at") or "") >= settled_since]
+        cutoff = _date_key(settled_since)
+        rows = [r for r in rows if _date_key(r.get("settled_at")) >= cutoff]
     if statuses is not None:
         wanted = {str(s).strip().lower() for s in statuses}
         rows = [r for r in rows if str(r.get("status") or "").strip().lower() in wanted]

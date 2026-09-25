@@ -26,6 +26,20 @@ CLI:
   venv/bin/python market_diagnose.py --min-total 50  # soglia campione totale
   venv/bin/python market_diagnose.py --all-statuses  # confronto: include gli
                                                      # scartati (NON decisionale)
+  venv/bin/python market_diagnose.py --since 2026-09-19 --odds-min 1.30 \
+                                     --odds-max 1.80
+                                                     # SOLO l'era strategica
+                                                     # corrente e la fascia
+                                                     # quota corrente
+
+⚠️ **Filtro d'ERA (25/09/2026)**: `--since` + `--odds-min/--odds-max`
+restringono il campione ai segnali NATI dopo una data e con una quota in
+fascia. Serve perche' lo split per stato da solo non basta: il 25/09 il report
+Over/Under mostrava +21.21% su 30 chiusure, ma 22 di quelle righe erano della
+pipeline ritirata (quota media ~2.25) mentre le 8 della strategia in
+produzione davano -10.9%. Il filtro usa `tracker.filter_predictions` (stessa
+definizione per il report shadow multi-mercato): due implementazioni diverse
+della stessa "era" produrrebbero due misure che non coincidono.
 
 Exit code: 0 = nessuna azione consigliata (anche campione insufficiente),
            1 = trovati mercati critici da mettere a punto.
@@ -67,10 +81,19 @@ def _label(key: str) -> str:
     return LABELS.get(key, key)
 
 
+def _filtro_block(filtro: Optional[Dict]) -> Dict:
+    """Normalizza il filtro d'era/fascia per il report (mai dedotto a valle)."""
+    f = dict(filtro or {})
+    f["applied"] = (bool(f.get("since")) or f.get("odds_min") is not None
+                    or f.get("odds_max") is not None)
+    return f
+
+
 def diagnose(by_mkt: Dict[str, Dict], skipped: Optional[Dict[str, Dict]] = None,
              min_total: int = MIN_TOTAL,
              min_per_market: int = MIN_PER_MARKET, gap_pp: float = GAP_PP,
-             prob_gap_pp: float = PROB_GAP_PP) -> Dict:
+             prob_gap_pp: float = PROB_GAP_PP,
+             filtro: Optional[Dict] = None) -> Dict:
     """Analizza predictions_summary() per mercato e ritorna la diagnosi.
 
     `by_mkt`: {mercato: {n, won, lost, push, hit_rate, roi, avg_ev, gap,
@@ -177,6 +200,7 @@ def diagnose(by_mkt: Dict[str, Dict], skipped: Optional[Dict[str, Dict]] = None,
         "critici": critici,
         "azioni": azioni,
         "note": note,
+        "filtro": _filtro_block(filtro),
         "parametri": {"min_total": min_total, "min_per_market": min_per_market,
                       "gap_pp": gap_pp, "prob_gap_pp": prob_gap_pp},
     }
@@ -269,7 +293,8 @@ def _subtract(everything: Dict[str, Dict], playable: Dict[str, Dict]) -> Dict[st
     return out
 
 
-def analyze_db(all_statuses: bool = False, **kwargs) -> Dict:
+def analyze_db(all_statuses: bool = False, *, since=None, odds_min=None,
+               odds_max=None, **kwargs) -> Dict:
     """Diagnosi sul DB reale: legge predictions_summary() da tracker.
 
     Default (22/09): il giudizio usa SOLO i segnali giocabili
@@ -279,15 +304,24 @@ def analyze_db(all_statuses: bool = False, **kwargs) -> Dict:
 
     `all_statuses=True` ripristina il comportamento pre-22/09 (tutto il
     ledger): e' un CONFRONTO, non una modalita' decisionale.
+
+    `since` + `odds_min`/`odds_max` (25/09/2026): restringono il campione
+    all'ERA strategica e alla FASCIA QUOTA correnti. Il filtro viene passato a
+    ENTRAMBE le letture (giocabili e totale): se il blocco `excluded` fosse
+    calcolato su una popolazione diversa da quella giudicata, il residuo non
+    sarebbe piu' il complemento esatto dei giocabili.
     """
     from tracker import predictions_summary
+    extra = {"created_since": since, "odds_min": odds_min,
+             "odds_max": odds_max}
+    filtro = {"since": since, "odds_min": odds_min, "odds_max": odds_max}
     if all_statuses:
-        return diagnose(predictions_summary(), **kwargs)
+        return diagnose(predictions_summary(**extra), filtro=filtro, **kwargs)
     from value_filter import PLAYABLE_TIERS
-    playable = predictions_summary(statuses=PLAYABLE_TIERS)
+    playable = predictions_summary(statuses=PLAYABLE_TIERS, **extra)
     return diagnose(playable,
-                    skipped=_subtract(predictions_summary(), playable),
-                    **kwargs)
+                    skipped=_subtract(predictions_summary(**extra), playable),
+                    filtro=filtro, **kwargs)
 
 
 def _fmt_pct(v: Optional[float], digits: int = 1) -> str:
@@ -325,6 +359,19 @@ def _report(res: Dict, all_statuses: bool = False) -> str:
     else:
         out = ["🔬 Diagnosi calibrazione per mercato — SOLO segnali giocabili"]
         label = "Campione giocabile"
+    filtro = res.get("filtro") or {}
+    if filtro.get("applied"):
+        bits = []
+        if filtro.get("since"):
+            bits.append(f"era dal {filtro['since']}")
+        lo, hi = filtro.get("odds_min"), filtro.get("odds_max")
+        if lo is not None or hi is not None:
+            bits.append(f"quota {lo if lo is not None else '-'}-"
+                        f"{hi if hi is not None else '-'}")
+        out.append(f"Filtro: {' | '.join(bits)}")
+    else:
+        out.append("Filtro: NESSUNO — mescola ere/strategie diverse "
+                   "(usare --since, es. --since 2026-09-19)")
     out.append(
         f"{label}: {t['n']} chiusi (V {t['won']} / P {t['lost']} / "
         f"Push {t['push']}) | ROI {_fmt_pct(t['roi'], 2)} | EV atteso "
@@ -377,9 +424,18 @@ def main(argv=None) -> int:
                     help="include TUTTO il ledger (anche rejected/no_value): "
                          "e' un confronto con il comportamento pre-22/09, "
                          "NON una modalita' decisionale")
+    ap.add_argument("--since", default=None, metavar="YYYY-MM-DD",
+                    help="solo segnali NATI da questa data (era strategica, "
+                         "es. 2026-09-19)")
+    ap.add_argument("--odds-min", type=float, default=None,
+                    help="quota minima (fascia corrente: 1.30)")
+    ap.add_argument("--odds-max", type=float, default=None,
+                    help="quota massima (fascia corrente: 1.80)")
     args = ap.parse_args(argv)
 
     res = analyze_db(all_statuses=args.all_statuses,
+                     since=args.since, odds_min=args.odds_min,
+                     odds_max=args.odds_max,
                      min_total=args.min_total,
                      min_per_market=args.min_per_market,
                      gap_pp=args.gap, prob_gap_pp=args.prob_gap)

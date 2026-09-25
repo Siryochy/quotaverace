@@ -5446,3 +5446,175 @@ stantia da `~/.ssh/known_hosts` (autorizzato dal proprietario;
 `ssh-keygen -f ~/.ssh/known_hosts -R ssh.railway.com`). Nota permanente: dopo
 la rimozione, la prima connessione non-interattiva puo' richiedere di
 riaccettare l'host key.
+
+#### Filtro d'ERA e di FASCIA QUOTA: il prerequisito (25/09/2026)
+
+Direttiva del proprietario dopo il verdetto d'era sull'O/U: rendere la misura
+ripetibile con un comando nativo, invece di doverla rifare a mano ogni volta.
+**Implementato e verificato; NON ancora pushato** (in attesa del via libera).
+
+**1) UNA SOLA DEFINIZIONE, NEL LEDGER** (`tracker.filter_predictions`):
+- `tracker.filter_predictions(rows, created_since=, odds_min=, odds_max=)`;
+- `tracker.get_predictions(..., created_since=, odds_min=, odds_max=)` e
+  `tracker.predictions_summary(..., created_since=, odds_min=, odds_max=)`;
+- **era = `created_at`** (quando il segnale e' NATO), con ripiego su
+  `settled_at` solo se manca: separa due STRATEGIE, non due date di saldo.
+  `created_since` resta distinto da `settled_since` (che esisteva gia'):
+  sono due domande diverse e un test lo blinda.
+- **fail-closed sul dato mancante**: con un filtro attivo una riga senza data
+  (o con quota non leggibile) viene ESCLUSA — non si puo' dimostrare che
+  appartenga alla popolazione richiesta. I due filtri sono INDIPENDENTI:
+  manca la data -> fuori dal filtro d'era; manca la quota -> fuori dal filtro
+  di fascia (una riga con data valida non sparisce perche' le manca la quota).
+- **date normalizzate in PYTHON** (mai confronti SQL fra date): lezione del
+  17/09 — il ledger usa ISO con la 'T', SQLite produce lo SPAZIO, e a parita'
+  di giorno la riga risulterebbe piu' nuova del cutoff. Verificati 'T', 'Z',
+  offset, microsecondi e spazio.
+
+**2) I DUE CONSUMATORI** (nessuna copia della logica):
+- `multi_market.shadow_report(since=, odds_min=, odds_max=)` usa
+  `filter_predictions`; il report lo **DICHIARA SEMPRE** (riga `Filtro:` + blocco
+  `filter` nel JSON con `rows_total`/`rows_kept`/`rows_excluded`), e senza
+  filtro scrive esplicitamente `Filtro: NESSUNO — mescola ere e strategie
+  diverse (usare --since ...)`: un report filtrato e uno completo non devono
+  essere indistinguibili.
+- `market_diagnose.analyze_db(since=, odds_min=, odds_max=)` passa il filtro a
+  **ENTRAMBE** le letture (giocabili e totale): se il blocco `excluded` fosse
+  calcolato su un'altra popolazione, giocabili ed esclusi non sarebbero piu'
+  complementari e un pezzo di ledger sparirebbe dai conti (test dedicato).
+
+**3) CLI**: `multi_market.py report --since 2026-09-19 --odds-min 1.30
+--odds-max 1.80` e (stessi flag) `market_diagnose.py`. Nessuna env nuova,
+quindi nessuna modifica a `.railway/railway.ts`; i default restano INVARIATI
+(senza flag il comportamento e' quello storico, e i test preesistenti passano).
+
+**4) VERIFICA SUI DATI REALI (senza deploy):** moduli e uno SNAPSHOT del DB
+copiati in `/tmp/era` del container (`QUOTAVERACE_DATA_DIR=/tmp/era
+PYTHONPATH=/app`), produzione non toccata, `/tmp` rimosso a fine misura.
+
+```
+SENZA FILTRO   OU giocabili: 30 chiuse (15V/11P/4push) | ROI +21.21%   <- inquinato
+CON FILTRO     Filtro: era dal 2026-09-19 | quota 1.3-1.8 -> 31 righe tenute su 456 (425 escluse)
+               OU giocabili:  8 chiuse (3V/2P/3push) | ROI -10.95%
+               AH giocabili:  4 chiuse (3V/0P/1push) | ROI +37.97%
+market_diagnose filtrato: 13 chiusi giocabili | ROI -2.75% | EV atteso +16.24 | gap -18.99
+               OU  n=8  ROI -10.95%  probGap -15.1  <- overconfidence
+               AH  n=4  ROI +37.97%  probGap +32.8
+               1X2 n=1  ROI -100%    (riga singola dell'era nuova)
+               fuori dai calcoli: 73 righe non giocabili, dichiarate
+```
+Il `-10.95%` riproduce esattamente la misura manuale del 25/09 (-10.9%): il
+comando nativo e' ora la fonte di verita' per la soglia delle **30 chiusure
+post-19/09 con ROI positivo** decisa dal proprietario per `ENABLE_LIVE_OU`.
+
+**5) Test**: 128 verdi sui tre file (`test_predictions.py`,
+`test_multi_market.py`, `test_market_diagnose.py`) + 171 di regressione
+(`test_reports`, `test_performance_report`, `test_ml_*`, `test_dedup_ml`,
+`test_auto_bet`, `test_decision_compare`, `test_league_gate_impact`,
+`test_flow_measure`); `compileall` OK, 0 marker di conflitto.
+⚠️ Un mio test aveva l'aspettativa sbagliata (pretendeva esclusa dal filtro
+d'era una riga con data VALIDA ma senza quota): corretto separando i due
+filtri — il codice era giusto, il test no.
+
+### Fase 2 — Integrazione del comparatore + Dry-Run (25/09/2026, sera)
+
+Direttiva del proprietario, quattro passi in sequenza: (1) pop dello stash,
+(2) EV top-down da `pinnacle_oracle` bypassando il Poisson, (3) flag
+dry-run che intercetta l'ordine prima del POST a SX Bet, (4) commit e push
+del branch `feature/top-down-pinnacle`.
+
+**1) STASH RECUPERATO (con un'intuizione di sequenza).** Il pop diretto era
+bloccato da AGENTS.md modificato in working tree (la Fase 1 non era ancora
+committata): committata prima la Fase 1 (`dcc9699`), poi il pop e' filato
+liscio (base dello stash = `5fb4471` = HEAD del branch, AGENTS.md si e'
+fuso da solo: 0 marker di conflitto). Nel branch ora c'e' ANCHE il filtro
+era/fascia quota (`tracker.filter_predictions` + CLI `--since/--odds-min/
+--odds-max`), il prerequisito per leggere il campione OU dell'era nuova.
+Test del codice recuperato: 128 verdi (test_predictions, test_multi_market,
+test_market_diagnose).
+
+**2) ORACOLO PER PARTITA DALLE CACHE — `pinnacle_oracle.load_oracle(home,
+away, sport_key=None)` (0 crediti, nuovo blocco 3 del modulo).**
+- Legge le STESSE cache della rotazione quote (`toa_<sport>.json`), ordinate
+  per freschezza; match per SOTTOSTRINGA case-insensitive di ENTRAMBE le
+  squadre sulla STESSA riga del payload (i nomi the-odds-api del segnale
+  coincidono con quelli del payload: stessa fonte; la sottostringa copre
+  "Tottenham" vs "Tottenham Hotspur").
+- Fail-closed: None se Pinnacle non ha i TRE esiti 1X2 (de-vig su 2 su 3
+  distorcerrebbe), o se la cache e' piu' vecchia di `CACHE_MAX_AGE_H`
+  (default 24, env `PINNACLE_CACHE_MAX_AGE_H`) — un oracolo stantio non e'
+  il mercato.
+- Memo di lettura su (mtime, size): il giro gira ogni 60s e piu' pick
+  condividono la stessa lega; una cache riscritta si auto-invalida e una
+  cartella diversa (test) non condivide nulla.
+- `sport_key` opzionale restringe la lettura a una cache (nessun uso oggi).
+- Tripwire Fase 1 intatti: la direzione e' auto_bet -> oracolo (il modulo
+  NON menziona il percorso ordini: un primo tentativo di docstring lo
+  faceva ed e' stato corretto PRIMA del push).
+
+**3) EV TOP-DOWN NEL GIRO ORDINI (`auto_bet._top_down_eval` + wiring FASE 1
+di `run_today_bets`, env `TOP_DOWN_EV` default ON, `TOP_DOWN_MARGIN` 0.02).**
+- La p_true arriva da `load_oracle` (loader iniettabile `auto_bet.
+  _top_down_load`); la quota del segnale resta il prezzo; l'EV e' quello
+  dell'oracolo: `EV = p_true x (quota-1) - (1-p_true)`. Le probabilita' del
+  modello nel pick (`market_prob`, `best_ev`) NON entrano nella decisione
+  (test dedicato: EV invariato anche con prob. modello assurde).
+- Soglia EV UNA: `value_filter.EV_MIN` (l'oracolo importa la STESSA
+  costante). `required_price = true_odd x (1+TOP_DOWN_MARGIN)` e' la
+  seconda forma della STESSA condizione; se le due letture divergono il
+  codice LOGGA (non "sistema"): una divergenza e' un bug del gate.
+- Gate applicato SOLO sulla corsia LIVE (`mode == "live"`): la corsia paper
+  SIM mantiene la base storica del segnale per non cambiare era al ledger
+  che alimenta ML/CLV (lezione 22/09). Fail-closed: segnale senza oracolo
+  (`no_oracle`) NON si ordina — senza verita' non c'e' ritardo da comprare.
+- ⚠️ In produzione il gate diventa attivo SOLO quando esiste
+  `AUTO_BET_MODE=live` + provider pronto: in SIM il percorso resta quello
+  storico (il log diagnostico del candidato top-down esce comunque in
+  dry-run, vedi sotto).
+
+**4) DRY-RUN (`auto_bet.DRY_RUN`, env `AUTO_BET_DRY_RUN`, default OFF).**
+- In `run_today_bets` (FASE 3): il candidato che ha superato TUTTI i gate
+  (top-down EV, timing, cap, feed, liquidita') viene LOGGATO a WARNING con
+  match, esito, quota, stake, EV top-down e mode, e SALTATO: NESSUN POST
+  all'exchange, NESSUNA riga sul ledger `bets` (un ordine non piazzato non
+  deve sembrare piazzato). Riepilogo finale dedicato ("N candidati ...
+  INTERCETTATI").
+- Seconda barriera in `_live_fill` (difesa in profondita'): col flag attivo
+  ritorna None PRIMA di costruire l'engine — nessun POST a SX possibile da
+  qualunque chiamante (test diretto).
+- Default OFF: il comportamento di produzione e' invariato finche' il
+  proprietario non accende `AUTO_BET_DRY_RUN=1` (in IaC gia' dichiarata).
+
+**5) TEST.** `test_top_down.py` (nuovo, 32 verdi offline: load_oracle con
+cache finte — p_true/fair/longshot/varianti nome/fail-closed 3 su 3/stantia/
+sottostringa senza fusione/zero HTTP; valutatore — EV sull'oracolo, trigger,
+bypass modello, no_oracle, soglia unica, equivalenza delle due letture su
+griglia; wiring — dry-run intercetta, EV basso non arriva all'esecuzione,
+top-down spento riprende il percorso storico, log dry-run con i dettagli,
+_live_fill bloccato; tripwire — IaC documentata, oracolo senza riferimenti
+al percorso ordini). Aggiornati in modo dichiarato: `test_auto_bet_live.py`
+(stub oracolo nel fixture autouse: quei test misurano staking/cap, non l'EV;
+la semantica del gate e' in test_top_down) e `verify_guardrails.py` (stub
+dichiarato: lo scenario C passerebbe per `no_oracle` invece che per il cap
+severo — ora la controprova col floor funziona davvero).
+Regressioni verdi: test_auto_bet x3 + favourites_only + t60_breakers (122),
+test_value_filter + risk_guards + league_gate + multi_market + market_calib
++ ou_exclusion + secret_hygiene + settlement_pause + predictions +
+market_diagnose (198), test_bot + web_api + liquidity_monitor +
+flow_measure + reports + tier (105), test_decision_limits + compare +
+shadow + execution_engine (110). `verify_guardrails.py`: A-G TUTTI
+bloccano. `compileall` OK. `railway config plan`: 0 to add, 1 to change,
+0 to destroy.
+
+**6) IaC.** `TOP_DOWN_EV`, `TOP_DOWN_MARGIN`, `AUTO_BET_DRY_RUN` dichiarate
+`preserve()` nel blocco api di `.railway/railway.ts` (accanto ai T60_*).
+⚠️ NON impostate su Railway: valgono i default di codice (gate ON, dry-run
+OFF). Nota operativa: `PINNACLE_CACHE_MAX_AGE_H` resta di codice (non e'
+necessaria in preserve finche' non si tara).
+
+**7) STATO.** Branch `feature/top-down-pinnacle` pushato (Fase 1 `dcc9699`
++ stash + Fase 2). NON merged su main: niente deploy finche' non si decide
+(il gate top-down e' default ON: al merge governerebbe subito la corsia
+live, con dry-run ancora OFF). Lettura rapida del flusso top-down:
+`venv/bin/python pinnacle_oracle.py --from-cache` (0 crediti) e, col branch
+deployato, `AUTO_BET_DRY_RUN=1` per vedere i candidati intercettati nei log.

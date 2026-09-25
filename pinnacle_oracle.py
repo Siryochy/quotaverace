@@ -51,6 +51,7 @@ import argparse
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -216,7 +217,136 @@ def fair_odds(true_probs: Dict[str, Any]) -> Dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
-# 3. TRIGGER: EV dello scarto fra vera probabilita' e prezzo SX
+# 3. ORACOLO PER PARTITA: la p_true DALLE CACHE (0 crediti) — fase 2
+# ---------------------------------------------------------------------------
+
+def _cache_candidates(cache_dir: Optional[Path] = None) -> List[Path]:
+    """Cache quote ordinate per freschezza (prima la piu' recente).
+
+    Sono le STESSE cache della rotazione quote (`toa_<sport>.json`): il
+    percorso dell'oracolo NON chiama mai l'API, quindi costa 0 crediti.
+    L'ordinamento serve a decidere in modo deterministico se la stessa
+    partita compare in piu' cache (es. una squadra in coppa e in campionato).
+    """
+    files = _cache_files(Path(cache_dir) if cache_dir else Path(DATA_DIR))
+    try:
+        def _ts(p: Path) -> float:
+            try:
+                return float(json.loads(p.read_text(encoding="utf-8")).get("ts") or 0)
+            except Exception:
+                return 0.0
+        files.sort(key=_ts, reverse=True)
+    except Exception:
+        pass
+    return files
+
+
+#: Un oracolo piu' vecchio di cosi' non e' piu' il mercato: e' storia. Le
+#: quote di una partita muovono (specie vicino al kickoff) e la cache si
+#: riscrive a ogni fetch — il tetto serve solo a NON decidere su un
+#: palinsesto abbandonato (chiave sostituita, lega non piu' interrogata).
+#: Override: PINNACLE_CACHE_MAX_AGE_H.
+CACHE_MAX_AGE_H: float = float(os.getenv("PINNACLE_CACHE_MAX_AGE_H", "24"))
+
+
+_CACHE_MEMO: Dict[Path, tuple] = {}
+
+
+def _read_cache(path: Path) -> Optional[Dict[str, Any]]:
+    """Contenuto di UNA cache con memo su (mtime, size).
+
+    Il giro ordini gira ogni 60s e piu' pick condividono la stessa lega:
+    senza memo si rileggerebbero gli stessi file decine di volte al minuto.
+    La chiave include mtime e size, quindi una cache riscritta da un fetch
+    si auto-invalida e una cartella diversa (test) non condivide nulla.
+    """
+    try:
+        st = path.stat()
+        key = (st.st_mtime_ns, st.st_size)
+    except Exception:
+        return None
+    hit = _CACHE_MEMO.get(path)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        data = None
+    if len(_CACHE_MEMO) > 64:
+        _CACHE_MEMO.clear()
+    _CACHE_MEMO[path] = (key, data)
+    return data
+
+
+def load_oracle(home: str, away: str, sport_key: Optional[str] = None, *,
+                cache_dir: Optional[Path] = None,
+                devig_method: Optional[str] = None,
+                now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """Probabilita' "vera" per esito per UNA partita, letta DALLE CACHE.
+
+    E' il punto di aggancio della fase 2: il giro ordini chiede QUI la
+    p_true di Pinnacle e calcola l'EV del segnale sull'oracolo invece che
+    sul modello.
+
+    **Costo: 0 crediti** — legge i file `toa_<sport>.json` che la rotazione
+    quote scarica gia' (nessuna chiamata HTTP in questo percorso; il percorso
+    `--live` resta diagnostica a parte). Scelta della partita per SOTTOSTRINGA
+    case-insensitive: i nomi the-odds-api del payload coincidono con quelli
+    del segnale (stessa fonte), ma restano varianti tipo "Tottenham Hotspur".
+    Due partite diverse non si confondono: `home` e `away` devono combaciare
+    ENTRAMBE nella stessa riga del payload.
+
+    Fail-closed: None se la partita non e' nel payload, se Pinnacle non ha i
+    TRE esiti (de-vig su 2 su 3 distorcerrebbe l'oracolo) o se la cache e' piu'
+    vecchia di `CACHE_MAX_AGE_H` — un oracolo stantio non e' il mercato.
+
+    Args:
+        home, away: nomi squadre del segnale (the-odds-api).
+        sport_key: opzionale, restringe la lettura a UNA cache
+            (`toa_<sport_key>.json`). None = ricerca su tutte, dalla piu'
+            recente (una squadra puo' comparire in due competizioni).
+        devig_method: override puntuale del metodo (default DEVIG_METHOD).
+    """
+    folder = Path(cache_dir) if cache_dir else Path(DATA_DIR)
+    if sport_key:
+        paths = [folder / f"toa_{sport_key}.json"]
+    else:
+        paths = _cache_candidates(folder)
+    ts_now = time.time() if now is None else float(now)
+    h, a = _cf(home), _cf(away)
+    if not h or not a:
+        return None
+    for path in paths:
+        data = _read_cache(path)
+        if not isinstance(data, dict):
+            continue
+        age_h = (ts_now - float(data.get("ts") or 0)) / 3600.0
+        if age_h > CACHE_MAX_AGE_H:
+            continue
+        payload = (data or {}).get("payload") or []
+        for match in payload:
+            if not isinstance(match, dict):
+                continue
+            mh = _cf(match.get("home_team"))
+            ma = _cf(match.get("away_team"))
+            # Match per SOTTOSTRINGA, entrambe le squadre sulla STESSA riga
+            # (mai l'incrocio: due partite diverse non si fondono).
+            if (not mh or not ma) or (h not in mh and mh not in h) \
+                    or (a not in ma and ma not in a):
+                continue
+            quotes = pinnacle_quotes([match],
+                                     match.get("home_team") or "",
+                                     match.get("away_team") or "")
+            if not quotes:
+                continue                       # fail-closed: servono 3 su 3
+            probs = true_probabilities(quotes, method=devig_method)
+            if probs:
+                return probs
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 4. TRIGGER: EV dello scarto fra vera probabilita' e prezzo SX
 # ---------------------------------------------------------------------------
 
 def ev_gate(true_probs: Dict[str, Any], prices: Dict[str, float], *,
@@ -269,7 +399,7 @@ def value_candidates(true_probs: Dict[str, Any], prices: Dict[str, float], *,
 
 
 # ---------------------------------------------------------------------------
-# 4. PERCORSO A COSTO ZERO: le cache che abbiamo gia' scaricato
+# 5. PERCORSO A COSTO ZERO: le cache che abbiamo gia' scaricato
 # ---------------------------------------------------------------------------
 
 def _cache_files(cache_dir: Path) -> List[Path]:
@@ -363,7 +493,7 @@ def scan_cache(cache_dir: Optional[Path] = None, *,
 
 
 # ---------------------------------------------------------------------------
-# 5. PERCORSO LIVE (1 credito): SOLO diagnostica, misura il costo reale
+# 6. PERCORSO LIVE (1 credito): SOLO diagnostica, misura il costo reale
 # ---------------------------------------------------------------------------
 
 def fetch_pinnacle_payload(sport_key: str, *, days_ahead: int = 7,

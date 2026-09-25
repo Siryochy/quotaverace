@@ -79,6 +79,12 @@ export default defineRailway(() => {
     T60_MAX_STAKE_USDC: preserve(),
     T60_MAX_ODDS: preserve(),
     T60_KILL_WALLET_USDC: preserve(),
+    // Pivot top-down fase 2 (25/09): l'EV del giro ordini si calcola
+    // sull'oracolo Pinnacle letto DALLE CACHE (zero crediti) invece che sul
+    // modello; DRY-RUN intercetta l'ordine prima del POST a SX Bet.
+    TOP_DOWN_EV: preserve(),
+    TOP_DOWN_MARGIN: preserve(),
+    AUTO_BET_DRY_RUN: preserve(),
     T60_ORDER_VALIDATION: preserve(),
     // Multi-mercato OU/AH (19/09): ENABLE_LIVE_AH=1 -> l'Asian Handicap
     // piazza ORDINI REALI; ENABLE_LIVE_OU=0 (default di codice) -> l'Over/Under
