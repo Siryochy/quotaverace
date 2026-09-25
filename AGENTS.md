@@ -5602,9 +5602,10 @@ test_value_filter + risk_guards + league_gate + multi_market + market_calib
 + ou_exclusion + secret_hygiene + settlement_pause + predictions +
 market_diagnose (198), test_bot + web_api + liquidity_monitor +
 flow_measure + reports + tier (105), test_decision_limits + compare +
-shadow + execution_engine (110). `verify_guardrails.py`: A-G TUTTI
-bloccano. `compileall` OK. `railway config plan`: 0 to add, 1 to change,
-0 to destroy.
+shadow + execution_engine (110). `verify_guardrails.py`: A-G bloccavano
+(dal 26/09 lo scenario D e' ROSSO — aspettativa del bypass, NON una
+regressione: vedi la sezione di chiusura del 26/09). `compileall` OK.
+`railway config plan`: 0 to add, 1 to change, 0 to destroy.
 
 **6) IaC.** `TOP_DOWN_EV`, `TOP_DOWN_MARGIN`, `AUTO_BET_DRY_RUN` dichiarate
 `preserve()` nel blocco api di `.railway/railway.ts` (accanto ai T60_*).
@@ -5612,9 +5613,75 @@ bloccano. `compileall` OK. `railway config plan`: 0 to add, 1 to change,
 OFF). Nota operativa: `PINNACLE_CACHE_MAX_AGE_H` resta di codice (non e'
 necessaria in preserve finche' non si tara).
 
-**7) STATO.** Branch `feature/top-down-pinnacle` pushato (Fase 1 `dcc9699`
-+ stash + Fase 2). NON merged su main: niente deploy finche' non si decide
-(il gate top-down e' default ON: al merge governerebbe subito la corsia
-live, con dry-run ancora OFF). Lettura rapida del flusso top-down:
-`venv/bin/python pinnacle_oracle.py --from-cache` (0 crediti) e, col branch
-deployato, `AUTO_BET_DRY_RUN=1` per vedere i candidati intercettati nei log.
+**7) STATO.** Branch `feature/top-down-pinnacle` **FUSO su `main`**
+(`origin/main` = `49b7f9e`): il gate top-down governa la corsia live come
+progettato. Lettura rapida del flusso: `venv/bin/python
+pinnacle_oracle.py --from-cache` (0 crediti) e `AUTO_BET_DRY_RUN=1` per
+vedere i candidati intercettati nei log. Il branch e' stato **eliminato da
+locale e da origin** il 26/09 (su origin resta SOLO `main`): gli interruttori
+e i dettagli operativi sono nella sezione di chiusura del 26/09.
+
+### Chiusura del giro top-down + pulizia repo (26/09/2026)
+
+Direttive del proprietario a chiusura del giro, con lo stato dichiarato.
+
+**1) `TOP_DOWN_EV` RESTA ACCESO (nessuna modifica di codice).** Il gate EV
+sull'oracolo Pinnacle (fail-closed senza oracolo) governa il prezzo sulla
+corsia live: **default di codice ON** (`os.getenv("TOP_DOWN_EV", "1")`),
+non impostato su Railway -> vale il default. Scelta dichiarata: "meno
+scommesse ma con un margine confermato"; se il volume va a zero si fa tuning,
+il filtro non si tocca. Le altre leve top-down restano come dal 26/09:
+`TOP_DOWN_MARGIN` 0.02, **`TOP_DOWN_BYPASS` default SPENTO** (il bypass della
+fascia 1.30-1.80 NON governa ordini reali senza una scelta esplicita),
+`AUTO_BET_DRY_RUN` default OFF. Tutte `preserve()` in `.railway/railway.ts`.
+
+**2) MODALITA' SIM INVARIATA (nessuna modifica).** Le righe paper restano
+etichettate `mode='sim'`, non toccano il bilancio reale e continuano ad
+alimentare storico/ML/CLV. E' gia' il comportamento attuale.
+
+**3) DOCUMENTAZIONE.** Questa sezione + rimozione delle note obsolete sul
+blocco del deploy (Fase 2 §7 non dice piu' "non merged") e aggiornamento del
+claim `verify_guardrails` (Fase 2 §5).
+
+**4) PULIZIA REPO (fatta).** Il lavoro top-down era **gia' su `main`**:
+`origin/main` = `49b7f9e` (Fase 1 `dcc9699` + Fase 2 `696f899` + i tre commit
+del giro successivo). Il `main` **locale** era stale (`5fb4471`): allineato con
+fast-forward. `origin/feature/top-down-pinnacle` era fermo a `696f899` e
+**interamente contenuto in main** (0 commit avanti) -> **eliminato da origin**
+(`git push origin --delete`, via askpass del vault) e localmente. Su origin
+resta SOLO `main`: nessun ramo morto. Il push su `main` e' comunque il deploy
+(regola di progetto).
+
+**5) TRE COMMIT NON ANCORA DOCUMENTATI IN MEMORIA (ora lo sono).**
+- `a18806d` — **risposta HTTP cruda nei log + `orderId` obbligatorio**: il
+  ledger poteva registrare un "successo" senza che sull'exchange esistesse un
+  ordine. `SxBetProvider._post` ora logga la risposta grezza (troncata, con la
+  firma EIP-712 mascherata per nome di campo) e `place_limit_order` tratta un
+  `FULLY_FILLED` **senza `orderId`** come NON piazzato (fail-closed).
+- `1de63db` — **corsia top-down** (`auto_bet._top_down_picks`): la corsia LIVE
+  pesca da ogni riga 1X2 aperta e usa l'oracolo come unico giudice del prezzo;
+  `TOP_DOWN_BYPASS` **default SPENTO** per non far girare ordini reali fuori
+  fascia senza decisione esplicita (contro il congelamento del 22/09);
+  prudenza extra in probation (`TOP_DOWN_PROBATION_EXTRA` 0.02); **dedup
+  cross-corsia** per `(match_id, esito_key)` (senza, lo stesso evento veniva
+  ordinato DUE volte prima che esistesse la riga `bets`); guardia sul `bet_id`
+  (niente status "SUCCESS" inventato).
+- `49b7f9e` — **stessa guardia `bet_id` sul dispatch T-60**, il SECONDO punto
+  di scrittura di una riga `mode='live'`: senza un id emesso dall'exchange la
+  riga non nasce (difesa in profondita', fail-closed).
+Test aggiornati nello stesso giro: `test_execution_engine.py`,
+`test_top_down.py` (+225 righe), `test_auto_bet_live.py`,
+`test_t60_breakers.py`.
+
+**6) `verify_guardrails.py` SCENARIO D — ROSSO, IN BACKLOG (confermato).** Lo
+scenario D ("filtro prezzo: fascia bottom-up in SIM vs gate oracolo in LIVE")
+**non accende `TOP_DOWN_BYPASS`** e assume il default del 25/09 (bypass ON):
+col default SPENTO del 26/09 la corsia top-down non aggiunge quote fuori
+fascia e l'asserzione `ok_bypass` non passa. E' **una aspettativa dello
+scenario, non una regressione dei guardrail** (A/B/C/E/F/G bloccano
+regolarmente, misurato il 26/09). Fix naturale quando si vorra': che lo
+scenario accenda il bypass **esplicitamente** per la sua parte LIVE, con
+un'asserzione separata sul default spento. **Non eseguito** (backlog).
+
+**7) Stato git**: `main` = `49b7f9e`, unico ramo su origin, nessuna env nuova
+(nessuna modifica a `.railway/railway.ts` in questo giro).
