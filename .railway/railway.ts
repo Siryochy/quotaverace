@@ -84,6 +84,14 @@ export default defineRailway(() => {
     // modello; DRY-RUN intercetta l'ordine prima del POST a SX Bet.
     TOP_DOWN_EV: preserve(),
     TOP_DOWN_MARGIN: preserve(),
+    // Corsia top-down (25/09, direttiva "bypass del filtro quote"): la corsia
+    // LIVE pesca da ogni riga 1X2 (qualsiasi quota/status) e l'unico giudice
+    // del prezzo e' l'oracolo Pinnacle (fail-closed senza oracolo).
+    // ⚠️ DEFAULT 0 (SPENTO) dal 26/09: il bypass vale solo con questa env a 1;
+    // `preserve()` la protegge da `config apply`, non la accende.
+    TOP_DOWN_BYPASS: preserve(),
+    // Extra EV per le leghe in probation sulla corsia top-down (default 2pp).
+    TOP_DOWN_PROBATION_EXTRA: preserve(),
     AUTO_BET_DRY_RUN: preserve(),
     T60_ORDER_VALIDATION: preserve(),
     // Multi-mercato OU/AH (19/09): ENABLE_LIVE_AH=1 -> l'Asian Handicap

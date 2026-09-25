@@ -153,6 +153,28 @@ class TestLiveMode:
         assert b["price"] == 1.65 and b["stake"] == 5.0
         assert tracker.bet_exists_open("m1", "1") is True
 
+    def test_riempito_senza_bet_id_non_lascia_righe(self, monkeypatch,
+                                                    temp_db):
+        """Il gate categorico: senza bet_id NIENTE riga mode='live'.
+
+        E' la regressione del sintomo "il DB dice successo ma su SX Bet non
+        c'e' nulla". Una riga live e' la prova che un ordine esiste: se
+        l'exchange non ha emesso un id, la riga non si scrive (fail-closed).
+        """
+        _fixed_stake(monkeypatch)
+        _seed_value_match(quota=1.65)
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+        senza_id = dict(_filled())
+        senza_id["bet_id"] = None
+        monkeypatch.setattr(auto_bet, "_live_fill",
+                            lambda pick, stake, floor: senza_id)
+
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert placed == []                     # niente nei riepiloghi
+        assert tracker.get_bets() == []         # niente sul ledger
+        assert tracker.bet_exists_open("m1", "1") is False
+
     def test_ordine_non_riempito_non_lascia_righe(self, monkeypatch, temp_db):
         """Ordine rifiutato/non riempito dall'exchange: nessuna riga sul
         ledger (un FAILED verrebbe saldato come perdita reale)."""
@@ -629,6 +651,23 @@ class TestLiveFill:
         # ordine richiesto al floor EV (bound), non sotto
         assert prov.place_calls[0][2] == "BACK"
         assert prov.place_calls[0][3] == 1.65
+
+    def test_ordine_riempito_senza_bet_id_non_e_piazzato(self, monkeypatch):
+        """Riempito ma senza bet_id: `_live_fill` NON lo dichiara piazzato.
+
+        Lo stato di riempimento senza l'id emesso dall'exchange non e'
+        verificabile sull'interfaccia reale: fail-closed, cosi' il ledger non
+        puo' contenere un "successo" che sulla piattaforma non esiste.
+        """
+        import execution_engine as ee
+        order = ee.OrderResult(True, None, "FULLY_FILLED", 1.65, 1.70,
+                               5.0, 12.0)
+        prov = self._Prov(best=None, order=order)
+        self._setup(monkeypatch, prov)
+        res = auto_bet._live_fill(self._pick(), stake=5.0, floor=1.65)
+        assert res is not None and res["ok"] is False
+        assert res["bet_id"] is None
+        assert "bet_id" in (res["error"] or "")
 
     def test_ordine_rifiutato_riporta_ok_false(self, monkeypatch):
         import execution_engine as ee

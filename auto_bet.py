@@ -235,6 +235,25 @@ def t60_stake(bankroll: float, *, mode: str = "sim") -> float:
 # (live diagnostica) entra da qui senza riscrivere la valutazione.
 _TOP_DOWN_CACHE_DIR = None
 
+#: Corsia TOP-DOWN (25/09, direttiva "andiamo live subito"): la corsia LIVE
+#: non eredita il filtro bottom-up (fascia favoriti 1.30-1.80, tier
+#: value/strong_value): il candidato nasce da OGNI riga 1X2 aperta della
+#: finestra mobile 24h e l'unico giudice del prezzo e' l'oracolo Pinnacle
+#: (EV >= EV_MIN, fail-closed senza oracolo).
+#:
+#: DEFAULT 0 (SPENTO) dal 26/09/2026: il bypass NON governa gli ordini reali
+#: finche' non lo si accende esplicitamente con `TOP_DOWN_BYPASS=1` (env
+#: Railway, dichiarata in `preserve()`). Il default era ON nella bozza del
+#: 25/09: con `AUTO_BET_DRY_RUN` a 0 significava ordini reali che scavalcano
+#: il gate di prezzo 1.30-1.80 senza una decisione esplicita.
+TOP_DOWN_BYPASS = os.getenv("TOP_DOWN_BYPASS", "0").strip().lower() \
+    in ("1", "true", "yes", "on")
+
+#: Gate di lega della corsia top-down: in probation l'oracolo DEVE essere
+#: MIGLIORE del segnale per passare (EV >= EV_MIN + TOP_DOWN_PROBATION_EXTRA).
+TOP_DOWN_PROBATION_EXTRA = float(
+    os.getenv("TOP_DOWN_PROBATION_EXTRA", "0.02"))
+
 
 def _top_down_load(home: str, away: str):
     """p_true per esito dall'oracolo Pinnacle (cache, 0 crediti)."""
@@ -242,7 +261,7 @@ def _top_down_load(home: str, away: str):
     return po.load_oracle(home, away, cache_dir=_TOP_DOWN_CACHE_DIR)
 
 
-def _top_down_eval(pick: dict) -> dict | None:
+def _top_down_eval(pick: dict, league: str | None = None) -> dict | None:
     """Valutazione TOP-DOWN di un candidato: EV contro l'ORACOLO Pinnacle.
 
     Fase 2 del pivot (25/09/2026): la p_true NON arriva dal modello di gol
@@ -258,6 +277,12 @@ def _top_down_eval(pick: dict) -> dict | None:
     e' la seconda forma della stessa condizione: `quota >= true_odd x
     (1 + margine)`. Un'eventuale divergenza fra le due letture e' un bug
     del gate, non una soglia nuova.
+
+    Corsia top-down (25/09, `TOP_DOWN_BYPASS`): nelle leghe in PROBATION
+    l'oracolo deve battere il segnale di un extra (`TOP_DOWN_PROBATION_EXTRA`,
+    default +2pp di EV): il filtro di prezzo e' bypassato, la prudenza sulle
+    leghe non ancora validate no (direttiva anti-spread 21/09). `league` e'
+    opzionale: None = nessun extra (retrocompatibile con chiamanti e test).
 
     Ritorna un dict con verdetto e diagnostica; mai eccezioni verso il
     chiamante (un errore della valutazione e' un salto, non un crash).
@@ -282,23 +307,35 @@ def _top_down_eval(pick: dict) -> dict | None:
                               "probabilita' fair"}
         ev = p_true * (quota - 1.0) - (1.0 - p_true)
         true_odd = 1.0 / p_true
-        required = true_odd * (1.0 + TOP_DOWN_MARGIN)
         try:
             from value_filter import EV_MIN as ev_min
         except Exception:                                       # pragma: no cover
             ev_min = po.DEFAULT_EV_MIN
+        # Probation: soglia EV piu' severa per le leghe non ancora validate
+        # (il filtro di prezzo e' bypassato, la prudenza no — direttiva
+        # anti-spread del 21/09). Il tier arriva da league_tier (normalizza
+        # anche il nome: lezione 24/09).
+        ev_min_eff = float(ev_min)
+        if league:
+            try:
+                from value_filter import league_tier
+                if league_tier(league) == "probation":
+                    ev_min_eff += max(0.0, float(TOP_DOWN_PROBATION_EXTRA))
+            except Exception:                                   # pragma: no cover
+                pass
+        required = true_odd * (1.0 + ev_min_eff)
         # Le due letture della stessa condizione: se divergono, e' un bug del
         # gate (una sola soglia EV nel sistema) — si logga, non si "sistema".
-        if abs((quota >= required) - (ev >= ev_min)) > 1e-12:
+        if abs((quota >= required) - (ev >= ev_min_eff)) > 1e-12:
             logger.warning("auto_bet: gate EV top-down incoerente su %s "
                            "(ev=%.4f >= %.3f=%s vs quota %.4f >= %.4f) — "
                            "verificare TOP_DOWN_MARGIN/EV_MIN",
-                           pick.get("match_id"), ev, ev_min, ev >= ev_min,
-                           quota, required)
+                           pick.get("match_id"), ev, ev_min_eff,
+                           ev >= ev_min_eff, quota, required)
         return {"ok": True, "ev": round(ev, 6), "p_true": round(p_true, 6),
                 "true_odd": round(true_odd, 4),
                 "required_price": round(required, 4),
-                "ev_min": ev_min, "trigger": bool(ev >= ev_min),
+                "ev_min": ev_min_eff, "trigger": bool(ev >= ev_min_eff),
                 "overround": probs.get("overround")}
     except Exception as e:
         return {"ok": False, "reason": f"errore valutazione ({e})"}
@@ -1089,6 +1126,97 @@ def _multi_market_picks() -> list[dict]:
     return picks
 
 
+def _top_down_picks() -> list[dict]:
+    """Corsia TOP-DOWN LIVE: candidati 1X2 senza il filtro bottom-up.
+
+    Direttiva 25/09/2026 ("bypass del filtro quote e merge"): sul denaro REALE
+    il giudice del prezzo non e' piu' la fascia favoriti 1.30-1.80 ne' il tier
+    del modello, ma l'ORACOLO Pinnacle de-vigato (`_top_down_eval`, ev >=
+    EV_MIN, fail-closed senza oracolo). Questa corsia pesca da OGNI riga 1X2
+    aperta della finestra mobile 24h (qualsiasi status, qualsiasi quota > 1),
+    deduplica per evento (miglior EV di oracolo) e ripete SOLO i gate che NON
+    sono il filtro di prezzo bypassato:
+
+    - esito canonico (`_canonical_esito`),
+    - kickoff noto e in finestra (fail-closed come la corsia storica),
+    - gate di lega (`value_filter.league_allowed`), con i nomi normalizzati
+      (`canonical_league`) per non rifiutare una lega ammessa per come la
+      scrive la fonte (lezione 24/09),
+    - extra EV in probation (`TOP_DOWN_PROBATION_EXTRA`), in linea con la
+      direttiva anti-spread del 21/09: il gate di prezzo e' bypassato, la
+      prudenza sulle leghe non ancora validate no.
+
+    NON tocca il filtro di prezzo: quota, prob. di mercato e tier restano nel
+    pick come telemetria. La corsia SIM e la scrittura bottom-up del ledger
+    sono INVARIATE: e' un cambio della corsia di selezione live, non del
+    ledger (era del 22/09 intatta).
+
+    Fail-safe: qualunque errore ritorna [] (come la corsia multi-mercato).
+    Si spegne con TOP_DOWN_BYPASS=0 e si usa solo quando TOP_DOWN_EV e' ON.
+    """
+    if not (TOP_DOWN_EV and TOP_DOWN_BYPASS):
+        return []
+    try:
+        from tracker import _get_conn
+        from value_filter import league_allowed, canonical_league
+        conn = _get_conn()
+        c = conn.cursor()
+        now_utc = datetime.now(timezone.utc)
+        start = now_utc.isoformat().replace("+00:00", "Z")
+        end = (now_utc + timedelta(hours=24)).isoformat().replace("+00:00", "Z")
+        rows = c.execute('''SELECT m.id, m.home_team, m.away_team,
+                                   m.commence_time, m.league, p.esito,
+                                   p.quota, p.market_edge, p.market_prob,
+                                   p.ev, p.status
+                            FROM matches m JOIN predictions p ON m.id = p.match_id
+                            WHERE m.commence_time >= ? AND m.commence_time < ?
+                              AND p.mercato = '1X2'
+                              AND p.esito_finale IS NULL
+                              AND p.quota > 1.0
+                            ORDER BY p.ev DESC''',
+                         (start, end)).fetchall()
+        conn.close()
+    except Exception as e:
+        logger.warning("auto_bet: corsia top-down non disponibile (%s)", e)
+        return []
+    seen: set[str] = set()
+    out: list[dict] = []
+    for (mid, home, away, commence, league, esito, quota,
+         m_edge, m_prob, ev, status) in rows:
+        if mid in seen:
+            continue                      # un pick per evento
+        canon = _canonical_esito(esito, home, away)
+        if not canon:
+            continue
+        if not commence:
+            logger.debug("auto_bet: top-down skip %s (kickoff assente)", mid)
+            continue
+        league_name = canonical_league((league or "").strip())
+        if not league_name:
+            logger.debug("auto_bet: top-down skip %s (lega assente: gate "
+                         "fail-closed)", mid)
+            continue
+        if not league_allowed(league_name):
+            logger.debug("auto_bet: top-down skip %s (lega '%s' fuori dai "
+                         "campionati ammessi)", mid, league_name)
+            continue
+        seen.add(mid)
+        out.append({"match_id": mid, "home": home, "away": away,
+                    "commence": commence, "league": league or "",
+                    "mercato": "1X2", "esito_raw": esito,
+                    "quota": float(quota or 0),
+                    "market_edge": float(m_edge) if m_edge is not None else None,
+                    "market_prob": float(m_prob) if m_prob is not None else None,
+                    "best_ev": float(ev) if ev is not None else 0.0,
+                    "status": status or "rejected",
+                    "top_down_lane": True,
+                    **canon})
+    if out:
+        logger.info("auto_bet: corsia top-down: %d candidati 1X2 (bypass "
+                    "fascia bottom-up, gate oracolo)", len(out))
+    return out
+
+
 def _too_close_to_start(start_time: str | None) -> bool:
     if not start_time:
         return False
@@ -1645,6 +1773,24 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
         return {"ok": False, "market_id": market_id,
                 "selection_id": sel, "status": order.status or "FAILURE",
                 "error": order.error}
+
+    # CONFERMA OBBLIGATORIA DEL BET ID (difesa in profondita'): lo stato
+    # "riempito" senza un id emesso dall'exchange NON e' verificabile
+    # sull'interfaccia reale. Un ordine non verificabile non deve diventare
+    # una riga "piazzata" sul ledger (che verrebbe poi saldata come denaro
+    # vero): fail-closed, nessun salvataggio a valle.
+    if not order.bet_id:
+        logger.error("auto_bet: ordine %s (%s vs %s, %s) riempito (%s, "
+                     "%.2f USDC) ma SENZA bet_id: NON registrato come "
+                     "piazzato (fail-closed)", market_id, pick["home"],
+                     pick["away"], pick.get("esito_key"), order.status,
+                     matched_stake)
+        return {"ok": False, "market_id": market_id, "selection_id": sel,
+                "bet_id": order.bet_id,
+                "status": order.status or "NO_BET_ID",
+                "price": matched_price, "stake": matched_stake,
+                "error": "ordine senza bet_id: non confermabile "
+                         "sull'exchange"}
     logger.info("auto_bet: ORDINE REALE riempito %s (%s vs %s, %s) @ %.2f "
                 "per €%.2f [%s]", market_id, pick["home"], pick["away"],
                 pick["esito_key"], matched_price, matched_stake, order.status)
@@ -1664,8 +1810,12 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
                                "market_id": market_id})
         except Exception:
             pass
+    # NB: niente fallback a "SUCCESS". Uno status inventato qui renderebbe
+    # indistinguibile un riempimento confermato dall'exchange da una
+    # risposta incompleta (il ledger e' un registro di denaro, non un log).
     return {"ok": True, "market_id": market_id, "selection_id": sel,
-            "bet_id": order.bet_id, "status": order.status or "SUCCESS",
+            "bet_id": order.bet_id,
+            "status": order.status or "FILLED_UNCONFIRMED",
             "price": matched_price, "stake": matched_stake}
 
 
@@ -1828,7 +1978,32 @@ def run_today_bets(stake_eur: float | None = None,
     # Corsia multi-mercato (19/09/2026): AH con ordini reali, OU in shadow.
     # Gli stessi guardrail valgono per tutti i pick (T-60, stop-loss, cap,
     # feed, dedup): la differenza tra le corsie e' solo l'INTERRUTTORE live.
-    for pick in _today_value_picks() + _multi_market_picks():
+    # Corsia TOP-DOWN (25/09, solo LIVE): quando il gate oracolo governa il
+    # denaro reale, il board 1X2 non e' pre-filtrato dalla fascia bottom-up
+    # (le righe scartate dal filtro quote restano nel ledger e diventano
+    # candidati: il prezzo lo giudica Pinnacle, non la fascia 1.30-1.80).
+    # In SIM il board resta quello storico (era del ledger intatta).
+    board = _today_value_picks() + _multi_market_picks()
+    if mode == "live" and TOP_DOWN_EV and TOP_DOWN_BYPASS:
+        board = board + _top_down_picks()
+    # DEDUP CROSS-CORSIA per (match_id, esito): la stessa riga del ledger puo'
+    # arrivare da due corsie (value pick + corsia top-down) e il dedup sul
+    # ledger (bet_exists_open) NON vede ancora l'ordine della prima: senza
+    # questo filtro l'evento verrebbe ordinato DUE volte sul provider prima
+    # che la riga `bets` esista (bug colto dal test live: 2 ordini su 1
+    # evento). Vince la PRIMA occorrenza (ordine corsie: storico prima).
+    _seen_pick: set[tuple] = set()
+    _deduped: list[dict] = []
+    for pick in board:
+        _pk = (pick.get("match_id"), pick.get("esito_key"))
+        if _pk in _seen_pick:
+            logger.debug("auto_bet: pick duplicato cross-corsia %s (%s), "
+                         "salto", pick.get("match_id"), pick.get("esito_key"))
+            continue
+        _seen_pick.add(_pk)
+        _deduped.append(pick)
+    board = _deduped
+    for pick in board:
         if bet_exists_open(pick["match_id"], pick["esito_key"]):
             logger.debug("auto_bet: puntata gia' aperta per %s (%s), salto",
                          pick["match_id"], pick["esito_key"])
@@ -1846,7 +2021,7 @@ def run_today_bets(stake_eur: float | None = None,
         # ML/CLV (lezione 22/09: il campione si misura, non si riscrive);
         # l'oracolo governa il denaro reale.
         if TOP_DOWN_EV and mode == "live":
-            verdict = _top_down_eval(pick)
+            verdict = _top_down_eval(pick, league=pick.get("league"))
             if not verdict.get("ok"):
                 logger.info("auto_bet: %s (%s) top-down SKIP [%s]: %s",
                             pick["match_id"], pick["esito_key"],
@@ -2100,9 +2275,18 @@ def run_today_bets(stake_eur: float | None = None,
                 continue
             matched_price = float(filled["price"] or price)
             matched_stake = float(filled["stake"] or pick_stake)
+            # Ultima barriera prima della scrittura: una riga mode='live' E'
+            # la prova che un ordine esiste sull'exchange. Senza bet_id non
+            # si scrive nulla (il ledger non deve contenere un "successo"
+            # che sulla piattaforma non esiste).
+            if not filled.get("bet_id"):
+                logger.error("auto_bet: ordine live per %s (%s) senza "
+                             "bet_id: riga LIVE NON scritta sul ledger",
+                             cand["match_id"], cand["esito_key"])
+                continue
             record = {**cand, "market_id": filled["market_id"],
                       "selection_id": filled["selection_id"],
-                      "status": filled.get("status") or "SUCCESS",
+                      "status": filled.get("status") or "FILLED_UNCONFIRMED",
                       "bet_id": filled.get("bet_id"), "mode": "live",
                       "price": matched_price, "stake": matched_stake}
             placed.append(record)
@@ -2113,7 +2297,7 @@ def run_today_bets(stake_eur: float | None = None,
                          selection_id=filled["selection_id"],
                          price=matched_price, stake=matched_stake,
                          mode="live",
-                         status=filled.get("status") or "SUCCESS",
+                         status=filled.get("status") or "FILLED_UNCONFIRMED",
                          bet_id=filled.get("bet_id"))
             except Exception as e:
                 logger.warning("auto_bet: salvataggio live %s: %s",

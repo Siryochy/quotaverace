@@ -9,7 +9,10 @@ Scenari:
   A. Kill-switch OFF           -> il giro non parte
   B. Stop-loss giornaliero -5% -> puntate bloccate 24h
   C. Cap stake severo 1-2%     -> stake cappato < minimo ordine = ordine saltato
-  D. Limiti quota 1.30-1.80    -> segnali fuori fascia mai candidati
+  D. Filtro prezzo             -> fascia bottom-up (SIM) / gate oracolo
+                                  Pinnacle (LIVE): il bypass ordina solo con
+                                  EV oracolo >= soglia, i gate NON-prezzo
+                                  (lega) restano
   E. Liquidita' SX             -> book sottile: ordine rifiutato (no slippage)
   F. Lega STRATEGY_LEAGUES     -> campionati non vincenti mai candidati
   G. Circuit breakers T-60     -> finestra T-60..T-50, CB1 cap per ordine,
@@ -33,6 +36,10 @@ os.environ.pop("AUTO_BET_MODE", None)          # default: sim
 os.environ.pop("EXECUTION_PROVIDER", None)     # nessun provider reale
 os.environ.pop("EXECUTION_APP_KEY", None)
 os.environ["STAKE_CAP_HARD"] = "1"
+# Finestra T-60 di default (come in produzione): gli scenari che misurano
+# altri guardrail a orizzonte aperto la disattivano LOCALMENTE e la
+# ripristinano — l'autorevole resta lo scenario G.
+os.environ["T60_EXECUTION_ONLY"] = "0"
 os.environ.pop("SETTLEMENT_PAUSED", None)
 # Feed di mercato OFF: questa diagnostica non deve toccare la rete (il gate
 # vero e' coperto da `test_decision_feed.py` e da `python -m decision feed`).
@@ -212,9 +219,14 @@ def main() -> int:
         return None
 
     auto_bet._live_fill = _stub_fill
+    # La finestra T-60 e' dimostrata dallo scenario G: qui il candidato a +3h
+    # deve ARRIVARE alla fase stake, altrimenti il cap non verrebbe mai
+    # misurato (dal 17/09 il default ON del T-60 svuotava questo scenario).
+    auto_bet.T60_EXECUTION_ONLY = False
     mark = len(_RECORDS)
     placed = auto_bet.run_today_bets()
     _print_logs(mark)
+    auto_bet.T60_EXECUTION_ONLY = True
     ok_c = (auto_bet.cap_hard_active() and placed == []
             and calls["fill"] == 0)
     print(f"  {DIM}stake teorico Kelly×cap1% su 38 = "
@@ -231,8 +243,8 @@ def main() -> int:
           f"{auto_bet.MIN_STAKE_EUR} USDC){RESET}")
     auto_bet.STAKE_CAP_HARD = True
 
-    # ------------------------------------------------------------ D. QUOTE ----
-    _head("D. LIMITI QUOTA 1.30–1.80 — fuori fascia mai candidati")
+    # ------------------------------------------------- D. FILTRO PREZZO ----
+    _head("D. FILTRO PREZZO — fascia bottom-up (SIM) vs gate oracolo (LIVE)")
     _reset_state()
     auto_bet._execution_mode = lambda allow_sim=True: "sim"
     tracker.save_match("g-high", ALLOWED_LEAGUE, "Osasuna", "Getafe", _start())
@@ -247,20 +259,76 @@ def main() -> int:
     # quota ok ma NON e' il favorito di mercato (prob 0.30 < 0.50)
     tracker.save_prediction("g-nfav", "1X2", "Getafe", 1.70, 0.45, 0.05,
                             market_prob=0.30, market_edge=0.15, status="value")
+    # g-legacy: lega VIETATA (Serie A) fuori fascia — nemmeno il gate oracolo
+    # della corsia top-down la candida: il gate di lega NON e' bypassato.
+    tracker.save_match("g-legacy", "Serie A", "Osasuna", "Getafe", _start())
+    tracker.save_prediction("g-legacy", "1X2", "Osasuna", 1.20, 0.72, 0.05,
+                            market_prob=0.75, market_edge=0.05, status="value")
     mark = len(_RECORDS)
     picks = auto_bet._today_value_picks()
     _print_logs(mark)
     ids = sorted(p["match_id"] for p in picks)
-    ok_d = ids == ["g-valid"]
-    print(f"  {GREEN if ok_d else RED}→ candidati ammessi: {ids}  "
+    ok_board = ids == ["g-valid"]
+    print(f"  {GREEN if ok_board else RED}→ board SIM (fascia bottom-up): {ids}  "
           f"(atteso solo ['g-valid']){RESET}")
-    # Gate a livello motore (stessa soglia, difesa in profondita').
     sane, reason = value_filter.is_sane(0.72, 1.20, 0.05, market_prob=0.80)
     print(f"  {DIM}is_sane(prob .72, quota 1.20): ok={sane} → "
           f"{reason}{RESET}")
     sane2, reason2 = value_filter.is_sane(0.80, 1.31, 0.048, market_prob=0.75)
     print(f"  {DIM}is_sane(prob .80, quota 1.31): ok={sane2} "
           f"(dentro fascia){RESET}")
+    # CORSIA TOP-DOWN LIVE (25/09): il filtro di prezzo e' BYPASSATO — l'unico
+    # giudice e' l'oracolo Pinnacle. Con p_true 0.92 TUTTE le quote fuori
+    # fascia (1.90, 1.70-underdog, 1.20) diventano candidati EV-positivi;
+    # con p_true 0.20 (EV sempre negativo) NESSUNO passa: il gate oracolo
+    # filtra davvero. g-legacy resta fuori per LEGA, non per quota.
+    auto_bet._execution_mode = lambda allow_sim=True: "live"
+    auto_bet._live_wallet_snapshot = lambda: {
+        "available": 36.0, "exposure": 2.0, "equity": 38.0}
+    auto_bet.T60_EXECUTION_ONLY = False      # il T-60 e' dello scenario G
+    _saved_hard = auto_bet.STAKE_CAP_HARD
+    auto_bet.STAKE_CAP_HARD = False          # il cap e' dello scenario C
+
+    def _fill_ok(pick, stake, floor):        # noqa: ANN001
+        calls_d["fill"] += 1
+        return {"ok": True, "market_id": "m", "selection_id": 1,
+                "bet_id": "b", "status": "FULLY_FILLED",
+                "price": floor, "stake": stake}
+
+    calls_d = {"fill": 0}
+    auto_bet._live_fill = _fill_ok
+    auto_bet._top_down_load = lambda home, away: {
+        "1": 0.92, "X": 0.92, "2": 0.92, "overround": 0.0}
+    mark = len(_RECORDS)
+    live_placed = auto_bet.run_today_bets()
+    _print_logs(mark)
+    ids_live = sorted(p["match_id"] for p in live_placed)
+    ok_bypass = (set(ids_live) == {"g-high", "g-low", "g-nfav"}
+                 and "g-legacy" not in ids_live)
+    print(f"  {GREEN if ok_bypass else RED}→ corsia top-down LIVE (p_true "
+          f"0.92): candidati {ids_live} (atteso: le tre quote fuori fascia "
+          f"DI AMBO I LATI, mai g-legacy){RESET}")
+    # Controprova: stesso board, oracolo con EV sempre negativo -> 0 ordini.
+    conn = tracker._get_conn()
+    conn.execute("DELETE FROM bets")     # DB temporaneo della diagnostica
+    conn.commit()
+    conn.close()
+    calls_d["fill"] = 0
+    auto_bet._top_down_load = lambda home, away: {
+        "1": 0.20, "X": 0.20, "2": 0.20, "overround": 0.0}
+    mark = len(_RECORDS)
+    live_vuoto = auto_bet.run_today_bets()
+    _print_logs(mark)
+    ok_gate = live_vuoto == [] and calls_d["fill"] == 0
+    print(f"  {GREEN if ok_gate else RED}→ stesso board con EV oracolo "
+          f"negativo (p_true 0.20): ordini {len(live_vuoto)} "
+          f"(atteso 0: il gate oracolo filtra){RESET}")
+    auto_bet.T60_EXECUTION_ONLY = True
+    auto_bet.STAKE_CAP_HARD = _saved_hard
+    auto_bet._execution_mode = lambda allow_sim=True: "sim"
+    auto_bet._top_down_load = lambda home, away: {   # stub storico ripristinato
+        "1": 0.65, "X": 0.65, "2": 0.65, "overround": 0.0}
+    ok_d = ok_board and ok_bypass and ok_gate
 
     # --------------------------------------------------------- E. LIQUIDITA' ---
     _head("E. LIQUIDITA' SX — book sottile: ordine RIFIUTATO (no slippage)")
@@ -407,7 +475,7 @@ def main() -> int:
     for name, ok in (("A kill-switch OFF", ok_a),
                      ("B stop-loss 24h", ok_b),
                      ("C cap severo 1%", ok_c),
-                     ("D limiti quota", ok_d),
+                     ("D filtro prezzo/oracolo", ok_d),
                      ("E liquidita' SX", ok_e),
                      ("F lega strategia", ok_f),
                      ("G circuit breakers T-60", ok_g)):
