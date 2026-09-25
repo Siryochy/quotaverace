@@ -5204,3 +5204,51 @@ dichiarava solo il primo, quindi il secondo sarebbe stato distrutto da
 `test_secret_hygiene`, `test_decision_*` 206);
 `railway config plan` = **0 to add, 1 to change, 0 to destroy**; 0 marker di
 conflitto nel progetto; `compileall` OK.
+
+### Esito del deploy (25/09/2026, 01:11 UTC) — board sbloccato, 0 value
+
+Commit `5c7da59` → deploy **`fce20e3f` SUCCESS**. Verificato sul container:
+`ODDS_DAILY_BUDGET=24`, `EPL/Turkey/MLS = 2gg`, costo mensile 370.6/460,
+Kelly 0.05/0.05 (base 0.25), wallet 33.55 USDC, kill switch `live`.
+
+**Giro di analisi forzato** (la stessa funzione del `morning_job` delle 04:00
+UTC — i job di analisi girano 3 volte al giorno, NON ogni ciclo di polling:
+`matches`/`match_analysis` si popolano solo li'): **22 leghe interrogate**, di
+cui 3 con partite — `soccer_korea_kleague1` 1, `soccer_usa_mls` **15**,
+`soccer_mexico_ligamx` **9**. Costo **3 crediti** (406 → 403): le chiamate
+vuote non addebitano.
+
+| metrica | PRIMA (01:12) | DOPO (01:22) |
+|---|---|---|
+| partite in leghe AMMESSE | 2 | **27** |
+| `matches` totali | 55 | 69 |
+| MLS / Liga MX / K League 1 | 1 / 1 / 0 | **16 / 10 / 1** |
+| `match_analysis` | 1010 | **1035** |
+| analisi di oggi | 25 | 50 |
+| rinvii dal budget | 14 (stimati) | **0** |
+| segnali value | 0 | **0** |
+
+**Il budget 24 era indispensabile — non prudenza, necessita'**: nell'ordine
+effettivo del giro (le 20 ammesse sono a 2gg, quindi passano PRIMA delle 3gg)
+**MLS e' la 16ª lega e Liga MX la 18ª**. Con `ODDS_DAILY_BUDGET=8` (o con il 16
+inizialmente proposto) entrambe sarebbero state rinviate al giorno dopo e le
+partite di Liga MX (kickoff 26/09) perse **di nuovo**, esattamente come prima
+del fix. Il budget 24 ha salvato le due leghe che avevano le partite.
+
+**0 segnali value, e va bene cosi'** (direttiva del proprietario): i 25 match
+sono tutti `rejected` con EV da -3.5% a -28%, le 207 predictions aperte restano
+tutte `rejected`, e con `FAVOURITES_ONLY` un match senza esito qualificato non
+scrive nulla nel ledger. Il gate EV fa il suo mestiere: scartare EV negativi su
+un bankroll di 33.55 USDC e' protezione della cassa, non un difetto. **Il
+congelamento del 22/09 resta valido** (nessuna modifica a gate/modello).
+
+Effetto collaterale noto: `clear_old_matches()` ha rimosso dal board
+Brasileirao, Argentina Primera e LigaPro (partite passate o leghe non
+interrogate nel giro). Il board contiene solo la finestra corrente: non e' una
+perdita di dati (restano in `match_analysis` e nel ledger).
+
+**Cosa guardare al ritorno dei campionati Tier-1 (~29-30/09):** che il giro di
+analisi trovi partite nelle leghe CORE e che `matches`/`match_analysis`
+risalgano verso le ~100-140/giorno del 19-20/09. Watchdog attivi e verificati
+nei log: `credit_watchdog`, `settlement`, `drift`, `liquidity_monitor`,
+`decision_compare`, `backup`. Il prossimo giro automatico e' alle 04:00 UTC.
