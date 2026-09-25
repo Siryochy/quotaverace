@@ -53,6 +53,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from abc import ABC, abstractmethod
@@ -66,6 +67,43 @@ import requests
 from config import DATA_DIR
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Risposta HTTP CRUDA: strumento di diagnosi
+#
+# Un try/except a valle puo' mascherare la differenza fra "ordine accettato"
+# e "HTTP 4xx/5xx". Queste due helper rendono la risposta grezza LEGGIBILE
+# nei log (senza mai stampare credenziali) e troncata, cosi' un log non
+# diventa esso stesso un problema. Nessun uso in decisioni: solo evidenza.
+# ---------------------------------------------------------------------------
+
+# Quanti caratteri del corpo si mostrano nei log (env override).
+EXECUTION_RAW_LOG_LIMIT = int(os.getenv("EXECUTION_RAW_LOG_LIMIT", "4000"))
+
+# Campi la cui VALORE non deve finire nei log (la chiave resta visibile,
+# cosi' il resto del payload e' ispezionabile).
+_SENSITIVE_RAW_KEYS = ("orderSignature", "signature", "privateKey",
+                       "private_key", "apiKey", "api_key",
+                       "x-sx-api-key", "authorization")
+
+
+def redact_raw_http(text: object, limit: Optional[int] = None) -> str:
+    """Tronca e maschera il corpo di una risposta HTTP, per il log.
+
+    Maschera per NOME DI CAMPO (non per valore): la risposta di SX Bet non
+    contiene la chiave privata, ma contiene la firma EIP-712 dell'ordine —
+    e il filtro di secure_logging maschera per valore, quindi non la
+    coprirebbe. Tutto il resto del payload resta leggibile.
+    """
+    raw = text if isinstance(text, str) else str(text)
+    cap = limit if limit is not None else EXECUTION_RAW_LOG_LIMIT
+    body = raw[:cap]
+    for key in _SENSITIVE_RAW_KEYS:
+        body = re.sub(r'("%s"\s*:\s*")([^"]*)(")' % re.escape(key),
+                      r'\1<redacted>\3', body, flags=re.IGNORECASE)
+    if len(raw) > cap:
+        body += f"...[troncato: {len(raw) - cap} char non mostrati]"
+    return body
 
 # ---------------------------------------------------------------------------
 # Config (env, con default sicuri)
@@ -834,11 +872,31 @@ class SxBetProvider(ExecutionProvider):
 
     def _post(self, path: str, payload: Dict, timeout: Optional[float] = None) -> Dict:
         # waitForOutcome puo' richiedere fino a ~15s lato server.
+        t0 = time.perf_counter()
         resp = requests.post(f"{self.api_base}/{path}", json=payload,
                              headers=self._headers(auth=True),
                              timeout=timeout or (EXECUTION_TIMEOUT + 20))
+        # RISPOSTA CRUDA a livello WARNING: httpx/requests e i logger dei
+        # moduli restano silenziosi, quindi senza questa riga un 4xx/5xx
+        # diventa indistinguibile da un ordine accettato (era la classe di
+        # bug in cui il ledger diceva "successo" e l'exchange non mostrava
+        # nulla). Il corpo e' troncato e la firma mascherata.
+        # getattr: una response finta (test) o un wrapper possono non
+        # esporre .text/.status_code; l'evidenza non deve mai far fallire
+        # l'ordine.
+        raw = getattr(resp, "text", "") or ""
+        code = getattr(resp, "status_code", "?")
+        logger.warning("sxbet: POST /%s -> HTTP %s in %.0fms | raw: %s",
+                       path, code,
+                       (time.perf_counter() - t0) * 1000.0,
+                       redact_raw_http(raw))
         resp.raise_for_status()
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError as e:
+            logger.error("sxbet: risposta NON-JSON su /%s (HTTP %s): %s | "
+                         "raw: %s", path, code, e, redact_raw_http(raw))
+            raise
 
     def _metadata(self) -> Dict:
         """Metadata V3 (chainId, domain EIP-712, baseToken, ladder, limiti) — cache 15'."""
@@ -1129,32 +1187,54 @@ class SxBetProvider(ExecutionProvider):
                                latency_ms, error=str(e))
         latency_ms = (time.perf_counter() - t0) * 1000.0
 
+        # Payload COMPLETO della risposta ordine, sempre loggato: e' la
+        # sorgente di verita' per ricostruire un verdetto contestato.
+        logger.warning("sxbet: risposta ordine /orders-v3 | raw: %s",
+                       redact_raw_http(json.dumps(data, default=str)))
+
         d = data.get("data") if isinstance(data, dict) else {}
         entries = (d or {}).get("orders") or []
         o = entries[0] if isinstance(entries, list) and entries else None
         if not isinstance(o, dict):
-            return OrderResult(False, None, "FAILURE", price, None, 0.0,
-                               latency_ms, error="risposta ordine vuota")
+            # Nessuna entry in data.orders: NON e' un successo. Si porta il
+            # corpo grezzo nell'errore, cosi' il motivo e' visibile anche a
+            # valle (senza dover riaprire i log).
+            return OrderResult(
+                False, None, "FAILURE", price, None, 0.0, latency_ms,
+                error="risposta ordine vuota (nessuna entry in data.orders): "
+                      + redact_raw_http(data, 300))
         status = str(o.get("status") or "SUBMITTED").upper()
+        bet_id = str(o.get("orderId") or "") or None
         if status == "FAILED":
-            return OrderResult(False, o.get("orderId"), status, price, None,
+            return OrderResult(False, bet_id, status, price, None,
                                0.0, latency_ms,
                                error=str(o.get("message") or "ordine rifiutato"))
         outcome = o.get("outcome") or {}
         state = str(outcome.get("state") or "").upper()
-        ok = state in ("FULLY_FILLED", "PARTIAL_FILL_DONE")
+        filled_state = state in ("FULLY_FILLED", "PARTIAL_FILL_DONE")
+        # CONFERMA OBBLIGATORIA DEL BET ID: un ordine senza orderId emesso
+        # dall'exchange non e' dimostrabile sull'interfaccia reale. Lo stato
+        # "riempito" da solo non basta: si marca NON piazzato (fail-closed),
+        # perche' e' esattamente cio' che permetteva di scrivere un
+        # "successo" sul ledger senza un ordine visibile su SX Bet.
+        ok = filled_state and bet_id is not None
+        if filled_state and bet_id is None:
+            logger.error("sxbet: ordine %s (%s) ma NESSUN orderId nella "
+                         "risposta: trattato come NON piazzato", state, status)
         blended = outcome.get("blendedOdds")
         return OrderResult(
             ok=ok,
-            bet_id=str(o.get("orderId") or "") or None,
+            bet_id=bet_id,
             status=state or status,
             price_requested=price,
             price_matched=pct_scaled_to_decimal(blended)
             if blended is not None else None,
             size_matched=sx_units_to_stake(outcome.get("fillAmount"), decimals),
             latency_ms=latency_ms,
-            error=None if ok else (None if not state
-                                   else "ordine non riempito"),
+            error=None if ok else (
+                "ordine riempito ma senza orderId: non confermabile"
+                if filled_state else
+                (None if not state else "ordine non riempito")),
         )
 
     def cancel_order(self, market_id: str, bet_id: str) -> bool:

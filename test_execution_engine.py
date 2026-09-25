@@ -881,6 +881,26 @@ class TestSxBetAuth:
             p._headers(auth=True)
 
 
+class TestRedactRawHttp:
+    """`redact_raw_http`: l'evidenza HTTP non deve mai diventare un leak."""
+
+    def test_maschera_la_firma_e_tronca(self):
+        raw = ('{"orderSignature": "0xdeadbeef", "ok": true, '
+               '"note": "' + "x" * 300 + '"}')
+        out = ee.redact_raw_http(raw, limit=60)
+        assert "0xdeadbeef" not in out
+        assert "<redacted>" in out
+        assert "troncato" in out          # il troncamento e' dichiarato
+
+    def test_senza_troncamento_resta_identico(self):
+        raw = '{"status": "success", "data": {"orders": []}}'
+        assert ee.redact_raw_http(raw) == raw
+
+    def test_accetta_oggetti_non_stringa(self):
+        # una response/test che passa un dict non deve far esplodere il log
+        assert "ok" in ee.redact_raw_http({"ok": True})
+
+
 class TestSxBetOrders:
     def _fake_placed(self, outcome=None, status="SUBMITTED",
                      order_id="0xorder1"):
@@ -1042,6 +1062,48 @@ class TestSxBetOrders:
         res = p.place_limit_order(SX_MH, 1, "BACK", 3.1746, 1.0)
         assert not res.ok
         assert "vuota" in (res.error or "")
+
+    def test_fill_senza_order_id_non_e_piazzato(self, monkeypatch):
+        """stato FULLY_FILLED ma NESSUN orderId: trattato come NON piazzato.
+
+        E' esattamente il caso che permetteva di scrivere un "successo" sul
+        ledger mentre sull'exchange non esisteva alcun ordine (lo stato di
+        riempimento da solo non e' una conferma dell'emissione).
+        """
+        monkeypatch.setattr(
+            ee.requests, "get",
+            _fake_get_sx({"metadata/obv3": _sx_meta()}))
+        monkeypatch.setattr(
+            ee.requests, "post",
+            lambda *a, **k: _fake_response(
+                self._fake_placed(outcome=self._full_fill(), order_id="")))
+        p = ee.SxBetProvider(SX_KEY_TEST, SX_PK_TEST)
+        res = p.place_limit_order(SX_MH, 1, "BACK", 3.1746, 1.0)
+        assert res.ok is False
+        assert res.bet_id is None
+        assert "orderId" in (res.error or "")
+
+    def test_risposta_cruda_loggata_e_firma_mascherata(self, monkeypatch,
+                                                       caplog):
+        """Evidenza: il corpo GREZZO della risposta ordine finisce nei log,
+        con la firma EIP-712 mascherata (il resto resta ispezionabile)."""
+        import logging
+        monkeypatch.setattr(
+            ee.requests, "get",
+            _fake_get_sx({"metadata/obv3": _sx_meta()}))
+        payload = self._fake_placed(outcome=self._full_fill())
+        payload["data"]["orders"][0]["orderSignature"] = "0x" + "ab" * 65
+        monkeypatch.setattr(ee.requests, "post",
+                            lambda *a, **k: _fake_response(payload))
+        p = ee.SxBetProvider(SX_KEY_TEST, SX_PK_TEST)
+        with caplog.at_level(logging.WARNING, logger="execution_engine"):
+            res = p.place_limit_order(SX_MH, 1, "BACK", 3.1746, 1.0)
+        assert res.ok
+        log = caplog.text
+        assert "risposta ordine /orders-v3" in log
+        assert "FULLY_FILLED" in log          # corpo grezzo leggibile
+        assert "<redacted>" in log            # firma mascherata
+        assert "0xabab" not in log            # firma NON in chiaro
 
     def test_stake_minimo_sotto_1_usdc(self, monkeypatch):
         def boom(*a, **k):
