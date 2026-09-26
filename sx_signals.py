@@ -319,8 +319,21 @@ def _kickoff_utc_ms(game_time) -> Optional[int]:
         return None
 
 
+#: Livelli del book conservati per esito in `_book`. Servono al rilevatore di
+#: flusso (`book_flow.py`): riconoscere l'INGRESSO di un limit order massiccio
+#: richiede i livelli, non solo il best e la profondita' totale. Cinque
+#: coprono la parte giocabile del book senza appesantire i dizionari che
+#: circolano nel giro (il book intero di SX puo' avere decine di livelli).
+#: ADDITIVO: i chiamanti esistenti continuano a leggere `best`/`depth` e
+#: nessuna decisione cambia. Override: SX_BOOK_LEVELS_KEPT.
+try:
+    BOOK_LEVELS_KEPT = max(0, int(os.getenv("SX_BOOK_LEVELS_KEPT", "5")))
+except (TypeError, ValueError):
+    BOOK_LEVELS_KEPT = 5
+
+
 def _book(provider: SxBetProvider, market_id: str) -> dict:
-    """Snapshot order book taker: best back per selection + profondita' USDC."""
+    """Snapshot order book taker: best back, profondita' USDC e livelli."""
     data = provider._get("orderbook-v3/snapshot", params={
         "marketHash": market_id, "showTakerPerspective": "true"})
     d = data.get("data") or {}
@@ -329,6 +342,7 @@ def _book(provider: SxBetProvider, market_id: str) -> dict:
         levels = d.get(key) or []
         best = None
         depth = 0.0
+        kept: list = []
         for lv in levels:
             if not isinstance(lv, dict):
                 continue
@@ -337,9 +351,14 @@ def _book(provider: SxBetProvider, market_id: str) -> dict:
             if not q or q <= 1.0:
                 continue
             depth += size
+            kept.append({"price": round(q, 4), "size": round(size, 4)})
             if best is None or q > best["price"]:
                 best = {"price": q, "size": size}
-        out[sel] = {"best": best, "depth": round(depth, 2)}
+        # Livelli dal prezzo migliore in giu': e' l'ordine in cui il mercato
+        # assorbe (prima il best, poi il resto).
+        kept.sort(key=lambda item: -item["price"])
+        out[sel] = {"best": best, "depth": round(depth, 2),
+                    "levels": kept[:BOOK_LEVELS_KEPT]}
     return out
 
 
@@ -471,6 +490,19 @@ def scan(provider: Optional[SxBetProvider] = None) -> List[dict]:
     # Snapshot paralleli di tutti i book PRIMA di valutare.
     all_ids = [leg["market_hash"] for ev in events for leg in ev["legs"]]
     books = _books_parallel(prov, all_ids)
+    # Flusso del book (26/09): stesso rilevatore del multi-mercato, sui book
+    # GIA' scaricati — nessuna lettura in piu', nessun ordine, solo telemetria
+    # (`book_flow.py`). Fail-safe: un errore non deve fermare lo scan.
+    try:
+        import book_flow
+        book_flow.observe_books_from_scan(
+            books, {leg["market_hash"]: {"home": ev["teams"][0],
+                                         "away": ev["teams"][1],
+                                         "league": ev.get("league_label"),
+                                         "market": "1X2"}
+                    for ev in events for leg in ev["legs"]})
+    except Exception as e:
+        logger.debug("sx_signals: book_flow non disponibile (%s)", e)
 
     saved: List[dict] = []
     now_ms = _now_ms()

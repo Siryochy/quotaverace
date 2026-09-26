@@ -54,4 +54,14 @@ def _isolated_decision_io(tmp_path, monkeypatch):
     # il timing (in produzione vale il default ON). I test della strategia
     # T-60 (test_t60_breakers) lo accendono esplicitamente.
     monkeypatch.setattr("auto_bet.T60_EXECUTION_ONLY", False)
+    # Flusso dell'order book SX (26/09): stato e registro vivono sul volume e
+    # li scrivono `sx_signals.scan` e `multi_market.ingest` — che i test
+    # esercitano con provider finti. Senza isolamento la suite lascia
+    # `data/execution/book_flow_state.json` nel data dir VERO (osservato il
+    # 26/09: chiavi `mkt1|1`... scritte da test_sx_signals). Stessa lezione
+    # degli altri stati su volume: si spostano nella tmp del test.
+    monkeypatch.setattr("book_flow.STATE_PATH",
+                        tmp_path / "book_flow_state.json")
+    monkeypatch.setattr("book_flow.LOG_PATH",
+                        tmp_path / "book_flow_events.jsonl")
     yield

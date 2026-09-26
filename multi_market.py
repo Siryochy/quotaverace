@@ -122,11 +122,18 @@ SOURCE = "sxbet"
 #: Finestra dei fixture candidati (identica a sx_signals/auto_bet: 24h).
 HOURS_AHEAD = _env_float("MM_HOURS_AHEAD", 24.0)
 MIN_MINUTES_TO_START = _env_int("MM_MIN_MINUTES_TO_START", 15)
-MAX_RAW_MARKETS = _env_int("MM_MAX_RAW_MARKETS", 400)
+#: 26/09/2026 (direttiva "piu' volume su AH/OU"): 400 -> 600 mercati grezzi
+#: e 12 -> 20 linee per mercato. Si allarga SOLO la COPERTURA: fascia quota,
+#: edge, EV, gate di lega e soglie di liquidita' restano quelle congelate del
+#: 22/09 — piu' linee scansionate, gli STESSI criteri per giocarne una.
+#: Il costo e' tempo di scansione (letture pubbliche SX: zero chiavi, zero
+#: crediti, zero ordini) e il vincolo e' il runtime del giro, perche' il job
+#: `multi_market_job` gira ogni 15' con `max_instances=1`.
+MAX_RAW_MARKETS = _env_int("MM_MAX_RAW_MARKETS", 600)
 #: Quante linee diverse analizzare per mercato e partita. SX ne offre molte
 #: (OU 0.5..8.5): analizzarle tutte riempirebbe il ledger di righe che nessuno
 #: gioca. Le linee principali/gia' piu' liquide vengono prima.
-MAX_LINES_PER_MARKET = _env_int("MM_MAX_LINES_PER_MARKET", 12)
+MAX_LINES_PER_MARKET = _env_int("MM_MAX_LINES_PER_MARKET", 20)
 
 #: Soglie di liquidita' (STESSI nomi/env di sx_signals e auto_bet: la taratura
 #: del 21/09/2026 e' una sola in tutto il progetto: 20/4/20 USDC).
@@ -571,6 +578,19 @@ def ingest(provider: Any = None, *, types: Optional[Sequence[str]] = None,
             return summary
         hashes = [r["market_hash"] for r in records]
         books = _books_parallel(provider, hashes)
+        # Flusso del book (26/09): il rilevatore consuma i book GIA' scaricati
+        # — nessuna lettura in piu', nessun ordine, solo telemetria
+        # (`book_flow.py`). Fail-safe: non puo' fermare l'ingestione.
+        try:
+            import book_flow
+            book_flow.observe_books_from_scan(
+                books, {r["market_hash"]: {
+                    "home": r.get("home"), "away": r.get("away"),
+                    "league": r.get("league_label"),
+                    "market": r.get("market_type"), "line": r.get("line")}
+                    for r in records})
+        except Exception as exc:
+            logger.debug("multi_market: book_flow non disponibile (%s)", exc)
         rows, stats = build_quote_rows(records, books, observed=observed)
         summary["quotes"] = stats["built"]
         summary["skipped"] = (stats["rejected"] + stats["no_book"]

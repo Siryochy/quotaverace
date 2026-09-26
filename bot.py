@@ -876,6 +876,20 @@ def format_daily_report(since: str, label: str) -> str:
     except Exception as e:
         logger.warning("monitor liquidita' nel report fallito: %s", e)
 
+    # Flusso dell'order book SX (26/09): negli ultimi giri il book si e'
+    # riempito in modo anomalo su qualche esito ("smart money"). TELEMETRIA:
+    # nessun ordine parte da qui — e' il dato su cui decidere se collegarlo.
+    try:
+        from book_flow import summary as _bf_summary
+        _bf = _bf_summary(days=1)
+        if _bf["events"]:
+            _r = ", ".join(f"{k}: {v}" for k, v in
+                           sorted(_bf["by_reason"].items()))
+            lines.append(f"📈 *Flusso book SX:* {_bf['events']} ingressi "
+                         f"(+{_bf['total_delta_usdc']:.0f} USDC | {_r})")
+    except Exception as e:
+        logger.warning("flusso book nel report fallito: %s", e)
+
     # Audit qualita' dataset ML: un dataset sporco viene IMPARATO dal
     # modello come verita'. Controlla solo le previsioni/puntate chiuse
     # nel periodo e segnala i problemi (per tipo + primi esempi).
@@ -1942,6 +1956,41 @@ async def liquidity_monitor_job(context: ContextTypes.DEFAULT_TYPE = None):
         logger.warning("liquidity_monitor_job fallito: %s", e)
 
 
+async def book_flow_job(context: ContextTypes.DEFAULT_TYPE = None):
+    """Flusso dell'order book SX ogni 6h (26/09/2026).
+
+    Legge il registro degli INGRESSI di liquidita' (`book_flow.py`:
+    data/execution/book_flow_events.jsonl) e allerta admin+iscritti SOLO se
+    nelle ultime 24h il book si e' riempito in modo anomalo su qualche esito.
+    Lo stato viene SEMPRE loggato (telemetria continua); la notifica e' il
+    campanello, con anti-spam 1 alert/giorno (chiave BOOK_FLOW).
+
+    ⚠️ E' TELEMETRIA: il modulo non piazza ordini e non tocca i gate di
+    strategia. Zero costi API: legge solo il JSONL sul volume.
+    """
+    try:
+        from book_flow import summary, format_report
+        s = summary(days=1)
+        logger.info("book_flow: %d ingressi di liquidita' in 24h "
+                    "(+%.0f USDC, firme %s)", s["events"],
+                    s["total_delta_usdc"], s["by_reason"])
+        if not s["events"]:
+            return
+        from tracker import is_notified, mark_notified
+        from datetime import timezone as _tz, timedelta as _td
+        day = (datetime.now(_tz.utc) + _td(hours=2)).strftime("%Y-%m-%d")
+        text = format_report(days=1)
+        if not text or is_notified("BOOK_FLOW", day):
+            return
+        mark_notified("BOOK_FLOW", day)
+        if context is not None:
+            await _send_report_to_recipients(context, text)
+        else:
+            logger.warning("book_flow: %s", text.replace("\n", " | "))
+    except Exception as e:
+        logger.warning("book_flow_job fallito: %s", e)
+
+
 async def decision_compare_job(context: ContextTypes.DEFAULT_TYPE = None):
     """Confronto shadow catena ↔ corsia, ogni 6h (16/09/2026).
 
@@ -2697,6 +2746,10 @@ def main() -> None:
         # Zero costi API: legge solo il JSONL sul volume.
         job_queue.run_repeating(liquidity_monitor_job, interval=6 * 3600,
                                 first=600)
+        # Flusso dell'order book SX (26/09): ogni 6h legge il registro degli
+        # ingressi di liquidita' e allerta SOLO se ce ne sono nelle ultime
+        # 24h (anti-spam 1/giorno). TELEMETRIA: zero costi API, zero ordini.
+        job_queue.run_repeating(book_flow_job, interval=6 * 3600, first=750)
         # Confronto shadow catena ↔ corsia (16/09): ogni 6h confronta il ledger
         # delle decisioni con quello delle puntate (sola lettura, zero costi) e
         # allerta SOLO gli admin, 1 volta/giorno, quando ci sono divergenze.
