@@ -5761,3 +5761,34 @@ favourites_only, league_gate, liquidity_monitor, settlement_pause,
 secret_hygiene, decision_feed) + 356 (bot, market_diagnose, predictions,
 flow_measure, value_filter, market_calib, tier, decision_shadow/compare/
 limits/pipeline, web_api, reports, poisson_engine).
+
+**8) ESITO DEL DEPLOY E RISCONTRO DAI LOG (26/09/2026, 01:5x UTC).**
+Commit `ffd45be` -> deploy **`90e4b98f` SUCCESS**, poi env applicate -> redeploy
+**`15a06f17` SUCCESS**, health 200. Verificato SUL CONTAINER:
+`authorized = ('AH','OU')`, `live = ('AH',)` (l'OU non e' pronto),
+`CB2 soglia 25.0` non armato, `DRY_RUN False`, wallet `33.5535` (equity).
+Il gate ha misurato sui dati REALI esattamente il numero documentato:
+**8 chiusure su 20, ROI -10.95%** -> `ready=False`.
+
+**⚠️ 0 ORDINI, e nessuno e' un blocco tecnico: sono DUE gate fail-closed.**
+Il ciclo `auto_bet` (ogni 60s) logga, in UTC:
+`bankroll LIVE = equity 33.55 USDC` -> `1 pick multi-mercato dalle corsie live
+(AH)` -> `sx-L20214934 (Home +0.5) top-down SKIP [no_oracle]: Pinnacle
+assente/incompleto/stantio (fail-closed...)` -> `nessuna puntata (live) — 0
+candidati giocabili`.
+1. **`no_oracle`**: il pick e' Real Salt Lake-New England (MLS), ma la cache
+   Pinnacle MLS (`toa_soccer_usa_mls.json`) ha **24.6h** contro il limite
+   `PINNACLE_CACHE_MAX_AGE_H=24.0` -> oracolo stantio -> skip. **Tensione
+   STRUTTURALE da decidere**: la rotazione delle leghe ammesse e' a **2 giorni**
+   (25/09) mentre la freschezza dell'oracolo e' **24h**, quindi l'oracolo manca
+   per circa meta' del tempo. MLS e' `is_sport_due = True` -> il job delle 04:00
+   UTC lo rinfresca.
+2. **Fuori finestra T-60**: `t60_window` = `before`; la finestra esecutiva
+   (T-120..T-50) si apre alle **23:30 UTC** e chiude alle **00:40 UTC** del
+   27/09. Nessun ordine e' possibile prima, per costruzione.
+→ Il **primo tentativo reale** avverra' nella finestra di stanotte: a
+quell'ora la cache MLS rinfrescata dalle 04:00 avra' ~19.5h (< 24h) e l'oracolo
+sara' disponibile. Copertura ampliata confermata viva: `ingest 424 mercati ->
+664 quote salvate (30 fixture)`, `28 fixture con quote, 8 segnali giocabili
+(1 nelle corsie live)`. Crediti 392 (reset 01/10, consumo misurato 15/giorno su
+98/giorno sostenibili).
