@@ -2353,8 +2353,11 @@ async def multi_market_job(context: ContextTypes.DEFAULT_TYPE):
     i candidati con Poisson (push-aware) e li registra in `predictions`.
 
     Da li' il giro auto-bet (ogni minuto) legge i pick: **AH con ordini
-    reali** (ENABLE_LIVE_AH=1), **OU in shadow** (ENABLE_LIVE_OU=0): i
-    segnali OU si generano e si misurano, ma non diventano ordini.
+    reali** (ENABLE_LIVE_AH=1) e **OU con ordini reali solo quando e' PRONTO**
+    — l'interruttore `ENABLE_LIVE_OU` autorizza, il gate `ou_readiness`
+    abilita (>= OU_LIVE_MIN_CLOSURES chiusure dell'era nuova e ROI positivo,
+    direttiva del 26/09/2026). Finche' non e' pronto i segnali OU si generano,
+    si registrano e si misurano, ma non diventano ordini.
     Silenzioso se non ci sono segnali giocabili. MM_ENABLED=0 per spegnerlo.
     """
     if os.getenv("MM_ENABLED", "1") != "1":

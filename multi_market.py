@@ -37,14 +37,21 @@ Catena completa, in quattro passi:
 INTERRUTTORI LIVE PER MERCATO (direttiva del proprietario, 19/09/2026):
 
     ENABLE_LIVE_AH=1   -> l'Asian Handicap puo' piazzare ORDINI REALI;
-    ENABLE_LIVE_OU=0   -> l'Over/Under resta in SHADOW/TELEMETRIA: i segnali
-                          si generano, si registrano e si misurano, ma NON
-                          diventano ordini (il leak storico sul mercato OU,
-                          -6.8% su 924 bet, va rimisurato sulla corsia nuova
-                          prima di rimetterci denaro).
+    ENABLE_LIVE_OU=1   -> l'Over/Under viene AUTORIZZATO agli ordini reali.
 
-Gli interruttori vivono SOLO qui e `live_picks` e' l'unico punto che li legge:
-una corsia spente non puo' accendere ordini per distrazione di un chiamante.
+AUTORIZZAZIONE ≠ ORDINI (direttiva del proprietario, 26/09/2026).
+`authorized_markets()` e' cio' che l'operatore accende con gli interruttori;
+`live_markets()` e' cio' che puo' davvero ordinare ADESSO, perche' aggiunge i
+prerequisiti di fatto. L'OU ne ha uno: il gate di PRONTEZZA (`ou_readiness`) —
+servono almeno `OU_LIVE_MIN_CLOSURES` chiusure refertate dell'ERA nuova
+(`OU_LIVE_SINCE`; la corsia multi-mercato nasce il 19/09/2026) E un ROI
+POSITIVO. Il -10.95% su 8 chiusure misurato il 25/09/2026 non e' una base per
+rischiare denaro: l'OU continua a generare, registrare e saldare i segnali e
+parte da solo quando la soglia e' raggiunta — nessun intervento manuale.
+
+Gli interruttori vivono SOLO qui e `live_picks` legge `live_markets()`: una
+corsia spenta (o non pronta) non puo' accendere ordini per distrazione di un
+chiamante.
 
 Regole del modulo:
 
@@ -63,6 +70,7 @@ import logging
 import math
 import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -115,6 +123,22 @@ def _env_int(name: str, default: int) -> int:
 ENABLE_LIVE_AH = _env_flag("ENABLE_LIVE_AH", True)
 ENABLE_LIVE_OU = _env_flag("ENABLE_LIVE_OU", False)
 
+#: Gate di PRONTEZZA dell'Over/Under (26/09/2026). L'interruttore autorizza,
+#: il CAMPIONE abilita: sotto questa soglia (o con ROI non positivo) l'OU
+#: resta shadow anche con `ENABLE_LIVE_OU=1`. La misura del 25/09 (-10.95% su
+#: 8 chiusure post-19/09, linee intere alte con 3 push su 8) non e' una base
+#: per rischiare denaro reale su un bankroll di ~33 USDC.
+OU_LIVE_MIN_CLOSURES = _env_int("OU_LIVE_MIN_CLOSURES", 20)
+#: Inizio dell'era strategica da misurare: la corsia multi-mercato nasce il
+#: 19/09/2026, prima e' `fixture_engine` (pipeline RITIRATA: mescolarla
+#: significherebbe misurare una strategia che non gira piu').
+OU_LIVE_SINCE = os.getenv("OU_LIVE_SINCE", "2026-09-19")
+#: Memoria della prontezza: il giro auto-bet gira ogni 60s e `live_markets()`
+#: viene chiamata anche per ogni candidato — senza TTL il ledger locale si
+#: leggerebbe centinaia di volte al minuto per una misura che cambia solo a
+#: fine partita.
+OU_READY_TTL = _env_float("OU_READY_TTL", 60.0)
+
 #: Identita' del feed nel contratto (`gateway_id` non vuoto e' obbligatorio).
 GATEWAY_ID = os.getenv("MM_GATEWAY_ID", "sxbet-multi")
 SOURCE = "sxbet"
@@ -159,13 +183,113 @@ PLAYABLE_STATUSES: Tuple[str, ...] = PLAYABLE_TIERS
 MIN_RELIABLE_CLOSED = 30
 
 
-def live_markets() -> Tuple[str, ...]:
-    """I mercati che possono piazzare ORDINI REALI adesso (interruttori)."""
+def authorized_markets() -> Tuple[str, ...]:
+    """Mercati AUTORIZZATI dall'operatore (soli interruttori env).
+
+    E' l'INTENZIONE, non lo stato di fatto: per sapere cosa puo' piazzare un
+    ordine adesso si legge `live_markets()` (che aggiunge i prerequisiti).
+    """
     out = []
     if ENABLE_LIVE_AH:
         out.append("AH")
     if ENABLE_LIVE_OU:
         out.append("OU")
+    return tuple(out)
+
+
+#: Stato della memoria di prontezza. Modulo-livello di proposito (il TTL
+#: esiste per non leggere il ledger a ogni candidato); `reset_ou_ready_cache`
+#: lo azzera nei test, dove l'isolamento fra casi e' obbligatorio.
+_ou_ready_memo: Dict[str, Any] = {"ts": 0.0, "data": None}
+
+
+def reset_ou_ready_cache() -> None:
+    """Azzera la memoria di prontezza (i test la usano prima di ogni caso)."""
+    _ou_ready_memo["ts"] = 0.0
+    _ou_ready_memo["data"] = None
+
+
+def ou_readiness(*, rows: Optional[Iterable[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Prerequisito di fatto per gli ORDINI REALI sull'Over/Under.
+
+    Misura il campione dell'era STRATEGICA corrente (`OU_LIVE_SINCE`) e della
+    FASCIA QUOTA corrente (`ODDS_MIN`-`ODDS_MAX`), usando le stesse fonti del
+    resto del progetto: `tracker.filter_predictions` (definizione unica del
+    filtro d'era/fascia) e `PLAYABLE_TIERS` (definizione unica dei tier
+    giocabili). Solo le righe GIOCABILI e CHIUSE contano.
+
+    `ready` e' True solo se le chiusure sono almeno `OU_LIVE_MIN_CLOSURES` e
+    il ROI e' POSITIVO. FAIL-CLOSED: se la misura non e' disponibile (ledger
+    assente/corrotto) l'OU NON e' pronto — un'incertezza non apre gli ordini.
+
+    `rows` iniettabile: i test passano il campione senza toccare il DB, e il
+    report puo' riusare le righe che ha gia' letto.
+    """
+    out: Dict[str, Any] = {
+        "market": "OU", "since": OU_LIVE_SINCE,
+        "min_closures": OU_LIVE_MIN_CLOSURES, "closed": 0,
+        "roi": None, "ready": False, "reason": "",
+    }
+    try:
+        if rows is None:
+            from tracker import filter_predictions, get_predictions
+            rows = filter_predictions(
+                get_predictions(mercato="OU", limit=5000),
+                created_since=OU_LIVE_SINCE,
+                odds_min=ODDS_MIN, odds_max=ODDS_MAX)
+        playable = [r for r in (rows or []) if isinstance(r, dict)
+                    and str(r.get("status") or "").strip().lower()
+                    in PLAYABLE_STATUSES]
+        closed = [r for r in playable if r.get("esito_finale") is not None]
+        out["closed"] = len(closed)
+        profit = 0.0
+        for r in closed:
+            try:
+                profit += float(r.get("profit") or 0.0)
+            except (TypeError, ValueError):
+                pass
+        if closed:
+            out["roi"] = round(profit / len(closed), 4)
+        if len(closed) < OU_LIVE_MIN_CLOSURES:
+            out["reason"] = (f"campione insufficiente: {len(closed)} chiusure "
+                             f"su {OU_LIVE_MIN_CLOSURES} richieste "
+                             f"(era dal {OU_LIVE_SINCE})")
+        elif (out["roi"] or 0.0) <= 0:
+            out["reason"] = (f"ROI {out['roi'] * 100:+.2f}% non positivo su "
+                             f"{len(closed)} chiusure")
+        else:
+            out["ready"] = True
+            out["reason"] = (f"soglia raggiunta: {len(closed)} chiusure, "
+                             f"ROI {out['roi'] * 100:+.2f}%")
+    except Exception as exc:
+        out["reason"] = f"misura non disponibile ({exc})"
+    return out
+
+
+def ou_live_ready(*, refresh: bool = False) -> bool:
+    """True se l'OU puo' piazzare ordini reali (memoria TTL `OU_READY_TTL`)."""
+    now = time.monotonic()
+    cached = _ou_ready_memo.get("data")
+    if not refresh and cached is not None and \
+            (now - float(_ou_ready_memo.get("ts") or 0.0)) < OU_READY_TTL:
+        return bool(cached.get("ready"))
+    data = ou_readiness()
+    _ou_ready_memo["ts"] = now
+    _ou_ready_memo["data"] = data
+    return bool(data.get("ready"))
+
+
+def live_markets() -> Tuple[str, ...]:
+    """I mercati che possono piazzare ORDINI REALI ADESSO (definizione unica).
+
+    = mercati AUTORIZZATI ∩ prerequisiti di fatto. L'AH non ne ha oltre
+    all'interruttore; l'OU ha il gate di prontezza. Ogni chiamante (ordini,
+    report, log) legge QUESTA funzione, cosi' una corsia non puo' essere
+    accesa in un percorso e spenta in un altro.
+    """
+    out = list(authorized_markets())
+    if "OU" in out and not ou_live_ready():
+        out.remove("OU")
     return tuple(out)
 
 
@@ -1184,8 +1308,16 @@ def shadow_report(*, now: Optional[datetime] = None, since: Any = None,
     campione piccolo e' rumore, e il report lo dichiara invece di lasciarlo
     leggere come una misura. Zero crediti: legge solo il ledger locale.
     """
+    # La prontezza si misura UNA volta e il report ne deriva le corsie live:
+    # leggere due volte (una per `live_markets`, una per il blocco) potrebbe
+    # far comparire nel report una corsia diversa da quella che ordina.
+    authorized = list(authorized_markets())
+    readiness = ou_readiness()
+    live_now = [m for m in authorized if m != "OU" or readiness.get("ready")]
     report: Dict[str, Any] = {
-        "live_markets": list(live_markets()), "markets": {},
+        "live_markets": live_now, "markets": {},
+        "authorized_markets": authorized,
+        "ou_readiness": readiness,
         "playable_statuses": list(PLAYABLE_STATUSES),
         "min_reliable_closed": MIN_RELIABLE_CLOSED,
     }
@@ -1285,6 +1417,13 @@ def format_report(data: Optional[Dict[str, Any]] = None) -> str:
     """
     rep = data if isinstance(data, dict) else shadow_report()
     live = rep.get("live_markets") or []
+    # Un report esterno/vecchio puo' non dichiarare l'autorizzazione: in quel
+    # caso le corsie live SONO l'autorizzazione (nessuna informazione persa).
+    authorized = rep.get("authorized_markets")
+    authorized = list(authorized) if isinstance(authorized, (list, tuple)) \
+        else list(live)
+    readiness = rep.get("ou_readiness")
+    readiness = readiness if isinstance(readiness, dict) else {}
     lines = ["📐 MULTI-MERCATO (OU/AH)",
              "Corsie LIVE: " + (", ".join(live) or "nessuna (tutto shadow)"),
              "Split per stato: giocabili "
@@ -1292,6 +1431,12 @@ def format_report(data: Optional[Dict[str, Any]] = None) -> str:
              + " | scartati rejected | soglia affidabilita' "
              + f"{rep.get('min_reliable_closed', MIN_RELIABLE_CLOSED)} chiusure",
              _filter_line(rep)]
+    # Dichiarare il PERCHE' una corsia autorizzata non ordina: senza questa
+    # riga "OU in shadow" e "OU non pronto" sono indistinguibili.
+    if "OU" in authorized and "OU" not in live:
+        lines.append("⏳ OU autorizzato ma NON pronto agli ordini: "
+                     + str(readiness.get("reason")
+                           or "prerequisito non soddisfatto"))
     for market_type, entry in (rep.get("markets") or {}).items():
         # Un riepilogo malformato (input esterno, JSON vecchio) non deve
         # rompere il report: si degrada la singola sezione, non il comando.
@@ -1321,7 +1466,8 @@ if __name__ == "__main__":                        # pragma: no cover
                         format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description="Multi-mercato OU/AH (SX Bet)")
     parser.add_argument("command", nargs="?", default="report",
-                        choices=("ingest", "scan", "picks", "report", "btts"))
+                        choices=("ingest", "scan", "picks", "report", "btts",
+                                 "ou"))
     parser.add_argument("--json", action="store_true")
     # Filtro d'ERA e di FASCIA QUOTA (25/09/2026): il report senza filtro
     # mescola la pipeline ritirata (< 19/09, quota media ~2.25) con quella in
@@ -1349,6 +1495,13 @@ if __name__ == "__main__":                        # pragma: no cover
         probes = probe_watched_markets()
         print(_json.dumps(probes, indent=2, default=str) if args.json
               else "sorveglianza mercati non modellati: " + format_probe(probes))
+    elif args.command == "ou":
+        # Quando l'OU partira' da solo: la soglia e il campione corrente,
+        # senza toccare gli ordini (sola lettura del ledger).
+        ready = ou_readiness()
+        print(_json.dumps(ready, indent=2, default=str) if args.json
+              else ("OU: PRONTO (ordini reali)" if ready.get("ready")
+                    else "OU: NON pronto (shadow)") + f" — {ready.get('reason')}")
     else:
         data = shadow_report(since=args.since, odds_min=args.odds_min,
                              odds_max=args.odds_max)

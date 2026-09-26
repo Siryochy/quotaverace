@@ -100,7 +100,13 @@ export default defineRailway(() => {
     // rimisurato sulla corsia nuova prima di rimetterci denaro). preserve()
     // perche' `railway config apply` non deve spegnere l'AH per sbaglio.
     ENABLE_LIVE_AH: preserve(),
+    // AUTORIZZAZIONE ≠ ORDINI (26/09/2026): con ENABLE_LIVE_OU=1 l'OU e'
+    // autorizzato, ma ordina solo quando il gate di PRONTEZZA lo abilita
+    // (>= OU_LIVE_MIN_CLOSURES chiusure giocabili dell'era e ROI positivo).
     ENABLE_LIVE_OU: preserve(),
+    OU_LIVE_MIN_CLOSURES: preserve(),
+    OU_LIVE_SINCE: preserve(),
+    OU_READY_TTL: preserve(),
     // Finestra/limiti della corsia multi-mercato. Default di codice dal
     // 26/09: 24h, 20 linee per mercato, 600 mercati per discovery (prima
     // 12/400). Si allarga solo la COPERTURA OU/AH: fascia quota, edge, EV e
@@ -113,7 +119,8 @@ export default defineRailway(() => {
     MM_GATEWAY_ID: preserve(),
     // Flusso dell'order book SX (26/09): rilevatore di INGRESSI di liquidita'
     // sui book GIA' scaricati da sx_signals/multi_market. TELEMETRIA — non
-    // piazza ordini e non tocca i gate di strategia.    // SX_BOOK_LEVELS_KEPT = livelli conservati per esito in `sx_signals._book`.
+    // piazza ordini e non tocca i gate di strategia.
+    // SX_BOOK_LEVELS_KEPT = livelli conservati per esito in `sx_signals._book`.
     SX_BOOK_LEVELS_KEPT: preserve(),
     BOOK_FLOW_MIN_SIZE_USDC: preserve(),
     BOOK_FLOW_MIN_JUMP_PCT: preserve(),

@@ -64,4 +64,12 @@ def _isolated_decision_io(tmp_path, monkeypatch):
                         tmp_path / "book_flow_state.json")
     monkeypatch.setattr("book_flow.LOG_PATH",
                         tmp_path / "book_flow_events.jsonl")
+    # Gate di prontezza dell'Over/Under (26/09): la memoria vive a livello di
+    # MODULO e sopravvive fra i test dello stesso processo, mentre il ledger
+    # no (ogni test ha il suo DB temporaneo). Senza reset un caso che semina
+    # un campione "pronto" lascerebbe l'OU pronto per TUTTI i successivi, e
+    # `live_markets()` risponderebbe in base all'ultimo test eseguito.
+    import multi_market as _mm
+    _mm.reset_ou_ready_cache()
     yield
+    _mm.reset_ou_ready_cache()

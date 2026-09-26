@@ -5685,3 +5685,79 @@ un'asserzione separata sul default spento. **Non eseguito** (backlog).
 
 **7) Stato git**: `main` = `49b7f9e`, unico ramo su origin, nessuna env nuova
 (nessuna modifica a `.railway/railway.ts` in questo giro).
+
+### Live Mode: CB2 allargato a 25 USDC + gate di PRONTEZZA dell'OU (26/09/2026)
+
+Direttiva del proprietario: "esecuzione reale immediata" — dry-run spento,
+ordini effettivi sbloccati sia per le linee standard sia per la copertura
+ampliata AH/OU, deploy e riscontro coi log. Prima di applicare sono state poste
+due domande (denaro reale + conflitto fra due direttive); risposte registrate:
+**CB2 a 25 USDC** e **OU live solo dopo N chiusure**.
+
+**1) DRY-RUN: GIA' SPENTO, NESSUNA AZIONE.** Verificato sul container:
+`auto_bet.DRY_RUN` = **False**, `kill_switch_status()` =
+`{effective: 'live', provider_ready: True}`, provider = `SxBetProvider` (mai
+`DryRun`). `AUTO_BET_DRY_RUN` non e' impostata su Railway -> vale il default di
+codice (OFF). La direttiva "disattiva il dry-run" era quindi **gia' soddisfatta**;
+`top_down_ev` attivo di default, `TOP_DOWN_BYPASS` spento (default del 26/09).
+
+**2) CB2 ALLARGATO A 25 USDC** (`T60_KILL_WALLET_USDC=25`, env Railway +
+`preserve()`). Equity reale misurata: `33.5535` (liberi 33.5535 + in gioco
+0.00), CB2 non armato, `daily_stop` solo riferimento (`basis_key live_equity`).
+Con la soglia a 30 il margine era **3.5 USDC = ~3 bet perse da 1 USDC** prima
+dell'arresto; a **25** il margine diventa **~8.5 USDC (~8 bet)** e resta una rete
+di sicurezza reale (~75% del capitale protetto dal floor). Scelta del
+proprietario fra 15/20/25/30.
+
+**3) AUTORIZZAZIONE ≠ ORDINI — gate di PRONTEZZA dell'OU (`multi_market.py`).**
+Conflitto esplicito: la direttiva "abilita AH/OU subito" contraddiceva il veto
+del 25/09 ("OU live solo con >= 30 chiusure post-19/09 e ROI positivo"); la
+misura reale e' **8 chiusure, ROI -10.95%** (linee intere alte, 3 push su 8).
+Il proprietario ha scelto la **soglia intermedia: 20 chiusure**. Implementato:
+- `authorized_markets()` = cio' che gli interruttori ACCENDONO (intenzione);
+- `ou_readiness()` = misura del campione dell'ERA (`OU_LIVE_SINCE` 19/09/2026) e
+  della FASCIA QUOTA (`ODDS_MIN`-`ODDS_MAX`), sulle sole righe GIOCABILI e
+  CHIUSE (`tracker.filter_predictions` + `PLAYABLE_TIERS`: definizioni uniche
+  riusate, mai copiate). `ready` solo con >= `OU_LIVE_MIN_CLOSURES` (20)
+  chiusure **E** ROI positivo; `reason` sempre dichiarato;
+- `ou_live_ready()` con memoria TTL (`OU_READY_TTL` 60s: il giro gira ogni 60s e
+  `live_markets()` e' chiamata anche per candidato), `reset_ou_ready_cache()`;
+- `live_markets()` = autorizzati ∩ pronti. **Definizione unica** letta da
+  `live_picks`, `shadow_report` e da `auto_bet` per i log: una corsia non puo'
+  essere accesa in un percorso e spenta in un altro. L'OU **parte da solo**
+  quando la soglia e' raggiunta — nessun intervento manuale.
+- FAIL-CLOSED: se la misura non e' disponibile (ledger assente/corrotto) l'OU
+  **non** e' pronto; un'incertezza non apre ordini reali.
+- Il report dichiara sempre il PERCHE': `authorized_markets` + `ou_readiness` in
+  `shadow_report`, riga `⏳ OU autorizzato ma NON pronto agli ordini: <motivo>` in
+  `format_report` (senza, "OU in shadow" e "OU non pronto" sono indistinguibili)
+  e nuovo comando CLI **`venv/bin/python multi_market.py ou [--json]`**.
+
+**4) COPERTURA AH/OU (gia' deployata il 26/09, commit `01cd125`).** Discovery
+600 mercati grezzi (era 400) e 20 linee per mercato (era 12): si allarga SOLO la
+copertura, fascia quota/edge/EV/gate di lega restano quelli congelati del 22/09.
+
+**5) ENV.** Su Railway: `T60_KILL_WALLET_USDC=25`, `ENABLE_LIVE_OU=1` (autorizza;
+il gate decide), `OU_LIVE_MIN_CLOSURES=20`. Dichiarate in `preserve()` di
+`.railway/railway.ts` (`OU_LIVE_MIN_CLOSURES`, `OU_LIVE_SINCE`, `OU_READY_TTL`
+accanto a `ENABLE_LIVE_OU`). ⚠️ `ENABLE_LIVE_OU=1` **non** significa ordini OU:
+con 8 chiusure su 20 richieste l'OU resta shadow e lo dichiara nei log.
+
+**6) ISOLAMENTO NEI TEST.** `conftest.py` azzera la memoria di prontezza
+(prima e dopo ogni test): e' stato a livello di MODULO e sopravvive fra i test
+dello stesso processo, mentre il ledger no (ogni test ha il suo DB temporaneo) —
+senza reset un caso "pronto" avrebbe abilitato l'OU per tutti i successivi.
+
+**7) TEST.** `test_multi_market.py` **92 verdi** (11 nuovi in
+`TestProntezzaOU`: autorizzazione/prontezza distinte, OU autorizzato ma non
+pronto -> `live_picks() == []`, abilitazione automatica al raggiungimento della
+soglia, campione insufficiente, ROI non positivo, soglia da env, solo i
+giocabili dell'era contano, fail-closed su DB non leggibile, memoria+reset,
+report che dichiara il motivo, comando CLI esposto e modulo senza `_live_fill(`/
+`place_order(`). `test_ou_live_solo_col_suo_interruttore` isola la prontezza
+(`ou_live_ready`) per non mescolare due responsabilita'. Regressioni verdi: 391
+(multi_market, sx_signals, book_flow, auto_bet x2, t60_breakers, risk_guards,
+favourites_only, league_gate, liquidity_monitor, settlement_pause,
+secret_hygiene, decision_feed) + 356 (bot, market_diagnose, predictions,
+flow_measure, value_filter, market_calib, tier, decision_shadow/compare/
+limits/pipeline, web_api, reports, poisson_engine).

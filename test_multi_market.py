@@ -328,6 +328,9 @@ class TestCorsiaOrdini:
     def test_ou_live_solo_col_suo_interruttore(self, db, monkeypatch):
         monkeypatch.setattr(mm, "ENABLE_LIVE_AH", False)
         monkeypatch.setattr(mm, "ENABLE_LIVE_OU", True)
+        # L'interruttore AUTORIZZA; il prerequisito di fatto lo si isola qui
+        # (il gate vero e' coperto da `TestProntezzaOU`).
+        monkeypatch.setattr(mm, "ou_live_ready", lambda *a, **k: True)
         _seed_prediction(FIXTURE, "OU", "Under 3.25")
         picks = mm.live_picks()
         assert [p["mercato"] for p in picks] == ["OU"]
@@ -361,6 +364,102 @@ class TestCorsiaOrdini:
         pick = mm.live_picks()[0]
         # 'Away +0.75' -> linea SX -0.75 (punto di vista di teamOne).
         assert pick["market_line"] == -0.75 and pick["order_side"] == "away"
+
+
+# ---------------------------------------------------------------------------
+# 5b. Gate di PRONTEZZA dell'Over/Under (direttiva 26/09/2026)
+# ---------------------------------------------------------------------------
+
+class TestProntezzaOU:
+    """L'interruttore AUTORIZZA, il campione ABILITA.
+
+    L'OU non piazza ordini reali finche' l'era nuova (`OU_LIVE_SINCE`, la
+    corsia multi-mercato nasce il 19/09/2026) non ha almeno
+    `OU_LIVE_MIN_CLOSURES` chiusure GIOCABILI e un ROI POSITIVO. La misura
+    del 25/09 (-10.95% su 8 chiusure) non e' una base per rischiare denaro
+    reale su un bankroll di ~33 USDC.
+    """
+
+    def test_autorizzazione_e_prontezza_sono_distinte(self, monkeypatch):
+        monkeypatch.setattr(mm, "ENABLE_LIVE_AH", False)
+        monkeypatch.setattr(mm, "ENABLE_LIVE_OU", True)
+        monkeypatch.setattr(mm, "ou_live_ready", lambda *a, **k: False)
+        assert mm.authorized_markets() == ("OU",)   # intenzione
+        assert mm.live_markets() == ()               # stato di fatto
+
+    def test_ou_autorizzato_ma_non_pronto_non_ordina(self, db, monkeypatch):
+        monkeypatch.setattr(mm, "ENABLE_LIVE_AH", False)
+        monkeypatch.setattr(mm, "ENABLE_LIVE_OU", True)
+        monkeypatch.setattr(mm, "ou_live_ready", lambda *a, **k: False)
+        _seed_prediction(FIXTURE, "OU", "Over 2.5")
+        assert mm.live_markets() == ()
+        assert mm.live_picks() == []       # nessun ordine reale sull'OU
+
+    def test_ou_pronto_abilita_da_solo(self, db, monkeypatch):
+        monkeypatch.setattr(mm, "ENABLE_LIVE_AH", False)
+        monkeypatch.setattr(mm, "ENABLE_LIVE_OU", True)
+        _seed_prediction(FIXTURE, "OU", "Over 2.5")
+        _seed(db, "OU", "value", ["won"] * mm.OU_LIVE_MIN_CLOSURES)
+        assert mm.ou_readiness()["ready"] is True
+        assert mm.live_markets() == ("OU",)
+
+    def test_campione_insufficiente(self, db):
+        _seed(db, "OU", "value", ["won"] * (mm.OU_LIVE_MIN_CLOSURES - 1))
+        r = mm.ou_readiness()
+        assert r["closed"] == mm.OU_LIVE_MIN_CLOSURES - 1
+        assert r["ready"] is False
+        assert "campione insufficiente" in r["reason"]
+
+    def test_roi_non_positivo_non_abilita(self, db):
+        _seed(db, "OU", "value", ["lost"] * (mm.OU_LIVE_MIN_CLOSURES + 5))
+        r = mm.ou_readiness()
+        assert r["ready"] is False
+        assert "non positivo" in r["reason"]
+
+    def test_soglia_da_env(self, db, monkeypatch):
+        monkeypatch.setattr(mm, "OU_LIVE_MIN_CLOSURES", 2)
+        _seed(db, "OU", "value", ["won", "won"])
+        assert mm.ou_readiness()["ready"] is True
+
+    def test_solo_i_giocabili_dell_era_contano(self, db):
+        # 30 chiusure POSITIVE ma del tier `rejected`: mai giocate, quindi
+        # non possono abilitare denaro reale.
+        _seed(db, "OU", "rejected", ["won"] * 30)
+        r = mm.ou_readiness()
+        assert r["closed"] == 0 and r["ready"] is False
+
+    def test_fail_closed_su_db_non_leggibile(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(tracker, "DB_PATH", tmp_path / "nope" / "x.db")
+        monkeypatch.setattr(mm, "OU_LIVE_MIN_CLOSURES", 1)
+        r = mm.ou_readiness()
+        assert r["ready"] is False        # mai un'eccezione, mai un via libera
+        assert r["reason"]
+
+    def test_memoria_e_reset(self, db, monkeypatch):
+        monkeypatch.setattr(mm, "OU_LIVE_MIN_CLOSURES", 1)
+        _seed(db, "OU", "value", ["won"])
+        assert mm.ou_live_ready() is True
+        assert mm.ou_live_ready() is True          # riuso della memoria (TTL)
+        mm.reset_ou_ready_cache()
+        assert mm.ou_live_ready() is True          # ricalcolo dal ledger
+
+    def test_report_dichiara_il_motivo(self, db, monkeypatch):
+        monkeypatch.setattr(mm, "ENABLE_LIVE_AH", True)
+        monkeypatch.setattr(mm, "ENABLE_LIVE_OU", True)
+        rep = mm.shadow_report()
+        assert rep["authorized_markets"] == ["AH", "OU"]
+        assert "OU" not in rep["live_markets"]     # autorizzato ma non pronto
+        assert rep["ou_readiness"]["ready"] is False
+        assert "OU autorizzato ma NON pronto" in mm.format_report(rep)
+
+    def test_comando_cli_esposto_e_senza_ordini(self):
+        """Il comando `ou` esiste e il modulo non piazza ORDINI da nessuna
+        parte: la prontezza si legge, non si forza."""
+        import pathlib
+        src = pathlib.Path(mm.__file__).read_text()
+        assert "\"ou\"" in src and "ou_readiness()" in src
+        for forbidden in ("_live_fill(", "place_order("):
+            assert forbidden not in src, f"{forbidden} nel modulo multi-mercato"
 
 
 # ---------------------------------------------------------------------------
